@@ -79,8 +79,7 @@ def create_access_token(email: str, user_id: str, expires_delta: timedelta):
 
 
 async def get_current_user(request: Request):
-    token = request.cookies.get("access_token")
-
+    token = request.headers.get('Authorization')
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
