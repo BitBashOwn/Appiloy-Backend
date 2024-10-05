@@ -37,10 +37,40 @@ def create_reset_password_token(user: User):
     return encoded_jwt
 
 
+# def send_confirmation_email(to_email: str, token: str):
+#     subject = "Confirm your Email"
+#     body = f"Click the following link to confirm your email: http://localhost:5173/verify-email/{
+#         token}"
+
+#     msg = MIMEText(body)
+#     msg['Subject'] = subject
+#     msg['From'] = "appilot"
+#     msg['To'] = to_email
+
+#     with smtplib.SMTP("smtp.gmail.com", 587) as server:
+#         server.starttls()
+#         server.login(email, email_password)
+#         server.send_message(msg)
+
+
+# def send_password_email_email(to_email: str, token: str):
+#     subject = "Reset Password"
+#     body = f"Click the following link to resest your password: http://localhost:5173/reset-password/{
+#         token}"
+
+#     msg = MIMEText(body)
+#     msg['Subject'] = subject
+#     msg['From'] = "appilot"
+#     msg['To'] = to_email
+
+#     with smtplib.SMTP("smtp.gmail.com", 587) as server:
+#         server.starttls()
+#         server.login(email, email_password)
+#         server.send_message(msg)
+
 def send_confirmation_email(to_email: str, token: str):
     subject = "Confirm your Email"
-    body = f"Click the following link to confirm your email: http://localhost:5173/verify-email/{
-        token}"
+    body = f"Click the following link to confirm your email: http://localhost:5173/verify-email/{token}"
 
     msg = MIMEText(body)
     msg['Subject'] = subject
@@ -55,8 +85,7 @@ def send_confirmation_email(to_email: str, token: str):
 
 def send_password_email_email(to_email: str, token: str):
     subject = "Reset Password"
-    body = f"Click the following link to resest your password: http://localhost:5173/reset-password/{
-        token}"
+    body = f"Click the following link to reset your password: http://localhost:5173/reset-password/{token}"
 
     msg = MIMEText(body)
     msg['Subject'] = subject
@@ -67,6 +96,7 @@ def send_password_email_email(to_email: str, token: str):
         server.starttls()
         server.login(email, email_password)
         server.send_message(msg)
+
 
 
 def create_access_token(email: str, user_id: str, expires_delta: timedelta):
