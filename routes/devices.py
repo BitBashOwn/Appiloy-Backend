@@ -19,7 +19,7 @@ class deleteRequest(BaseModel):
 async def get_devices(current_user: dict = Depends(get_current_user)):
     # print(current_user)
     # data = list(devices_collection.find({"email": current_user.get("email")}, {"_id": 0}))
-    data = list(db["devices"].find({"email": current_user.get("email")}))
+    data = list(db["devices"].find({"email":current_user.get("email")},{"_id":0}))
 
     # for device in data:
     #     if '_id' in device:
