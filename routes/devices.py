@@ -41,7 +41,7 @@ def convert_object_id(data):
 async def get_devices(current_user: dict = Depends(get_current_user)):
 
     # Query the devices for the current user from MongoDB
-    data = list(db["devices"].find({"email": current_user.get("email")},{"_id":0}))
+    data = list(db["devices"].find({"email": current_user.get("email")}))
 
     # Convert ObjectId fields to strings for JSON serialization
     data = convert_object_id(data)
