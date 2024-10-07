@@ -35,7 +35,7 @@ async def delete_devices(devices: deleteRequest, current_user: dict = Depends(ge
     print("Devices to delete:", devices.devices)
     # object_ids = [ObjectId(device_id) for device_id in devices.devices]
     # result = devices_collection.delete_many({"_id": {"$in": object_ids}})
-    result = devices_collection.delete_many({"id": {"$in": devices.devices}})
+    result = db["devices"].delete_many({"id": {"$in": devices.devices}})
     print(result)
 
     return JSONResponse(content={"message": "Devices deleted successfully"}, status_code=200)
