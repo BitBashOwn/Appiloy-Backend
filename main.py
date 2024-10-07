@@ -52,6 +52,7 @@ from routes.routes import router
 from routes.login import login_router
 from routes.devices import devices_router
 from routes.passwordReset import reset_router
+from routes.deviceRegistration import device_router
 import uvicorn
 from routes.bots import bots_router
 from routes.tasks import tasks_router
@@ -84,6 +85,7 @@ app.include_router(reset_router)
 app.include_router(devices_router)
 app.include_router(bots_router)
 app.include_router(tasks_router)
+app.include_router(device_router) # Added by "Sohaib"
 
 
 if __name__ == "__main__":
