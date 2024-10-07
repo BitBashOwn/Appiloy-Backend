@@ -1,4 +1,3 @@
-
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from models.users import User

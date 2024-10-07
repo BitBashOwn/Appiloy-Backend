@@ -1,28 +1,33 @@
-from pydantic import BaseModel, Field, HttpUrl
-from typing import Optional, List
+from pydantic import BaseModel, Field, HttpUrl, UUID4
+from typing import Optional, List, Dict, Any
 from config.database import db
+
 
 class FeatureModel(BaseModel):
     heading: str
     description: str
 
+
 class FAQModel(BaseModel):
     question: str
     answer: str
 
+
 class BotModel(BaseModel):
-    id: Optional[str] = Field(None, alias="_id")  
+    id: Optional[UUID4] = Field(None, description="Unique identifier generated as UUID")
     botName: str
     description: str
     noOfUsers: int
-    os: List[str]  
+    os: List[str]
     readme: str
-    feature: List[FeatureModel]  
-    demoLink: HttpUrl  
-    DocumentationLink: HttpUrl  
-    faqs: List[FAQModel]  
+    feature: List[FeatureModel]
+    demoLink: HttpUrl
+    DocumentationLink: HttpUrl
+    faqs: List[FAQModel]
     issues: HttpUrl
     imagePath: str
+    platform: str
+    inputs: Dict[str, Any]
 
 
 bots_collection = db['bots']

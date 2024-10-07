@@ -9,6 +9,7 @@ from models.users import User
 from jose import JWTError, jwt
 import os
 from dotenv import load_dotenv
+import uuid
 
 load_dotenv()
 
@@ -19,6 +20,9 @@ email = os.getenv('EMAIL')
 email_password = os.getenv('EMAIL_PASSWORD')
 oauth2_bearer = OAuth2PasswordBearer(tokenUrl="token")
 
+
+def generate_unique_id():
+    return str(uuid.uuid4())
 
 def create_confirmation_token(user: User):
     expire = datetime.utcnow() + timedelta(minutes=expire_time)
@@ -35,6 +39,7 @@ def create_reset_password_token(user: User):
                           "email": user_data.email}, "exp": expire}
     encoded_jwt = jwt.encode(to_encode, secret_key, algorithm=algo)
     return encoded_jwt
+
 
 
 # def send_confirmation_email(to_email: str, token: str):

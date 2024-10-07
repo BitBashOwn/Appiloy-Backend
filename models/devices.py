@@ -1,12 +1,13 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, UUID4
 from typing import Optional, List
 from config.database import db
 from datetime import datetime
 
 
 class User(BaseModel):
-    id: Optional[str] = Field(None, alias="_id")
+    id: Optional[UUID4] = Field(None, description="Unique identifier generated as UUID")
     deviceName: str
+    email: str
     model: str
     botName: List[str]
     status: bool
