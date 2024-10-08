@@ -38,7 +38,8 @@ async def login(request: LoginRequest):
         # Create a JWT token
         access_token = create_access_token(
             email=existing_user["email"],
-            user_id=user_id
+            user_id=user_id,
+            expires_delta=timedelta(minutes=60)
         )
 
         # Return JSON response
