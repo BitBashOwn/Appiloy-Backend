@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from models.tasks import taskModel, tasks_collection
 from models.bots import bots_collection
 from bson import ObjectId
@@ -7,10 +7,21 @@ from jose import JWTError
 from utils.utils import generate_unique_id, get_current_user
 from datetime import datetime
 from pydantic import BaseModel
+from typing import List
 
 
 class deleteRequest(BaseModel):
     tasks: list
+
+
+class inputsSaveRequest(BaseModel):
+    inputs: list
+    id: str
+
+
+class devicesSaveRequest(BaseModel):
+    devices: list
+    id: str
 
 
 tasks_router = APIRouter()
@@ -21,12 +32,14 @@ async def create_Task(task: taskModel):
     try:
         task_dict = task.dict(by_alias=True)
         task_id = generate_unique_id()
-        bot = bots_collection.find_one({"id": task.bot}, {"inputs": 1})
+        bot = bots_collection.find_one({"id": task.bot}, {"inputs": 1, "schedules": 1})
         task_dict.update({
             "id": task_id,
             "inputs": bot.get("inputs"),
             "LastModifiedDate": datetime.utcnow().timestamp(),
-            "activationDate":  datetime.utcnow()
+            "activationDate":  datetime.utcnow(),
+            "deviceIds": [],
+            "schedules": bot.get("schedules")
         })
         # task_dict["bot"] = ObjectId(task_dict["bot"])
         result = tasks_collection.insert_one(task_dict)
@@ -48,7 +61,7 @@ async def get_Task(id: str):
             task['activationDate'] = task['activationDate'].isoformat()
         # Fetch associated bot details
         bot = bots_collection.find_one({"id": task.get("bot")}, {
-                                       "_id": 0, "platform": 1, "botName": 1, "imagePath": 1, "inputs": 1, "id": 1})
+                                       "_id": 0, "platform": 1, "botName": 1, "imagePath": 1, "id": 1})
         if not bot:
             raise HTTPException(status_code=404, detail="Bot not found")
 
@@ -91,3 +104,33 @@ async def delete_tasks(tasks: deleteRequest, current_user: dict = Depends(get_cu
         {"id": {"$in": tasks.tasks}, "email": current_user.get("email")})
 
     return JSONResponse(content={"message": "Devices deleted successfully"}, status_code=200)
+
+
+@tasks_router.get("/get-task-fields")
+def get_task_fields(id: str, fields: List[str] = Query(...), current_user: dict = Depends(get_current_user)):
+    try:
+        projection = {field: 1 for field in fields}
+        projection.update({"_id": 0})
+        task = tasks_collection.find_one(
+            {"id": id, "email": current_user.get('email')}, projection)
+        if task:
+            # bot['_id'] = str(bot['_id'])
+            return JSONResponse(content={"message": "successfully fetched data", "data": task}, status_code=200)
+    except Exception as e:
+        return JSONResponse(content={"message": "could not fetch data", "error": str(e)}, status_code=500)
+
+
+@tasks_router.post("/save-inputs")
+async def save_task_inputs(inputs: inputsSaveRequest, current_user: dict = Depends(get_current_user)):
+    result = tasks_collection.update_one({"id": inputs.id, "email": current_user.get(
+        "email")}, {"$set": {"inputs": inputs.inputs}})
+
+    return JSONResponse(content={"message": "Inputs updated successfully"}, status_code=200)
+
+
+@tasks_router.post("/save-device")
+async def save_task_devices(data: devicesSaveRequest, current_user: dict = Depends(get_current_user)):
+    result = tasks_collection.update_one({"id": data.id, "email": current_user.get(
+        "email")}, {"$set": {"inputs": data.devices}})
+
+    return JSONResponse(content={"message": "devices updated successfully"}, status_code=200)

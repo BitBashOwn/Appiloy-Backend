@@ -14,7 +14,8 @@ class FAQModel(BaseModel):
 
 
 class BotModel(BaseModel):
-    id: Optional[UUID4] = Field(None, description="Unique identifier generated as UUID")
+    id: Optional[UUID4] = Field(
+        None, description="Unique identifier generated as UUID")
     botName: str
     description: str
     noOfUsers: int
@@ -24,7 +25,8 @@ class BotModel(BaseModel):
     faqs: List[FAQModel]
     imagePath: str
     platform: str
-    inputs: Dict[str, Any]
+    inputs: List[Dict[str, Any]]
+    schedules: List[Dict[str, Any]]
     development: bool
 
 

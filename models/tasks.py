@@ -15,6 +15,7 @@ class taskModel(BaseModel):
     inputs: Optional[Dict[str, Any]] = None
     LastModifiedDate: Optional[datetime] = None
     activationDate: Optional[datetime] = None
+    deviceIds: Optional[List[str]] = Field(default_factory=list)
 
 
 tasks_collection = db['tasks']
