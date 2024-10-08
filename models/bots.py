@@ -21,13 +21,11 @@ class BotModel(BaseModel):
     os: List[str]
     readme: str
     feature: List[FeatureModel]
-    demoLink: HttpUrl
-    DocumentationLink: HttpUrl
     faqs: List[FAQModel]
-    issues: HttpUrl
     imagePath: str
     platform: str
     inputs: Dict[str, Any]
+    development: bool
 
 
 bots_collection = db['bots']
