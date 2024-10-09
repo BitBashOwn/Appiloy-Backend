@@ -32,7 +32,8 @@ async def create_Task(task: taskModel):
     try:
         task_dict = task.dict(by_alias=True)
         task_id = generate_unique_id()
-        bot = bots_collection.find_one({"id": task.bot}, {"inputs": 1, "schedules": 1})
+        bot = bots_collection.find_one(
+            {"id": task.bot}, {"inputs": 1, "schedules": 1})
         task_dict.update({
             "id": task_id,
             "inputs": bot.get("inputs"),
@@ -131,6 +132,6 @@ async def save_task_inputs(inputs: inputsSaveRequest, current_user: dict = Depen
 @tasks_router.post("/save-device")
 async def save_task_devices(data: devicesSaveRequest, current_user: dict = Depends(get_current_user)):
     result = tasks_collection.update_one({"id": data.id, "email": current_user.get(
-        "email")}, {"$set": {"inputs": data.devices}})
+        "email")}, {"$set": {"deviceIds": data.devices}})
 
     return JSONResponse(content={"message": "devices updated successfully"}, status_code=200)
