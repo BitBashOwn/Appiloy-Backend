@@ -51,6 +51,15 @@ async def check_device_status(device_id: str):
         raise HTTPException(status_code=404, detail="Device not found")
     return {"device_id": device_id, "status": device["status"]}
 
+# Endpoint to update the device status
+@device_router.put("/update_status/{device_id}")
+async def update_device_status(device_id: str, status: bool):
+    device = device_collection.find_one({"deviceId": device_id})
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    device_collection.update_one({"deviceId": device_id}, {"$set": {"status": status}})
+    return {"message": f"Device {device_id} status updated to {status}"}
+
 # Endpoint for checking device registration
 @device_router.get("/device_registration/{device_id}")
 async def check_device_registration(device_id: str):
