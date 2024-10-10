@@ -72,23 +72,47 @@ async def check_device_registration(device_id: str):
     
     return True
 
+# # WebSocket endpoint
+# @device_router.websocket("/ws/{device_id}")
+# async def websocket_endpoint(websocket: WebSocket, device_id: str):
+#     await websocket.accept()
+#     device_connections[device_id] = websocket
+#     active_connections.append(websocket)
+
+#     try:
+#         while True:
+#             data = await websocket.receive_text()
+#             print(f"Message from {device_id}: {data}")
+            
+#             for connection in active_connections:
+#                 if connection != websocket:
+#                     await connection.send_text(f"Message from {device_id}: {data}")
+#     except WebSocketDisconnect:
+#         print(f"Device {device_id} disconnected.")
+#         active_connections.remove(websocket)
+#         device_connections.pop(device_id, None)
 # WebSocket endpoint
 @device_router.websocket("/ws/{device_id}")
 async def websocket_endpoint(websocket: WebSocket, device_id: str):
     await websocket.accept()
     device_connections[device_id] = websocket
     active_connections.append(websocket)
-
+    
     try:
+        # Update device status to true when connected
+        # device_collection.update_one({"deviceId": device_id}, {"$set": {"status": True}})
+        
         while True:
             data = await websocket.receive_text()
             print(f"Message from {device_id}: {data}")
-            
             for connection in active_connections:
                 if connection != websocket:
                     await connection.send_text(f"Message from {device_id}: {data}")
+                    
     except WebSocketDisconnect:
         print(f"Device {device_id} disconnected.")
+        # Update device status to false when disconnected
+        device_collection.update_one({"deviceId": device_id}, {"$set": {"status": False}})
         active_connections.remove(websocket)
         device_connections.pop(device_id, None)
 
