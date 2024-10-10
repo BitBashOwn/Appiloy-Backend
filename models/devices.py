@@ -5,7 +5,7 @@ from datetime import datetime
 
 
 class User(BaseModel):
-    id: Optional[UUID4] = Field(None, description="Unique identifier generated as UUID")
+    deviceId: Optional[UUID4] = Field(None, description="Unique identifier generated as UUID")
     deviceName: str
     email: str
     model: str

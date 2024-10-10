@@ -37,17 +37,17 @@ def convert_object_id(data):
         data['_id'] = str(data['_id'])
     return data
 
+
 @devices_router.get("/devices")
 async def get_devices(current_user: dict = Depends(get_current_user)):
 
     # Query the devices for the current user from MongoDB
-    data = list(db["devices"].find({"email": current_user.get("email")}))
+    data = list(db["devices"].find({"email": current_user.get("email")},{"_id":0}))
 
     # Convert ObjectId fields to strings for JSON serialization
-    data = convert_object_id(data)
+    # data = convert_object_id(data)
 
     return JSONResponse(content={"devices": data}, status_code=200)
-
 
 
 @devices_router.delete("/delete-devices")
@@ -55,7 +55,8 @@ async def delete_devices(devices: deleteRequest, current_user: dict = Depends(ge
     print("Devices to delete:", devices.devices)
     # object_ids = [ObjectId(device_id) for device_id in devices.devices]
     # result = devices_collection.delete_many({"_id": {"$in": object_ids}})
-    result = db["devices"].delete_many({"id": {"$in": devices.devices}})
+    result = db["devices"].delete_many(
+        {"deviceId": {"$in": devices.devices}, "email": current_user.get("email")})
     print(result)
 
     return JSONResponse(content={"message": "Devices deleted successfully"}, status_code=200)
