@@ -75,7 +75,7 @@ def create_reset_password_token(user: User):
 
 def send_confirmation_email(to_email: str, token: str):
     subject = "Confirm your Email"
-    body = f"Click the following link to confirm your email: http://localhost:5173/verify-email/{token}"
+    body = f"Click the following link to confirm your email: https://console.appilot.app/verify-email/{token}"
 
     msg = MIMEText(body)
     msg['Subject'] = subject
@@ -90,7 +90,7 @@ def send_confirmation_email(to_email: str, token: str):
 
 def send_password_email_email(to_email: str, token: str):
     subject = "Reset Password"
-    body = f"Click the following link to reset your password: http://localhost:5173/reset-password/{token}"
+    body = f"Click the following link to reset your password: https://console.appilot.app/reset-password/{token}"
 
     msg = MIMEText(body)
     msg['Subject'] = subject
@@ -106,8 +106,8 @@ def send_password_email_email(to_email: str, token: str):
 
 def create_access_token(email: str, user_id: str, expires_delta: timedelta):
     # Set expiration time
-    expire = datetime.utcnow() + expires_delta
-    to_encode = {"sub": email, "id": user_id, "exp": expire}  # Payload data
+    # expire = datetime.utcnow() + expires_delta
+    to_encode = {"sub": email, "id": user_id}  # Payload data
     # Encode the token using JWT
     encoded_jwt = jwt.encode(to_encode, secret_key, algorithm=algo)
     return encoded_jwt
