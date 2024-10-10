@@ -27,7 +27,7 @@ class DeviceRegistration(BaseModel):
 
 # Command model
 class CommandRequest(BaseModel):
-    app_name: str
+    command: dict
     device_ids: List[str]
 
 # Dependency for registering and validating the device
@@ -120,18 +120,18 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 @device_router.post("/send_command")
 async def send_command(request: CommandRequest):
     device_ids = request.device_ids
-    app_name = request.app_name
+    command = request.command
     not_connected_devices = []
 
     for device_id in device_ids:
         websocket = device_connections.get(device_id)
         if websocket:
-            await websocket.send_text(f"{app_name}")
+            await websocket.send_text(f"{command}")
         else:
             not_connected_devices.append(device_id)
     
     if not_connected_devices:
         raise HTTPException(status_code=404, detail=f"Devices with IDs {not_connected_devices} are not connected.")
     
-    return {"message": f"Command '{app_name}' sent to devices {device_ids}"}
+    return {"message": f"Command '{command}' sent to devices {device_ids}"}
 
