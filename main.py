@@ -85,7 +85,7 @@ app.include_router(reset_router)
 app.include_router(devices_router)
 app.include_router(bots_router)
 app.include_router(tasks_router)
-app.include_router(device_router) # Added by "Sohaib"
+app.include_router(device_router, tags=["Android endpoints"])  # Added by "Sohaib"
 
 
 if __name__ == "__main__":
