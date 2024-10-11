@@ -135,3 +135,11 @@ async def save_task_devices(data: devicesSaveRequest, current_user: dict = Depen
         "email")}, {"$set": {"deviceIds": data.devices}})
 
     return JSONResponse(content={"message": "devices updated successfully"}, status_code=200)
+
+
+@tasks_router.put("/update-Task")
+async def update_task(data: dict, current_user: dict = Depends(get_current_user)):
+    result = tasks_collection.update_one({"id": data.id, "email": current_user.get(
+        "email")}, {"$set": data})
+
+    return JSONResponse(content={"message": "Updated successfully"}, status_code=200)
