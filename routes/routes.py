@@ -48,9 +48,13 @@ async def confirm_email(token: str):
         data = payload.get("data")
         email = data.get("email")
         password = data.get("password")
+        existing_user = user_collection.find_one({"email": email})
 
         if email is None or password is None:
             return JSONResponse(content={"message": "invalid Token "}, status_code=400)
+
+        if existing_user:
+            return JSONResponse(content={"message": "Email already Created"}, status_code=200)
 
         # Hash the password and store it in the database
         hashed_password = bcrypt.hash(data["password"])
