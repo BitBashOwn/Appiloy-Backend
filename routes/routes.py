@@ -35,8 +35,7 @@ async def sign_Up(user: User):
     send_confirmation_email(user.email, confirmation_token)
     # print("sending mail")
 
-    return JSONResponse(content={"message": "Please check your email to confirm. Token expires in 2 minutes."
-                                 })
+    return JSONResponse(content={"message": "Please check your email to confirm. Token expires in 2 minutes."})
 
 # Endpoint to confirm email
 
