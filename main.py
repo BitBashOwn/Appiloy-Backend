@@ -93,18 +93,18 @@ app.include_router(device_router, tags=["Android endpoints"])  # Added by "Sohai
 scheduler = BackgroundScheduler()
 
 # Event to start the scheduler when the app starts
-@app.on_event("startup")
-async def start_scheduler():
-    print("Starting scheduler...")
-    scheduler.start()
-    print("Scheduler started successfully.")
+# @app.on_event("startup")
+# async def start_scheduler():
+#     print("Starting scheduler...")
+#     scheduler.start()
+#     print("Scheduler started successfully.")
 
-# Event to shut down the scheduler when the app stops
-@app.on_event("shutdown")
-async def shutdown_scheduler():
-    print("Shutting down scheduler...")
-    scheduler.shutdown()
-    print("Scheduler shutdown complete.")
+# # Event to shut down the scheduler when the app stops
+# @app.on_event("shutdown")
+# async def shutdown_scheduler():
+#     print("Shutting down scheduler...")
+#     scheduler.shutdown()
+#     print("Scheduler shutdown complete.")
     
 #//////////////////////////////////////
 
