@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from utils.utils import get_current_user
 from models.tasks import tasks_collection
 from apscheduler.schedulers.background import BackgroundScheduler
+import json
 
 
 # MongoDB Connection
@@ -192,12 +193,15 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 
 
 
-def send_command_to_devices(device_ids, command):
+async def send_command_to_devices(device_ids, command):
     print(f"Executing command for devices: {device_ids}, command: {command}")
     for device_id in device_ids:
         websocket = device_connections.get(device_id)
         if websocket:
-            websocket.send_text(f"{command}")
+            try:
+                await websocket.send_text(json.dumps(command))  # Convert command to JSON
+            except Exception as e:
+                print(f"Error sending command to {device_id}: {e}")
 
 @device_router.post("/send_command")
 async def send_command(request: CommandRequest):
