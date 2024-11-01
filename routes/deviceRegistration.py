@@ -1,7 +1,8 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends
 from pymongo import MongoClient
 from pydantic import BaseModel
-from typing import List
+from typing import List, Tuple
+import random
 from datetime import datetime, timedelta
 from utils.utils import get_current_user
 from models.tasks import tasks_collection
@@ -275,8 +276,8 @@ async def send_command_to_devices(device_ids, command):
 async def send_command(request: CommandRequest):
     command = request.command
     device_ids = request.device_ids
+    duration = int(command.get("duration", 0))
     durationType = request.command.get("durationtype")
-    time_str = request.command.get("time")
     time_zone = request.command.get("timeZone", "UTC")  # Default to UTC if not provided
     
     try:
@@ -289,6 +290,7 @@ async def send_command(request: CommandRequest):
         
         if durationType == 'Exact Start Time':
             # Parse the time string (HH:MM) and create a datetime object
+            time_str = request.command.get("time")
             hour, minute = map(int, time_str.split(':'))
             
             # Create target time in user's timezone
@@ -340,21 +342,92 @@ async def send_command(request: CommandRequest):
                 raise HTTPException(status_code=500, detail=f"Failed to schedule job: {str(e)}")
                 
         elif durationType == 'Randomized Start Time within a Window':
-            # Implementation for randomized scheduling
-            pass
+            # Get start and end times
+            time_data = command.get("time", {})
+            start_time_str = time_data.get("startInput")
+            end_time_str = time_data.get("endInput")
+            
+            # Parse start and end times
+            start_hour, start_minute = map(int, start_time_str.split(':'))
+            end_hour, end_minute = map(int, end_time_str.split(':'))
+            
+            # Create datetime objects for start and end times
+            start_time = now.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
+            end_time = now.replace(hour=end_hour, minute=end_minute, second=0, microsecond=0)
+            
+            # If end time is before start time, add one day to end time
+            if end_time < start_time:
+                end_time += timedelta(days=1)
+            
+            # If start time is in the past, move both times to next day
+            if start_time < now:
+                start_time += timedelta(days=1)
+                end_time += timedelta(days=1)
+            
+            # Calculate time window in minutes
+            time_window = (end_time - start_time).total_seconds() / 60
+            
+            print(f"Time window: {time_window} minutes")
+            print(f"Requested duration: {duration} minutes")
+            
+            # Check if window is close to duration
+            if abs(time_window - duration) <= 10:
+                # Schedule single job for entire duration
+                try:
+                    job = scheduler.add_job(
+                        send_command_to_devices,
+                        trigger=DateTrigger(
+                            run_date=start_time.astimezone(pytz.UTC),
+                            timezone=pytz.UTC
+                        ),
+                        args=[device_ids, {**command, "duration": duration}],
+                        id=f"cmd_single_{datetime.now().timestamp()}",
+                        name=f"Single session command for devices {device_ids}"
+                    )
+                    scheduled_jobs.append(job)
+                except Exception as e:
+                    print(f"Failed to schedule single job: {str(e)}")
+                    raise HTTPException(status_code=500, detail=f"Failed to schedule job: {str(e)}")
+            else:
+                # Generate random durations
+                random_durations = generate_random_durations(duration)
+                print(f"Split into durations: {random_durations}")
+                
+                # Generate random start times
+                try:
+                    start_times = get_random_start_times(start_time, end_time, random_durations)
+                    
+                    # Schedule jobs for each duration
+                    for i, (start_time, duration) in enumerate(zip(start_times, random_durations)):
+                        modified_command = {**command, "duration": duration}
+                        job = scheduler.add_job(
+                            send_command_to_devices,
+                            trigger=DateTrigger(
+                                run_date=start_time.astimezone(pytz.UTC),
+                                timezone=pytz.UTC
+                            ),
+                            args=[device_ids, modified_command],
+                            id=f"cmd_part_{i}_{datetime.now().timestamp()}",
+                            name=f"Part {i+1} of split command for devices {device_ids}"
+                        )
+                        scheduled_jobs.append(job)
+                        print(f"Scheduled part {i+1}: {duration} minutes at {start_time}")
+                except Exception as e:
+                    print(f"Failed to schedule split jobs: {str(e)}")
+                    raise HTTPException(status_code=500, detail=f"Failed to schedule jobs: {str(e)}")
             
         return {
-            "message": "Command scheduled successfully",
-            "scheduled_jobs": [
-                {
-                    "job_id": job.id,
-                    "scheduled_time_utc": str(job.next_run_time),
-                    "scheduled_time_local": str(job.next_run_time.astimezone(user_tz))
-                }
-                for job in scheduled_jobs
-            ],
-            "target_time_utc": str(target_time_utc),
-            "target_time_local": str(target_time)
+            "message": "Command scheduled successfully"
+            # "scheduled_jobs": [
+            #     {
+            #         "job_id": job.id,
+            #         "scheduled_time_utc": str(job.next_run_time),
+            #         "scheduled_time_local": str(job.next_run_time.astimezone(user_tz))
+            #     }
+            #     for job in scheduled_jobs
+            # ],
+            # "target_time_utc": str(target_time_utc),
+            # "target_time_local": str(target_time)
         }
         
     except pytz.exceptions.UnknownTimeZoneError:
@@ -364,3 +437,68 @@ async def send_command(request: CommandRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
+def generate_random_durations(total_duration: int, min_duration: int = 1) -> List[int]:
+    """
+    Generate random durations that sum up to the total duration.
+    Each duration will be at least min_duration minutes.
+    """
+    if total_duration <= min_duration:
+        return [total_duration]
+        
+    durations = []
+    remaining = total_duration
+    
+    while remaining > 0:
+        # If remaining duration is small enough, add it as the last duration
+        if remaining <= min_duration * 2:
+            durations.append(remaining)
+            break
+            
+        # Generate a random duration between min_duration and remaining/2
+        max_possible = min(remaining - min_duration, remaining // 2)
+        duration = random.randint(min_duration, max_possible)
+        durations.append(duration)
+        remaining -= duration
+    
+    return durations
+
+def get_random_start_times(
+    start_time: datetime,
+    end_time: datetime,
+    durations: List[int],
+    min_gap: float = 1.5
+) -> List[datetime]:
+    """
+    Generate random start times for each duration, ensuring minimum gap between sessions.
+    Returns list of start times in chronological order.
+    """
+    total_time_needed = sum(durations) + (len(durations) - 1) * min_gap
+    available_time = (end_time - start_time).total_seconds() / 60
+    
+    if total_time_needed > available_time:
+        raise ValueError(f"Not enough time in window for all sessions with minimum gaps")
+    
+    start_times = []
+    current_time = start_time
+    
+    # Calculate maximum gap possible
+    remaining_gaps = len(durations) - 1
+    for duration in durations:
+        if remaining_gaps > 0:
+            # Calculate maximum possible gap after this session
+            time_left = (end_time - current_time).total_seconds() / 60
+            time_needed = duration + sum(durations[len(start_times)+1:]) + remaining_gaps * min_gap
+            max_gap = (time_left - time_needed) / remaining_gaps
+            
+            # Add session start time
+            start_times.append(current_time)
+            
+            # Add random gap after session
+            gap = random.uniform(min_gap, max_gap) if max_gap > min_gap else min_gap
+            current_time = current_time + timedelta(minutes=duration + gap)
+            remaining_gaps -= 1
+        else:
+            # Add last session
+            start_times.append(current_time)
+    
+    return start_times
