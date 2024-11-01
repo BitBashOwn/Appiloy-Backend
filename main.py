@@ -53,6 +53,7 @@ from routes.login import login_router
 from routes.devices import devices_router
 from routes.passwordReset import reset_router
 from routes.deviceRegistration import device_router
+from apscheduler.schedulers.background import BackgroundScheduler
 import uvicorn
 from routes.bots import bots_router
 from routes.tasks import tasks_router
@@ -86,6 +87,26 @@ app.include_router(devices_router)
 app.include_router(bots_router)
 app.include_router(tasks_router)
 app.include_router(device_router, tags=["Android endpoints"])  # Added by "Sohaib"
+
+
+#////////////////////////////////////
+scheduler = BackgroundScheduler()
+
+# Event to start the scheduler when the app starts
+@app.on_event("startup")
+async def start_scheduler():
+    print("Starting scheduler...")
+    scheduler.start()
+    print("Scheduler started successfully.")
+
+# Event to shut down the scheduler when the app stops
+@app.on_event("shutdown")
+async def shutdown_scheduler():
+    print("Shutting down scheduler...")
+    scheduler.shutdown()
+    print("Scheduler shutdown complete.")
+    
+#//////////////////////////////////////
 
 
 if __name__ == "__main__":

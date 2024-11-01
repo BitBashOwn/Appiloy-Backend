@@ -16,7 +16,6 @@ device_collection = db["devices"]
 # Create Router
 device_router = APIRouter()
 scheduler = BackgroundScheduler()
-# scheduler.start()
 
 # In-memory storage for WebSocket connections and mapping them to device IDs
 active_connections: List[WebSocket] = []
