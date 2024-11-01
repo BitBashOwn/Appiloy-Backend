@@ -130,31 +130,31 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
         device_connections.pop(device_id, None)
 
 # Command Endpoint
-@device_router.post("/send_command")
-async def send_command(request: CommandRequest):
-    print(request)
-    device_ids = request.device_ids
-    command = request.command
-    not_connected_devices = []
+# @device_router.post("/send_command")
+# async def send_command(request: CommandRequest):
+#     print(request)
+#     device_ids = request.device_ids
+#     command = request.command
+#     not_connected_devices = []
 
-    for device_id in device_ids:
-        websocket = device_connections.get(device_id)
-        if websocket:
-            await websocket.send_text(f"{command}")
-        else:
-            not_connected_devices.append(device_id)
+#     for device_id in device_ids:
+#         websocket = device_connections.get(device_id)
+#         if websocket:
+#             await websocket.send_text(f"{command}")
+#         else:
+#             not_connected_devices.append(device_id)
 
-    if not_connected_devices:
-        print("error")
-        result = list(db["devices"].find(
-            {"deviceId": {"$in": not_connected_devices}}, {"deviceName": 1, "_id": 0}))
-        print(result)
-        raise HTTPException(status_code=404, detail={
-            "error": f"Devices with IDs {not_connected_devices} are not connected.",
-            "devices": result
-        })
+#     if not_connected_devices:
+#         print("error")
+#         result = list(db["devices"].find(
+#             {"deviceId": {"$in": not_connected_devices}}, {"deviceName": 1, "_id": 0}))
+#         print(result)
+#         raise HTTPException(status_code=404, detail={
+#             "error": f"Devices with IDs {not_connected_devices} are not connected.",
+#             "devices": result
+#         })
 
-    return {"message": f"Command '{command}' sent to devices {device_ids}"}
+#     return {"message": f"Command '{command}' sent to devices {device_ids}"}
 
 # @device_router.post("/send_command")
 # async def send_command(request: CommandRequest, current_user: dict = Depends(get_current_user)):
@@ -192,76 +192,76 @@ async def send_command(request: CommandRequest):
 
 
 
-# def send_command_to_devices(device_ids, command):
-#     print(f"Executing command for devices: {device_ids}, command: {command}")
-#     for device_id in device_ids:
-#         websocket = device_connections.get(device_id)
-#         if websocket:
-#             websocket.send_text(f"{command}")
+def send_command_to_devices(device_ids, command):
+    print(f"Executing command for devices: {device_ids}, command: {command}")
+    for device_id in device_ids:
+        websocket = device_connections.get(device_id)
+        if websocket:
+            websocket.send_text(f"{command}")
 
-# @device_router.post("/send_command")
-# async def send_command(request: CommandRequest):
-#     command = request.command
-#     device_ids = request.device_ids
-#     durationType = request.command.get("durationtype")
-#     time_str = request.command.get("time")
+@device_router.post("/send_command")
+async def send_command(request: CommandRequest):
+    command = request.command
+    device_ids = request.device_ids
+    durationType = request.command.get("durationtype")
+    time_str = request.command.get("time")
     
-#     scheduled_jobs = []  # To keep track of scheduled jobs
+    scheduled_jobs = []  # To keep track of scheduled jobs
 
-#     if durationType == 'Exact Start Time':
-#             # Parse the time string (e.g., "14:30")
-#             target_time = datetime.strptime(time_str, "%H:%M").replace(
-#                 year=datetime.now().year,
-#                 month=datetime.now().month,
-#                 day=datetime.now().day
-#             )
+    if durationType == 'Exact Start Time':
+            # Parse the time string (e.g., "14:30")
+            target_time = datetime.strptime(time_str, "%H:%M").replace(
+                year=datetime.now().year,
+                month=datetime.now().month,
+                day=datetime.now().day
+            )
 
-#             # Adjust target time if it's already passed today
-#             if target_time < datetime.now():
-#                 target_time += timedelta(days=1)  # Schedule for the next day
+            # Adjust target time if it's already passed today
+            if target_time < datetime.now():
+                target_time += timedelta(days=1)  # Schedule for the next day
 
-#             try:
-#                 # Schedule the command to run at the specified time
-#                 job = scheduler.add_job(send_command_to_devices, 'date', run_date=target_time, args=[device_ids, command])
-#                 scheduled_jobs.append(job)
-#                 print(f"Scheduled job: {job.id} at {target_time}")
-#             except Exception as e:
-#                 print(f"Failed to schedule job: {e}")
+            try:
+                # Schedule the command to run at the specified time
+                job = scheduler.add_job(send_command_to_devices, 'date', run_date=target_time, args=[device_ids, command])
+                scheduled_jobs.append(job)
+                print(f"Scheduled job: {job.id} at {target_time}")
+            except Exception as e:
+                print(f"Failed to schedule job: {e}")
 
-#     elif durationType == 'Randomized Start Time within a Window':
-#         start_time_str, end_time_str = request.schedule_times[0].split('-')
-#         start_time = datetime.strptime(start_time_str, "%H:%M").replace(
-#             year=datetime.now().year,
-#             month=datetime.now().month,
-#             day=datetime.now().day
-#         )
-#         end_time = datetime.strptime(end_time_str, "%H:%M").replace(
-#             year=datetime.now().year,
-#             month=datetime.now().month,
-#             day=datetime.now().day
-#         )
+    elif durationType == 'Randomized Start Time within a Window':
+        start_time_str, end_time_str = request.schedule_times[0].split('-')
+        start_time = datetime.strptime(start_time_str, "%H:%M").replace(
+            year=datetime.now().year,
+            month=datetime.now().month,
+            day=datetime.now().day
+        )
+        end_time = datetime.strptime(end_time_str, "%H:%M").replace(
+            year=datetime.now().year,
+            month=datetime.now().month,
+            day=datetime.now().day
+        )
         
-#         # Adjust start and end time if necessary
-#         if start_time < datetime.now():
-#             start_time += timedelta(days=1)
-#             end_time += timedelta(days=1)
+        # Adjust start and end time if necessary
+        if start_time < datetime.now():
+            start_time += timedelta(days=1)
+            end_time += timedelta(days=1)
 
-#         # Calculate the interval in minutes
-#         interval_minutes = request.duration_minutes
-#         duration = (end_time - start_time).seconds // 60  # Total duration in minutes
+        # Calculate the interval in minutes
+        interval_minutes = request.duration_minutes
+        duration = (end_time - start_time).seconds // 60  # Total duration in minutes
 
-#         # Schedule commands in intervals
-#         current_time = start_time
-#         while current_time < end_time:
-#             try:
-#                 job = scheduler.add_job(send_command_to_devices, 'date', run_date=current_time, args=[device_ids, command])
-#                 scheduled_jobs.append(job)
-#                 print(f"Scheduled job: {job.id} at {current_time}")
-#             except Exception as e:
-#                 print(f"Failed to schedule job: {e}")
-#             current_time += timedelta(minutes=interval_minutes)
+        # Schedule commands in intervals
+        current_time = start_time
+        while current_time < end_time:
+            try:
+                job = scheduler.add_job(send_command_to_devices, 'date', run_date=current_time, args=[device_ids, command])
+                scheduled_jobs.append(job)
+                print(f"Scheduled job: {job.id} at {current_time}")
+            except Exception as e:
+                print(f"Failed to schedule job: {e}")
+            current_time += timedelta(minutes=interval_minutes)
 
-#     return {
-#         "message": f"Command '{command}' scheduled for devices {device_ids}",
-#         "scheduled_jobs": [job.id for job in scheduled_jobs]  # List of scheduled job IDs
-#     }
+    return {
+        "message": f"Command '{command}' scheduled for devices {device_ids}",
+        "scheduled_jobs": [job.id for job in scheduled_jobs]  # List of scheduled job IDs
+    }
