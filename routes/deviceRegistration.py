@@ -5,7 +5,8 @@ from typing import List
 from datetime import datetime, timedelta
 from utils.utils import get_current_user
 from models.tasks import tasks_collection
-from apscheduler.schedulers.background import BackgroundScheduler
+# from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import json
 
 
@@ -16,7 +17,7 @@ device_collection = db["devices"]
 
 # Create Router
 device_router = APIRouter()
-scheduler = BackgroundScheduler()
+scheduler = AsyncIOScheduler()
 scheduler.start()
 print('started scheduling')
 
@@ -198,10 +199,7 @@ async def send_command_to_devices(device_ids, command):
     for device_id in device_ids:
         websocket = device_connections.get(device_id)
         if websocket:
-            try:
-                await websocket.send_text(json.dumps(command))  # Convert command to JSON
-            except Exception as e:
-                print(f"Error sending command to {device_id}: {e}")
+            await websocket.send_text(json.dumps(command))  # Send command as JSON
 
 @device_router.post("/send_command")
 async def send_command(request: CommandRequest):
