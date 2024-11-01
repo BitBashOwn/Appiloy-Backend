@@ -18,8 +18,6 @@ load_dotenv()
 expire_time = int(os.getenv('ACCESS_TOKEN_EXPIRE_MINUTES'))
 secret_key = os.getenv('SECRET_KEY')
 algo = os.getenv('ALGORITHM')
-email = os.getenv('EMAIL')
-email_password = os.getenv('EMAIL_PASSWORD')
 resend.api_key = os.getenv('RESEND_API_KEY')
 oauth2_bearer = OAuth2PasswordBearer(tokenUrl="token")
 
