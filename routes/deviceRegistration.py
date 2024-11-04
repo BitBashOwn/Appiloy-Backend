@@ -204,73 +204,6 @@ async def send_command_to_devices(device_ids, command):
         if websocket:
             await websocket.send_text(json.dumps(command))  # Send command as JSON
 
-# @device_router.post("/send_command")
-# async def send_command(request: CommandRequest):
-#     command = request.command
-#     device_ids = request.device_ids
-#     durationType = request.command.get("durationtype")
-#     time_str = request.command.get("time")
-    
-#     scheduled_jobs = []  # To keep track of scheduled jobs
-
-#     if durationType == 'Exact Start Time':
-#             # Parse the time string (e.g., "14:30")
-#             target_time = datetime.strptime(time_str, "%H:%M").replace(
-#                 year=datetime.now().year,
-#                 month=datetime.now().month,
-#                 day=datetime.now().day
-#             )
-
-#             # Adjust target time if it's already passed today
-#             if target_time < datetime.now():
-#                 target_time += timedelta(days=1)  # Schedule for the next day
-
-#             try:
-#                 # Schedule the command to run at the specified time
-#                 job = scheduler.add_job(send_command_to_devices, 'date', run_date=target_time, args=[device_ids, command])
-#                 scheduled_jobs.append(job)
-#                 print(f"Scheduled job: {job.id} at {target_time}")
-#             except Exception as e:
-#                 print(f"Failed to schedule job: {e}")
-
-#     elif durationType == 'Randomized Start Time within a Window':
-#         start_time_str, end_time_str = request.schedule_times[0].split('-')
-#         start_time = datetime.strptime(start_time_str, "%H:%M").replace(
-#             year=datetime.now().year,
-#             month=datetime.now().month,
-#             day=datetime.now().day
-#         )
-#         end_time = datetime.strptime(end_time_str, "%H:%M").replace(
-#             year=datetime.now().year,
-#             month=datetime.now().month,
-#             day=datetime.now().day
-#         )
-        
-#         # Adjust start and end time if necessary
-#         if start_time < datetime.now():
-#             start_time += timedelta(days=1)
-#             end_time += timedelta(days=1)
-
-#         # Calculate the interval in minutes
-#         interval_minutes = request.duration_minutes
-#         duration = (end_time - start_time).seconds // 60  # Total duration in minutes
-
-#         # Schedule commands in intervals
-#         current_time = start_time
-#         while current_time < end_time:
-#             try:
-#                 job = scheduler.add_job(send_command_to_devices, 'date', run_date=current_time, args=[device_ids, command])
-#                 scheduled_jobs.append(job)
-#                 print(f"Scheduled job: {job.id} at {current_time}")
-#             except Exception as e:
-#                 print(f"Failed to schedule job: {e}")
-#             current_time += timedelta(minutes=interval_minutes)
-
-#     return {
-#         "message": f"Command '{command}' scheduled for devices {device_ids}",
-#         "scheduled_jobs": [job.id for job in scheduled_jobs]  # List of scheduled job IDs
-#     }
-
 
 @device_router.post("/send_command")
 async def send_command(request: CommandRequest):
@@ -437,28 +370,28 @@ async def send_command(request: CommandRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
-def generate_random_durations(total_duration: int, min_duration: int = 1) -> List[int]:
+def generate_random_durations(total_duration: int, min_duration: int = 30) -> List[int]:
     """
-    Generate random durations that sum up to the total duration.
+    Generate 2 to 4 random durations that sum up to the total duration.
     Each duration will be at least min_duration minutes.
     """
+    num_durations = random.randint(2, 4)  # Limit the number of partitions to 2, 3, or 4
+    
     if total_duration <= min_duration:
         return [total_duration]
-        
+    
     durations = []
     remaining = total_duration
     
-    while remaining > 0:
-        # If remaining duration is small enough, add it as the last duration
-        if remaining <= min_duration * 2:
-            durations.append(remaining)
+    for _ in range(num_durations - 1):
+        max_possible = min(remaining - min_duration, remaining // (num_durations - len(durations)))
+        if max_possible <= min_duration:
             break
-            
-        # Generate a random duration between min_duration and remaining/2
-        max_possible = min(remaining - min_duration, remaining // 2)
         duration = random.randint(min_duration, max_possible)
         durations.append(duration)
         remaining -= duration
+    
+    durations.append(remaining)  # Add the remaining time to the last partition
     
     return durations
 
@@ -470,35 +403,41 @@ def get_random_start_times(
 ) -> List[datetime]:
     """
     Generate random start times for each duration, ensuring minimum gap between sessions.
+    If end_time is less than or equal to start_time, end_time is considered the next day.
     Returns list of start times in chronological order.
     """
-    total_time_needed = sum(durations) + (len(durations) - 1) * min_gap
-    available_time = (end_time - start_time).total_seconds() / 60
     
+    # If end_time is less than or equal to start_time, treat it as next day's time
+    if end_time <= start_time:
+        end_time += timedelta(days=1)
+    
+    total_time_needed = sum(durations) + (len(durations) - 1) * min_gap
+    available_time = (end_time - start_time).total_seconds() / 60  # Convert to minutes
+    
+    # Check if there is enough time in the window
     if total_time_needed > available_time:
-        raise ValueError(f"Not enough time in window for all sessions with minimum gaps")
+        raise ValueError(f"Not enough time in the window for all sessions with minimum gaps")
     
     start_times = []
     current_time = start_time
     
     # Calculate maximum gap possible
     remaining_gaps = len(durations) - 1
-    for duration in durations:
+    for i, duration in enumerate(durations):
+        start_times.append(current_time)
+        
         if remaining_gaps > 0:
-            # Calculate maximum possible gap after this session
+            # Calculate the remaining time and the maximum possible gap
             time_left = (end_time - current_time).total_seconds() / 60
-            time_needed = duration + sum(durations[len(start_times)+1:]) + remaining_gaps * min_gap
+            time_needed = sum(durations[i+1:]) + remaining_gaps * min_gap
             max_gap = (time_left - time_needed) / remaining_gaps
             
-            # Add session start time
-            start_times.append(current_time)
-            
-            # Add random gap after session
+            # Add a random gap after the session, but ensure it's at least min_gap
             gap = random.uniform(min_gap, max_gap) if max_gap > min_gap else min_gap
-            current_time = current_time + timedelta(minutes=duration + gap)
+            current_time += timedelta(minutes=duration + gap)
             remaining_gaps -= 1
         else:
-            # Add last session
-            start_times.append(current_time)
+            # No more gaps to add, just adjust the current time
+            current_time += timedelta(minutes=duration)
     
     return start_times

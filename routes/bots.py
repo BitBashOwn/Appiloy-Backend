@@ -14,8 +14,8 @@ bots_router = APIRouter()
 def getBots(current_user: dict = Depends(get_current_user)):
     try:
         bots = list(bots_collection.find(
-            {}, {"_id": 0, "id": 1, "botName": 1, "description": 1, "noOfUsers": 1, "imagePath": 1, "platform": 1}).sort("development", -1))
-        print(bots)
+            {}, {"_id": 0, "id": 1, "botName": 1, "description": 1, "noOfUsers": 1, "imagePath": 1, "platform": 1, "development": 1}).sort("development", -1))
+        # print(bots)
         # for bot in bots:
         #     if '_id' in bot:
         #         bot['_id'] = str(bot['_id'])
