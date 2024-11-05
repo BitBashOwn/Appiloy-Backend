@@ -4,10 +4,11 @@ from models.bots import bots_collection
 from bson import ObjectId
 from fastapi.responses import JSONResponse
 from jose import JWTError
-from utils.utils import generate_unique_id, get_current_user
+from utils.utils import generate_unique_id, get_current_user,get_Running_Tasks
 from datetime import datetime
 from pydantic import BaseModel
 from typing import List
+import traceback
 
 
 class deleteRequest(BaseModel):
@@ -76,24 +77,96 @@ async def get_Task(id: str):
 
 @tasks_router.get("/get-all-task")
 async def get_Task(current_user: dict = Depends(get_current_user)):
+    print("entered /get-all-task")
     try:
         tasks = list(tasks_collection.find(
             {"email": current_user.get("email")}, {"_id": 0}))
         for task in tasks:
             if 'activationDate' in task and isinstance(task['activationDate'], datetime):
                 task['activationDate'] = task['activationDate'].isoformat()
+
+            if task.get("isScheduled"):
+                active_jobs = task.get("activeJobs", [])
+                for job in active_jobs:
+                    job["startTime"] = job["startTime"].isoformat()
+                    job["endTime"] = job["endTime"].isoformat()
+
             bot_id = task.get("bot")
             if bot_id:
-                # Fetch the corresponding bot details.
                 bot = bots_collection.find_one(
                     {"id": bot_id},
                     {"_id": 0, "platform": 1, "botName": 1, "imagePath": 1, "id": 1}
                 )
                 task.update({"botDetails": bot})
         return JSONResponse(content={"message": "Task fetched successfully!", "tasks": tasks}, status_code=200)
+    except Exception as e:
+        print(f"Exception occurred: {str(e)}")
+        traceback.print_exc()
+        return JSONResponse(content={"message": "Error fetching task", "error": str(e)}, status_code=400)
+
+@tasks_router.get("/get-scheduled-tasks")
+async def get_scheduled_tasks(current_user: dict = Depends(get_current_user)):
+    try:
+        # Get scheduled tasks, excluding activeJobs and _id
+        result = list(tasks_collection.find(
+            {"email": current_user.get("email"), "isScheduled": True}, {"_id": 0, "activeJobs": 0}))
+
+        for task in result:
+            # Convert activationDate to ISO format if it's a datetime object
+            if 'activationDate' in task and isinstance(task['activationDate'], datetime):
+                task['activationDate'] = task['activationDate'].isoformat()
+
+            # Fetch and update bot details
+            bot_id = task.get("bot")
+            if bot_id:
+                bot = bots_collection.find_one(
+                    {"id": bot_id},
+                    {"_id": 0, "platform": 1, "botName": 1, "imagePath": 1, "id": 1}
+                )
+                if bot:  # Make sure bot is not None
+                    task.update({"botDetails": bot})
+
+        return JSONResponse(content={"message": "Scheduled tasks fetched successfully!", "tasks": result}, status_code=200)
 
     except Exception as e:
-        return JSONResponse(content={"message": "Error fetching task"}, status_code=400)
+        print(f"Exception occurred: {str(e)}")
+        traceback.print_exc()
+        return JSONResponse(content={"message": "Error fetching scheduled tasks", "error": str(e)}, status_code=400)
+    
+    
+@tasks_router.get("/get-running-tasks")
+async def get_running_tasks(current_user: dict = Depends(get_current_user)):
+    try:
+        # Get scheduled tasks, excluding activeJobs and _id
+        result = list(tasks_collection.find(
+            {"email": current_user.get("email"), "isScheduled": True}, {"_id": 0}))
+        
+        result = get_Running_Tasks(result)
+        for task in result:
+            
+            if 'activationDate' in task and isinstance(task['activationDate'], datetime):
+                task['activationDate'] = task['activationDate'].isoformat()
+                
+            if task.get("isScheduled"):
+                active_jobs = task.get("activeJobs", [])
+                for job in active_jobs:
+                    job["startTime"] = job["startTime"].isoformat()
+                    job["endTime"] = job["endTime"].isoformat()
+            
+            bot_id = task.get("bot")
+            if bot_id:
+                bot = bots_collection.find_one(
+                    {"id": bot_id},
+                    {"_id": 0, "platform": 1, "botName": 1, "imagePath": 1, "id": 1}
+                )
+                if bot:  
+                    task.update({"botDetails": bot})
+        return JSONResponse(content={"message": "Running tasks fetched successfully!", "tasks": result}, status_code=200)
+
+    except Exception as e:
+        print(f"Exception occurred: {str(e)}")
+        traceback.print_exc()
+        return JSONResponse(content={"message": "Error fetching running tasks", "error": str(e)}, status_code=400)
 
 
 @tasks_router.delete("/delete-tasks")
@@ -144,3 +217,6 @@ async def update_task(data: dict, current_user: dict = Depends(get_current_user)
         "email")}, {"$set": data["data"]})
 
     return JSONResponse(content={"message": "Updated successfully"}, status_code=200)
+
+
+

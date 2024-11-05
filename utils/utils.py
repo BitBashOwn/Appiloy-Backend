@@ -12,6 +12,7 @@ from jose import JWTError, jwt
 import os
 from dotenv import load_dotenv
 import uuid
+import pytz
 
 load_dotenv()
 
@@ -326,3 +327,27 @@ async def get_current_user(request: Request):
             detail="Could not validate credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+
+def get_Running_Tasks(
+    tasks: list[dict],
+) -> list[dict]:
+  current_Time = datetime.now(pytz.UTC)
+  runningTasks = []
+  for task in tasks:
+    activeJobs = task.get("activeJobs")
+    for job in activeJobs:
+      startTime = job.get("startTime")
+      endTime = job.get("endTime")
+      if isinstance(startTime, str):
+          startTime = datetime.fromisoformat(startTime)
+      if isinstance(endTime, str):
+          endTime = datetime.fromisoformat(endTime)
+
+      if startTime and startTime.tzinfo is None:  # If it's naive, localize to UTC
+        startTime = pytz.UTC.localize(startTime)
+      if endTime and endTime.tzinfo is None:  # If it's naive, localize to UTC
+        endTime = pytz.UTC.localize(endTime)
+      if current_Time > startTime and current_Time < endTime:
+        runningTasks.append(task)
+  return runningTasks
