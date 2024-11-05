@@ -12,10 +12,13 @@ class taskModel(BaseModel):
     taskName: str
     status: str
     bot: str
+    isScheduled: Optional[bool] = Field(default=False)
+    activeJobs: List[dict] = Field(default_factory=list)
     inputs: Optional[Dict[str, Any]] = None
     LastModifiedDate: Optional[datetime] = None
     activationDate: Optional[datetime] = None
     deviceIds: Optional[List[str]] = Field(default_factory=list)
+    
 
 
 tasks_collection = db['tasks']

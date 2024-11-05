@@ -11,10 +11,13 @@ from apscheduler.triggers.date import DateTrigger
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import pytz
 import json
+import uuid
+from models.tasks import tasks_collection
 
 
 # MongoDB Connection
-client = MongoClient("mongodb+srv://abdullahnoor94:dodge2018@appilot.ds9ll.mongodb.net/?retryWrites=true&w=majority&appName=Appilot")
+client = MongoClient(
+    "mongodb+srv://abdullahnoor94:dodge2018@appilot.ds9ll.mongodb.net/?retryWrites=true&w=majority&appName=Appilot")
 db = client["Appilot"]
 device_collection = db["devices"]
 
@@ -29,6 +32,8 @@ active_connections: List[WebSocket] = []
 device_connections = {}  # To store device_id: websocket mapping
 
 # Device registration model with updated fields
+
+
 class DeviceRegistration(BaseModel):
     deviceName: str
     deviceId: str
@@ -39,29 +44,38 @@ class DeviceRegistration(BaseModel):
     email: str
 
 # Command model
+
+
 class CommandRequest(BaseModel):
     command: dict
     device_ids: List[str]
-    
+
 # class CommandRequest(BaseModel):
 #     command: dict
 #     device_ids: List[str]
 #     task: dict
 
 # Dependency for registering and validating the device
+
+
 def register_device(device_data: DeviceRegistration):
     device = device_collection.find_one({"deviceId": device_data.deviceId})
     if device:
-        raise HTTPException(status_code=400, detail="Device already registered")
+        raise HTTPException(
+            status_code=400, detail="Device already registered")
     result = device_collection.insert_one(device_data.dict())
     return {"message": "Device registered successfully", "deviceId": device_data.deviceId}
 
 # Device Registration Endpoint (POST)
+
+
 @device_router.post("/register_device")
 async def register_device_endpoint(device_data: DeviceRegistration):
     return register_device(device_data)
 
 # Endpoint to check the device status
+
+
 @device_router.get("/device_status/{device_id}")
 async def check_device_status(device_id: str):
     device = device_collection.find_one({"deviceId": device_id})
@@ -70,24 +84,30 @@ async def check_device_status(device_id: str):
     return {"device_id": device_id, "status": device["status"]}
 
 # Endpoint to update the device status
+
+
 @device_router.put("/update_status/{device_id}")
 async def update_device_status(device_id: str, status: bool):
     device = device_collection.find_one({"deviceId": device_id})
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
-    device_collection.update_one({"deviceId": device_id}, {"$set": {"status": status}})
+    device_collection.update_one({"deviceId": device_id}, {
+                                 "$set": {"status": status}})
     return {"message": f"Device {device_id} status updated to {status}"}
 
 # Endpoint for checking device registration
+
+
 @device_router.get("/device_registration/{device_id}")
 async def check_device_registration(device_id: str):
     device = device_collection.find_one({"deviceId": device_id})
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
-    
+
     if not device["status"]:
-        device_collection.update_one({"deviceId": device_id}, {"$set": {"status": True}})
-    
+        device_collection.update_one({"deviceId": device_id}, {
+                                     "$set": {"status": True}})
+
     return True
 
 # # WebSocket endpoint
@@ -101,7 +121,7 @@ async def check_device_registration(device_id: str):
 #         while True:
 #             data = await websocket.receive_text()
 #             print(f"Message from {device_id}: {data}")
-            
+
 #             for connection in active_connections:
 #                 if connection != websocket:
 #                     await connection.send_text(f"Message from {device_id}: {data}")
@@ -110,27 +130,30 @@ async def check_device_registration(device_id: str):
 #         active_connections.remove(websocket)
 #         device_connections.pop(device_id, None)
 # WebSocket endpoint
+
+
 @device_router.websocket("/ws/{device_id}")
 async def websocket_endpoint(websocket: WebSocket, device_id: str):
     await websocket.accept()
     device_connections[device_id] = websocket
     active_connections.append(websocket)
-    
+
     try:
         # Update device status to true when connected
         # device_collection.update_one({"deviceId": device_id}, {"$set": {"status": True}})
-        
+
         while True:
             data = await websocket.receive_text()
             print(f"Message from {device_id}: {data}")
             for connection in active_connections:
                 if connection != websocket:
                     await connection.send_text(f"Message from {device_id}: {data}")
-                    
+
     except WebSocketDisconnect:
         print(f"Device {device_id} disconnected.")
         # Update device status to false when disconnected
-        device_collection.update_one({"deviceId": device_id}, {"$set": {"status": False}})
+        device_collection.update_one({"deviceId": device_id}, {
+                                     "$set": {"status": False}})
         active_connections.remove(websocket)
         device_connections.pop(device_id, None)
 
@@ -194,38 +217,38 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 #     return {"message": f"Command '{command}' sent to devices {device_ids} and task saved to db"}
 
 
-
-
-
 async def send_command_to_devices(device_ids, command):
     print(f"Executing command for devices: {device_ids}, command: {command}")
     for device_id in device_ids:
         websocket = device_connections.get(device_id)
         if websocket:
-            await websocket.send_text(json.dumps(command))  # Send command as JSON
+            # Send command as JSON
+            await websocket.send_text(json.dumps(command))
 
 
 @device_router.post("/send_command")
 async def send_command(request: CommandRequest):
+    task_id = request.command.get("task_id")
     command = request.command
     device_ids = request.device_ids
     duration = int(command.get("duration", 0))
     durationType = request.command.get("durationtype")
-    time_zone = request.command.get("timeZone", "UTC")  # Default to UTC if not provided
-    
+    # Default to UTC if not provided
+    time_zone = request.command.get("timeZone", "UTC")
+
     try:
         # Set up timezone
         user_tz = pytz.timezone(time_zone)
         now = datetime.now(user_tz)
         print(f"Current time in {time_zone}: {now}")
-        
+
         scheduled_jobs = []
-        
+
         if durationType == 'Exact Start Time':
             # Parse the time string (HH:MM) and create a datetime object
             time_str = request.command.get("time")
             hour, minute = map(int, time_str.split(':'))
-            
+
             # Create target time in user's timezone
             target_time = now.replace(
                 hour=hour,
@@ -233,19 +256,32 @@ async def send_command(request: CommandRequest):
                 second=0,
                 microsecond=0
             )
-            
+
+            end_time_delta = timedelta(minutes=duration)
+            target_end_time = target_time + end_time_delta
+
             # If target time is in the past, schedule for next day
             if target_time < now:
                 target_time = target_time + timedelta(days=1)
-            
+                target_end_time = target_end_time + timedelta(days=1)
+
             # Convert to UTC for scheduling
             target_time_utc = target_time.astimezone(pytz.UTC)
-            
+            target_end_time_utc = target_end_time.astimezone(pytz.UTC)
+            job_id = f"cmd_{uuid.uuid4()}"
+            jobInstance = {
+                "job_id": job_id,
+                "startTime": target_time_utc,
+                "endTime": target_end_time_utc,
+                "device_ids": device_ids
+            }
+
             print(f"Scheduling details:")
             print(f"Original time string: {time_str}")
             print(f"Target time (local): {target_time}")
             print(f"Target time (UTC): {target_time_utc}")
-            
+            print(f"Target end time (UTC): {target_end_time_utc}")
+
             try:
                 # Schedule the job using the async version of send_command_to_devices
                 job = scheduler.add_job(
@@ -255,58 +291,75 @@ async def send_command(request: CommandRequest):
                         timezone=pytz.UTC
                     ),
                     args=[device_ids, command],
-                    id=f"cmd_{datetime.now().timestamp()}",  # Unique job ID
+                    id=job_id,  # Unique job ID
                     name=f"Command for devices {device_ids}"
                 )
-                
-                scheduled_jobs.append(job)
-                print(f"Successfully scheduled job {job.id} for {target_time_utc} UTC")
-                
+
+                # scheduled_jobs.append(job)
                 # Print all scheduled jobs for verification
-                print("\nAll scheduled jobs:")
-                for job in scheduler.get_jobs():
-                    print(f"Job ID: {job.id}")
-                    print(f"Next run: {job.next_run_time}")
-                    print(f"Function: {job.func.__name__}")
-                    print("---")
-                
+                # print("\nAll scheduled jobs:")
+                # for job in scheduler.get_jobs():
+                #     print(f"Job ID: {job.id}")
+                #     print(f"Next run: {job.next_run_time}")
+                #     print(f"Function: {job.func.__name__}")
+                #     print("---")
+                tasks_collection.update_one(
+                    {"id": task_id},
+                    {"$set": {
+                        "isScheduled": True,
+                    },
+                        "$push": {
+                        "activeJobs": jobInstance
+                    }}
+                )
+
             except Exception as e:
                 print(f"Failed to schedule job: {str(e)}")
-                raise HTTPException(status_code=500, detail=f"Failed to schedule job: {str(e)}")
-                
+                raise HTTPException(
+                    status_code=500, detail=f"Failed to schedule job: {str(e)}")
+
         elif durationType == 'Randomized Start Time within a Window':
             # Get start and end times
             time_data = command.get("time", {})
             start_time_str = time_data.get("startInput")
             end_time_str = time_data.get("endInput")
-            
+
             # Parse start and end times
             start_hour, start_minute = map(int, start_time_str.split(':'))
             end_hour, end_minute = map(int, end_time_str.split(':'))
-            
+
             # Create datetime objects for start and end times
-            start_time = now.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
-            end_time = now.replace(hour=end_hour, minute=end_minute, second=0, microsecond=0)
-            
+            start_time = now.replace(
+                hour=start_hour, minute=start_minute, second=0, microsecond=0)
+            end_time = now.replace(
+                hour=end_hour, minute=end_minute, second=0, microsecond=0)
+
             # If end time is before start time, add one day to end time
             if end_time < start_time:
                 end_time += timedelta(days=1)
-            
+
             # If start time is in the past, move both times to next day
             if start_time < now:
                 start_time += timedelta(days=1)
                 end_time += timedelta(days=1)
-            
+
             # Calculate time window in minutes
             time_window = (end_time - start_time).total_seconds() / 60
-            
+
             print(f"Time window: {time_window} minutes")
             print(f"Requested duration: {duration} minutes")
-            
+
             # Check if window is close to duration
             if abs(time_window - duration) <= 10:
                 # Schedule single job for entire duration
                 try:
+                    job_id = f"cmd_{uuid.uuid4()}"
+                    jobInstance = {
+                        "job_id": job_id,
+                        "startTime": start_time,
+                        "endTime": end_time,
+                        "device_ids": device_ids
+                    }
                     job = scheduler.add_job(
                         send_command_to_devices,
                         trigger=DateTrigger(
@@ -314,25 +367,45 @@ async def send_command(request: CommandRequest):
                             timezone=pytz.UTC
                         ),
                         args=[device_ids, {**command, "duration": duration}],
-                        id=f"cmd_single_{datetime.now().timestamp()}",
+                        id=job_id,
                         name=f"Single session command for devices {device_ids}"
                     )
-                    scheduled_jobs.append(job)
+                    # scheduled_jobs.append(job)
+                    tasks_collection.update_one(
+                        {"id": task_id},
+                        {"$set": {
+                            "isScheduled": True,
+                        },
+                            "$push": {
+                            "activeJobs": jobInstance
+                        }}
+                    )
                 except Exception as e:
                     print(f"Failed to schedule single job: {str(e)}")
-                    raise HTTPException(status_code=500, detail=f"Failed to schedule job: {str(e)}")
+                    raise HTTPException(
+                        status_code=500, detail=f"Failed to schedule job: {str(e)}")
             else:
                 # Generate random durations
                 random_durations = generate_random_durations(duration)
                 print(f"Split into durations: {random_durations}")
-                
+
                 # Generate random start times
                 try:
-                    start_times = get_random_start_times(start_time, end_time, random_durations)
-                    
+                    start_times = get_random_start_times(
+                        start_time, end_time, random_durations)
+
                     # Schedule jobs for each duration
                     for i, (start_time, duration) in enumerate(zip(start_times, random_durations)):
                         modified_command = {**command, "duration": duration}
+                        job_id = f"cmd_{uuid.uuid4()}"
+                        end_time_delta = timedelta(minutes=duration)
+                        end_time = start_time + end_time_delta
+                        jobInstance = {
+                            "job_id": job_id,
+                            "startTime": start_time,
+                            "endTime": end_time,
+                            "device_ids": device_ids
+                        }
                         job = scheduler.add_job(
                             send_command_to_devices,
                             trigger=DateTrigger(
@@ -340,15 +413,27 @@ async def send_command(request: CommandRequest):
                                 timezone=pytz.UTC
                             ),
                             args=[device_ids, modified_command],
-                            id=f"cmd_part_{i}_{datetime.now().timestamp()}",
-                            name=f"Part {i+1} of split command for devices {device_ids}"
+                            id=job_id,
+                            name=f"Part {
+                                i+1} of split command for devices {device_ids}"
                         )
-                        scheduled_jobs.append(job)
-                        print(f"Scheduled part {i+1}: {duration} minutes at {start_time}")
+                    # scheduled_jobs.append(job)
+                        tasks_collection.update_one(
+                            {"id": task_id},
+                            {"$set": {
+                                "isScheduled": True,
+                            },
+                                "$push": {
+                                "activeJobs": jobInstance
+                            }}
+                        )
+                        print(f"Scheduled part {
+                            i+1}: {duration} minutes at {start_time}")
                 except Exception as e:
                     print(f"Failed to schedule split jobs: {str(e)}")
-                    raise HTTPException(status_code=500, detail=f"Failed to schedule jobs: {str(e)}")
-            
+                    raise HTTPException(
+                        status_code=500, detail=f"Failed to schedule jobs: {str(e)}")
+
         return {
             "message": "Command scheduled successfully"
             # "scheduled_jobs": [
@@ -362,38 +447,44 @@ async def send_command(request: CommandRequest):
             # "target_time_utc": str(target_time_utc),
             # "target_time_local": str(target_time)
         }
-        
+
     except pytz.exceptions.UnknownTimeZoneError:
-        raise HTTPException(status_code=400, detail=f"Invalid timezone: {time_zone}")
+        raise HTTPException(
+            status_code=400, detail=f"Invalid timezone: {time_zone}")
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid time format: {str(e)}")
+        raise HTTPException(
+            status_code=400, detail=f"Invalid time format: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+
 
 def generate_random_durations(total_duration: int, min_duration: int = 30) -> List[int]:
     """
     Generate 2 to 4 random durations that sum up to the total duration.
     Each duration will be at least min_duration minutes.
     """
-    num_durations = random.randint(2, 4)  # Limit the number of partitions to 2, 3, or 4
-    
+    num_durations = random.randint(
+        2, 4)  # Limit the number of partitions to 2, 3, or 4
+
     if total_duration <= min_duration:
         return [total_duration]
-    
+
     durations = []
     remaining = total_duration
-    
+
     for _ in range(num_durations - 1):
-        max_possible = min(remaining - min_duration, remaining // (num_durations - len(durations)))
+        max_possible = min(remaining - min_duration,
+                           remaining // (num_durations - len(durations)))
         if max_possible <= min_duration:
             break
         duration = random.randint(min_duration, max_possible)
         durations.append(duration)
         remaining -= duration
-    
+
     durations.append(remaining)  # Add the remaining time to the last partition
-    
+
     return durations
+
 
 def get_random_start_times(
     start_time: datetime,
@@ -406,38 +497,41 @@ def get_random_start_times(
     If end_time is less than or equal to start_time, end_time is considered the next day.
     Returns list of start times in chronological order.
     """
-    
+
     # If end_time is less than or equal to start_time, treat it as next day's time
     if end_time <= start_time:
         end_time += timedelta(days=1)
-    
+
     total_time_needed = sum(durations) + (len(durations) - 1) * min_gap
-    available_time = (end_time - start_time).total_seconds() / 60  # Convert to minutes
-    
+    available_time = (end_time - start_time).total_seconds() / \
+        60  # Convert to minutes
+
     # Check if there is enough time in the window
     if total_time_needed > available_time:
-        raise ValueError(f"Not enough time in the window for all sessions with minimum gaps")
-    
+        raise ValueError(
+            f"Not enough time in the window for all sessions with minimum gaps")
+
     start_times = []
     current_time = start_time
-    
+
     # Calculate maximum gap possible
     remaining_gaps = len(durations) - 1
     for i, duration in enumerate(durations):
         start_times.append(current_time)
-        
+
         if remaining_gaps > 0:
             # Calculate the remaining time and the maximum possible gap
             time_left = (end_time - current_time).total_seconds() / 60
             time_needed = sum(durations[i+1:]) + remaining_gaps * min_gap
             max_gap = (time_left - time_needed) / remaining_gaps
-            
+
             # Add a random gap after the session, but ensure it's at least min_gap
-            gap = random.uniform(min_gap, max_gap) if max_gap > min_gap else min_gap
+            gap = random.uniform(
+                min_gap, max_gap) if max_gap > min_gap else min_gap
             current_time += timedelta(minutes=duration + gap)
             remaining_gaps -= 1
         else:
             # No more gaps to add, just adjust the current time
             current_time += timedelta(minutes=duration)
-    
+
     return start_times
