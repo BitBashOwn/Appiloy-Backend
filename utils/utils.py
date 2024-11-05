@@ -1,5 +1,6 @@
 from email.mime.multipart import MIMEMultipart
 import resend
+from typing import List
 import smtplib
 from fastapi import Request
 from fastapi import Depends, HTTPException, status
@@ -330,8 +331,8 @@ async def get_current_user(request: Request):
 
 
 def get_Running_Tasks(
-    tasks: list[dict],
-) -> list[dict]:
+    tasks: List[dict],
+) -> List[dict]:
   current_Time = datetime.now(pytz.UTC)
   runningTasks = []
   for task in tasks:
