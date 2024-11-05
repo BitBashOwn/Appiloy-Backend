@@ -414,9 +414,7 @@ async def send_command(request: CommandRequest):
                             ),
                             args=[device_ids, modified_command],
                             id=job_id,
-                            name=f"Part {
-                                i+1} of split command for devices {device_ids}"
-                        )
+                            name=f"Part {i+1} of split command for devices {device_ids}")
                     # scheduled_jobs.append(job)
                         tasks_collection.update_one(
                             {"id": task_id},
@@ -427,8 +425,7 @@ async def send_command(request: CommandRequest):
                                 "activeJobs": jobInstance
                             }}
                         )
-                        print(f"Scheduled part {
-                            i+1}: {duration} minutes at {start_time}")
+                        print(f"Scheduled part {i+1}: {duration} minutes at {start_time}")
                 except Exception as e:
                     print(f"Failed to schedule split jobs: {str(e)}")
                     raise HTTPException(
