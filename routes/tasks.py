@@ -55,7 +55,7 @@ async def create_Task(task: taskModel):
 async def get_Task(id: str):
     try:
         task = tasks_collection.find_one(
-            {"id": id}, {"_id": 0, "activationDate": 0, "status": 0})
+            {"id": id}, {"_id": 0, "activationDate": 0, "status": 0,"activeJobs":0})
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
 
