@@ -14,6 +14,7 @@ import os
 from dotenv import load_dotenv
 import uuid
 import pytz
+from models.users import user_collection
 
 load_dotenv()
 
@@ -285,49 +286,100 @@ def send_password_email_email(to_email: str, token: str):
     })
     email: resend.Email = resend.Emails.send(params)
     return email
-
-
-def create_access_token(email: str, user_id: str, expires_delta: timedelta):
-    # Set expiration time
-    # expire = datetime.utcnow() + expires_delta
+  
+def create_access_token(email: str, user_id: str):
     to_encode = {"sub": email, "id": user_id}  # Payload data
-    # Encode the token using JWT
     encoded_jwt = jwt.encode(to_encode, secret_key, algorithm=algo)
     return encoded_jwt
 
 
 async def get_current_user(request: Request):
-    token = request.headers.get('Authorization')
-    if not token:
-        raise HTTPException(
+        token = request.headers.get("Authorization")
+        if not token:
+          print("No Token")
+          raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated",
             headers={"WWW-Authenticate": "Bearer"},
-        )
+          )
+        print("Token: " + token)
+        try:
+        # Decode the token without checking expiration
+          payload = jwt.decode(token.replace("Bearer ", ""), secret_key, algorithms=[algo])
+          email: str = payload.get("sub")
+          user_id: str = payload.get("id")
 
-    try:
-        # Decode the token
-        payload = jwt.decode(token.replace("Bearer ", ""),
-                             secret_key, algorithms=[algo])
-
-        email: str = payload.get("sub")
-        user_id: str = payload.get("id")
-
-        if email is None or user_id is None:
+          if email is None or user_id is None:
+            print("No Email or password in token")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid token",
                 headers={"WWW-Authenticate": "Bearer"},
             )
+          print("user_Id: " + user_id)
+          print("Email: " + email)
+          existing_user = user_collection.find_one({"email": email})
 
-        return {"email": email, "id": user_id}
+          if existing_user:
+            print('valid Token')
+            return {"email": email, "id": user_id}
+          else:
+            print('Email not in DB')
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+          
 
-    except JWTError:
-        raise HTTPException(
+        except JWTError:
+          raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+# def create_access_token(email: str, user_id: str, expires_delta: timedelta):
+#     # Set expiration time
+#     # expire = datetime.utcnow() + expires_delta
+#     to_encode = {"sub": email, "id": user_id}  # Payload data
+#     # Encode the token using JWT
+#     encoded_jwt = jwt.encode(to_encode, secret_key, algorithm=algo)
+#     return encoded_jwt
+
+
+# async def get_current_user(request: Request):
+#     token = request.headers.get('Authorization')
+#     if not token:
+#         raise HTTPException(
+#             status_code=status.HTTP_401_UNAUTHORIZED,
+#             detail="Not authenticated",
+#             headers={"WWW-Authenticate": "Bearer"},
+#         )
+
+#     try:
+#         # Decode the token
+#         payload = jwt.decode(token.replace("Bearer ", ""),
+#                              secret_key, algorithms=[algo])
+
+#         email: str = payload.get("sub")
+#         user_id: str = payload.get("id")
+
+#         if email is None or user_id is None:
+#             raise HTTPException(
+#                 status_code=status.HTTP_401_UNAUTHORIZED,
+#                 detail="Invalid token",
+#                 headers={"WWW-Authenticate": "Bearer"},
+#             )
+
+#         return {"email": email, "id": user_id}
+
+#     except JWTError:
+#         raise HTTPException(
+#             status_code=status.HTTP_401_UNAUTHORIZED,
+#             detail="Could not validate credentials",
+#             headers={"WWW-Authenticate": "Bearer"},
+#         )
 
 
 def get_Running_Tasks(

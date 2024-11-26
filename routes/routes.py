@@ -30,7 +30,6 @@ async def sign_Up(user: User):
         return JSONResponse(content={"message": "Email already Exist"}, status_code=404)
 
     confirmation_token = create_confirmation_token(user)
-    # print(confirmation_token)
     # Sending confirmation email
     send_confirmation_email(user.email, confirmation_token)
     # print("sending mail")
@@ -47,10 +46,11 @@ async def confirm_email(token: str):
         data = payload.get("data")
         email = data.get("email")
         password = data.get("password")
-        existing_user = user_collection.find_one({"email": email})
-
+        
         if email is None or password is None:
-            return JSONResponse(content={"message": "invalid Token "}, status_code=400)
+            return JSONResponse(content={"message": "invalid Token "}, status_code=400)        
+        
+        existing_user = user_collection.find_one({"email": email})
 
         if existing_user:
             return JSONResponse(content={"message": "Email already Created"}, status_code=200)

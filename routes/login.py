@@ -32,7 +32,6 @@ async def login(request: LoginRequest):
     existing_user = user_collection.find_one({"email": request.email})
 
     if existing_user and pwd_context.verify(request.password, existing_user["password"]):
-        # Convert ObjectId to string
         user_id = str(existing_user["_id"])
 
         # Create a JWT token
