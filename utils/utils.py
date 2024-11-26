@@ -91,7 +91,7 @@ def send_confirmation_email(to_email: str, token: str):
         padding: 12px 24px;
         margin: 20px 0;
         background: linear-gradient(135deg, #80aafd, #4378e1);
-        color: #ffffff;
+        color: #ffffff !important;
         border-radius: 8px;
         text-align: center;
         text-decoration: none;
@@ -183,7 +183,7 @@ def send_password_email_email(to_email: str, token: str):
         padding: 12px 24px;
         margin: 20px 0;
         background: linear-gradient(135deg, #80aafd, #4378e1);
-        color: #ffffff;
+        color: #ffffff !important;
         border-radius: 8px;
         text-align: center;
         text-decoration: none;
