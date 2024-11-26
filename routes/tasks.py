@@ -29,7 +29,7 @@ tasks_router = APIRouter()
 
 
 @tasks_router.post("/create-task")
-async def create_Task(task: taskModel):
+async def create_Task(task: taskModel, current_user: dict = Depends(get_current_user)):
     try:
         task_dict = task.dict(by_alias=True)
         task_id = generate_unique_id()
@@ -52,7 +52,7 @@ async def create_Task(task: taskModel):
 
 
 @tasks_router.get("/get-task")
-async def get_Task(id: str):
+async def get_Task(id: str, current_user: dict = Depends(get_current_user)):
     try:
         task = tasks_collection.find_one(
             {"id": id}, {"_id": 0, "activationDate": 0, "status": 0,"activeJobs":0})

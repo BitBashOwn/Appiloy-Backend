@@ -227,7 +227,7 @@ async def send_command_to_devices(device_ids, command):
 
 
 @device_router.post("/send_command")
-async def send_command(request: CommandRequest):
+async def send_command(request: CommandRequest,current_user: dict = Depends(get_current_user)):
     task_id = request.command.get("task_id")
     command = request.command
     device_ids = request.device_ids

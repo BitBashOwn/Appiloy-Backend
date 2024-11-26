@@ -2,7 +2,7 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from models.users import User
 from models.users import user_collection
-from utils.utils import send_confirmation_email, create_confirmation_token
+from utils.utils import send_confirmation_email, create_confirmation_token,send_account_creation_success_email
 from jose import jwt, JWTError
 from passlib.hash import bcrypt
 import os
@@ -61,7 +61,7 @@ async def confirm_email(token: str):
 
         # Insert the user data into the database
         user_collection.insert_one(data)
-
+        send_account_creation_success_email(email)
         return JSONResponse(content={"message": "Email confirmed successfully!"}, status_code=200)
 
     except JWTError:
