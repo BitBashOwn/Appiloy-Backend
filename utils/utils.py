@@ -303,9 +303,12 @@ async def get_current_user(request: Request):
             headers={"WWW-Authenticate": "Bearer"},
           )
         print("Token: " + token)
+        
         try:
+          filtered_token = token.split("Bearer ")[1].split(";")[0]
+          print("Filtered Token: " + filtered_token)
         # Decode the token without checking expiration
-          payload = jwt.decode(token.replace("Bearer ", ""), secret_key, algorithms=[algo])
+          payload = jwt.decode(filtered_token, secret_key, algorithms=[algo])
           email: str = payload.get("sub")
           user_id: str = payload.get("id")
 
