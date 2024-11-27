@@ -164,6 +164,18 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 
                 print(f"Parsed payload: message={message}, task_id={task_id}, job_id={job_id}")
                 
+                tasks_collection.update_one(
+                    {"id": task_id},
+                    {
+                        "$pull": {
+                            "activeJobs": {
+                                "job_id": job_id
+                            }
+                        }
+                    }
+)
+
+                
             except json.JSONDecodeError:
                 print(f"Invalid JSON received from {device_id}: {data}")
     except WebSocketDisconnect:
