@@ -110,7 +110,7 @@ async def check_device_registration(device_id: str):
 
     return True
 
-# # WebSocket endpoint
+
 # @device_router.websocket("/ws/{device_id}")
 # async def websocket_endpoint(websocket: WebSocket, device_id: str):
 #     await websocket.accept()
@@ -118,18 +118,29 @@ async def check_device_registration(device_id: str):
 #     active_connections.append(websocket)
 
 #     try:
+#         # Update device status to true when connected
+#         # device_collection.update_one({"deviceId": device_id}, {"$set": {"status": True}})
+
 #         while True:
 #             data = await websocket.receive_text()
 #             print(f"Message from {device_id}: {data}")
-
 #             for connection in active_connections:
 #                 if connection != websocket:
 #                     await connection.send_text(f"Message from {device_id}: {data}")
+
 #     except WebSocketDisconnect:
 #         print(f"Device {device_id} disconnected.")
+#         # Update device status to false when disconnected
+#         device_collection.update_one({"deviceId": device_id}, {
+#                                      "$set": {"status": False}})
 #         active_connections.remove(websocket)
 #         device_connections.pop(device_id, None)
-# WebSocket endpoint
+
+
+
+
+
+
 
 
 @device_router.websocket("/ws/{device_id}")
@@ -139,95 +150,97 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
     active_connections.append(websocket)
 
     try:
-        # Update device status to true when connected
-        # device_collection.update_one({"deviceId": device_id}, {"$set": {"status": True}})
-
         while True:
+            # Receive JSON message from client
             data = await websocket.receive_text()
             print(f"Message from {device_id}: {data}")
-            for connection in active_connections:
-                if connection != websocket:
-                    await connection.send_text(f"Message from {device_id}: {data}")
 
+            # Parse the JSON payload
+            try:
+                payload = json.loads(data)
+                message = payload.get("message")
+                task_id = payload.get("task_id")
+                job_id = payload.get("job_id")
+
+                print(f"Parsed payload: message={message}, task_id={task_id}, job_id={job_id}")
+                
+            except json.JSONDecodeError:
+                print(f"Invalid JSON received from {device_id}: {data}")
     except WebSocketDisconnect:
         print(f"Device {device_id} disconnected.")
         # Update device status to false when disconnected
-        device_collection.update_one({"deviceId": device_id}, {
-                                     "$set": {"status": False}})
+        device_collection.update_one({"deviceId": device_id}, {"$set": {"status": False}})
         active_connections.remove(websocket)
         device_connections.pop(device_id, None)
 
-# Command Endpoint
-# @device_router.post("/send_command")
-# async def send_command(request: CommandRequest):
-#     print(request)
-#     device_ids = request.device_ids
-#     command = request.command
-#     not_connected_devices = []
-
+        
+        
+        
+        
+# async def send_command_to_devices(device_ids, command):
+#     print(f"Executing command for devices: {device_ids}, command: {command}")
 #     for device_id in device_ids:
 #         websocket = device_connections.get(device_id)
 #         if websocket:
-#             await websocket.send_text(f"{command}")
-#         else:
-#             not_connected_devices.append(device_id)
-
-#     if not_connected_devices:
-#         print("error")
-#         result = list(db["devices"].find(
-#             {"deviceId": {"$in": not_connected_devices}}, {"deviceName": 1, "_id": 0}))
-#         print(result)
-#         raise HTTPException(status_code=404, detail={
-#             "error": f"Devices with IDs {not_connected_devices} are not connected.",
-#             "devices": result
-#         })
-
-#     return {"message": f"Command '{command}' sent to devices {device_ids}"}
-
-# @device_router.post("/send_command")
-# async def send_command(request: CommandRequest, current_user: dict = Depends(get_current_user)):
-#     device_ids = request.device_ids
-#     command = request.command
-#     task = request.task
-#     not_connected_devices = []
-
-#     result = tasks_collection.update_one(
-#         {"id": task["id"], "email": current_user.get("email")},
-#         {"$set": {"inputs": task["inputs"], "deviceIds": task["deviceIds"], "schedules": task["schedules"],
-#                   "LastModifiedDate": datetime.utcnow().timestamp(), "status": "active"}}
-#     )
-#     if result.modified_count == 0:
-#         raise HTTPException(
-#             status_code=404, detail="Task not found or update failed.")
-
-#     for device_id in device_ids:
-#         websocket = device_connections.get(device_id)
-#         if websocket:
-#             await websocket.send_text(f"{command}")
-#         else:
-#             not_connected_devices.append(device_id)
-
-#     if not_connected_devices:
-#         raise HTTPException(
-#             status_code=404,
-#             detail=f"Devices with IDs {not_connected_devices} are not connected."
-#         )
-
-#     # Return a success message with the command and the list of device IDs
-#     return {"message": f"Command '{command}' sent to devices {device_ids} and task saved to db"}
+#             # Send command as JSON
+#             await websocket.send_text(json.dumps(command))
 
 
 async def send_command_to_devices(device_ids, command):
     print(f"Executing command for devices: {device_ids}, command: {command}")
+
+    task_id = command.get("task_id")
+    job_id = command.get("job_id")
+
+    # Filter for connected and not connected devices
+    connected_devices = []
+    not_connected_devices = []
+
     for device_id in device_ids:
         websocket = device_connections.get(device_id)
         if websocket:
-            # Send command as JSON
+            connected_devices.append((device_id, websocket))
+        else:
+            not_connected_devices.append(device_id)
+
+    # Send commands to connected devices
+    for device_id, websocket in connected_devices:
+        try:
             await websocket.send_text(json.dumps(command))
+        except Exception as e:
+            print(f"Error sending command to device {device_id}: {str(e)}")
+            not_connected_devices.append(device_id)
+        else:
+            # Update task status if successfully sent
+            tasks_collection.update_one(
+                {"id": task_id},
+                {"$set": {"status": "running"}}
+            )
+
+    # Handle not connected devices
+    if not_connected_devices:
+        tasks_collection.update_one(
+            {"id": task_id, "activeJobs.job_id": job_id},
+            {"$pull": {"activeJobs.$.device_ids": {"$in": not_connected_devices}}}
+        )
+
+    # If all devices are not connected, remove the job from activeJobs
+    if len(not_connected_devices) == len(device_ids):
+        tasks_collection.update_one(
+            {"id": task_id},
+            {"$pull": {"activeJobs": {"job_id": job_id}}}
+        )
+
+    print(f"Connected devices: {connected_devices}")
+    print(f"Not connected devices: {not_connected_devices}")
+
+    # Log if the job is no longer active
+    if len(not_connected_devices) == len(device_ids):
+        print(f"Job {job_id} is no longer active as no devices are connected.")
 
 
 @device_router.post("/send_command")
-async def send_command(request: CommandRequest,current_user: dict = Depends(get_current_user)):
+async def send_command(request: CommandRequest, current_user: dict = Depends(get_current_user)):
     task_id = request.command.get("task_id")
     command = request.command
     device_ids = request.device_ids
@@ -275,7 +288,8 @@ async def send_command(request: CommandRequest,current_user: dict = Depends(get_
                 "endTime": target_end_time_utc,
                 "device_ids": device_ids
             }
-
+            
+            command['job_id']= job_id
             print(f"Scheduling details:")
             print(f"Original time string: {time_str}")
             print(f"Target time (local): {target_time}")
@@ -294,15 +308,7 @@ async def send_command(request: CommandRequest,current_user: dict = Depends(get_
                     id=job_id,  # Unique job ID
                     name=f"Command for devices {device_ids}"
                 )
-
-                # scheduled_jobs.append(job)
-                # Print all scheduled jobs for verification
-                # print("\nAll scheduled jobs:")
-                # for job in scheduler.get_jobs():
-                #     print(f"Job ID: {job.id}")
-                #     print(f"Next run: {job.next_run_time}")
-                #     print(f"Function: {job.func.__name__}")
-                #     print("---")
+                
                 tasks_collection.update_one(
                     {"id": task_id},
                     {"$set": {
