@@ -156,9 +156,7 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                 task_id = payload.get("task_id")
                 job_id = payload.get("job_id")
 
-                # print(f"Parsed payload: message={
-                #       message}, task_id={task_id}, job_id={job_id}"
-                #       )
+                print(f"Parsed payload: message={message}, task_id={task_id}, job_id={job_id}")
 
                 tasks_collection.update_one(
                     {"id": task_id},
@@ -455,8 +453,7 @@ async def send_command(request: CommandRequest, current_user: dict = Depends(get
                                 "activeJobs": jobInstance
                             }}
                         )
-                        print(f"Scheduled part {
-                              i+1}: {duration} minutes at {start_time}")
+                        print(f"Scheduled part {i+1}: {duration} minutes at {start_time}")
                 except Exception as e:
                     print(f"Failed to schedule split jobs: {str(e)}")
                     raise HTTPException(
