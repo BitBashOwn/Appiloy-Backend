@@ -156,36 +156,35 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                 task_id = payload.get("task_id")
                 job_id = payload.get("job_id")
 
-                print(f"Parsed payload: message={
-                      message}, task_id={task_id}, job_id={job_id}"
-                      )
+                # print(f"Parsed payload: message={
+                #       message}, task_id={task_id}, job_id={job_id}"
+                #       )
 
                 tasks_collection.update_one(
-                        {"id": task_id},
-                        {
-                            "$pull": {
-                                "activeJobs": {
-                                    "job_id": job_id
-                                }
+                    {"id": task_id},
+                    {
+                        "$pull": {
+                            "activeJobs": {
+                                "job_id": job_id
                             }
                         }
-                    )
+                    }
+                )
 
                 tasks_collection.update_one(
-                        {"id": task_id},
-                        {
-                            "$set": {
-                                "status": {
-                                    "$cond": [
-                                        {"$eq": [{"$size": "$activeJobs"}, 0]},
-                                            "awaiting",
-                                            "scheduled"
-                                        ]
-                                    }
-                                }
+                    {"id": task_id},
+                    {
+                        "$set": {
+                            "status": {
+                                "$cond": [
+                                    {"$eq": [{"$size": "$activeJobs"}, 0]},
+                                    "awaiting",
+                                    "scheduled"
+                                ]
+                            }
                         }
-                    )
-
+                    }
+                )
 
             except json.JSONDecodeError:
                 print(f"Invalid JSON received from {device_id}: {data}")
@@ -225,7 +224,7 @@ async def send_command_to_devices(device_ids, command):
             not_connected_devices.append(device_id)
 
     # Send commands to connected devices
-    task_status_updated = False 
+    task_status_updated = False
     for device_id, websocket in connected_devices:
         try:
             await websocket.send_text(json.dumps(command))
