@@ -378,6 +378,7 @@ async def send_command(request: CommandRequest, current_user: dict = Depends(get
                         "endTime": end_time,
                         "device_ids": device_ids
                     }
+                    command['job_id'] = job_id
                     job = scheduler.add_job(
                         send_command_to_devices,
                         trigger=DateTrigger(
@@ -424,6 +425,7 @@ async def send_command(request: CommandRequest, current_user: dict = Depends(get
                             "endTime": end_time,
                             "device_ids": device_ids
                         }
+                        modified_command['job_id'] = job_id
                         job = scheduler.add_job(
                             send_command_to_devices,
                             trigger=DateTrigger(
