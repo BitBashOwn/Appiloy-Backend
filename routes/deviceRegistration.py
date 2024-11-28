@@ -169,21 +169,17 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                         }
                     }
                 )
+                
+                task = tasks_collection.find_one({"id": task_id})
 
-                tasks_collection.update_one(
+                if task:
+                    status = "awaiting" if len(task.get("activeJobs", [])) == 0 else "scheduled"
+                    tasks_collection.update_one(
                         {"id": task_id},
-                        {
-                            "$set": {
-                                "status": {
-                                    "$cond": {
-                                        "if": {"$eq": [{"$size": "$activeJobs"}, 0]},
-                                        "then": "awaiting",
-                                        "else": "scheduled"
-                                    }
-                                }
-                            }
-                        }
+                        {"$set": {"status": status}}
                     )
+                
+                
 
             except json.JSONDecodeError:
                 print(f"Invalid JSON received from {device_id}: {data}")
