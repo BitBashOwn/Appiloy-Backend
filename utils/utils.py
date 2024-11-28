@@ -478,26 +478,28 @@ def check_for_Job_clashes(start_time: datetime, end_time: datetime, task_id: str
     
     # Iterate through active jobs
     for active_job in task.get('activeJobs', []):
-        devices_list =  task.get('device_ids', [])
+        # Get device_ids from this specific job
+        devices_list = active_job.get('device_ids', [])
         
-        if any(device_id in devices_list for device_id in device_ids):
-          
-          job_start_time = active_job.get("startTime")
-          job_end_time = active_job.get("endTime")
-          
-          # Check if job times are valid
-          if not job_start_time or not job_end_time:
-              continue
-          
-          # Convert to datetime if they're strings
-          if isinstance(job_start_time, str):
-              job_start_time = datetime.fromisoformat(job_start_time.replace('Z', '+00:00'))
-          if isinstance(job_end_time, str):
-              job_end_time = datetime.fromisoformat(job_end_time.replace('Z', '+00:00'))
-          
-          if (start_time >= job_start_time and start_time <= job_end_time) or \
-            (end_time >= job_start_time and end_time <= job_end_time) or \
-            (start_time <= job_start_time and end_time >= job_end_time):
-              return True
+        # Check if there's any common device
+        if set(devices_list) & set(device_ids):
+            job_start_time = active_job.get("startTime")
+            job_end_time = active_job.get("endTime")
+            
+            # Check if job times are valid
+            if not job_start_time or not job_end_time:
+                continue
+            
+            # Convert to datetime if they're strings
+            if isinstance(job_start_time, str):
+                job_start_time = datetime.fromisoformat(job_start_time.replace('Z', '+00:00'))
+            if isinstance(job_end_time, str):
+                job_end_time = datetime.fromisoformat(job_end_time.replace('Z', '+00:00'))
+            
+            # Check for time overlaps
+            if (start_time >= job_start_time and start_time <= job_end_time) or \
+               (end_time >= job_start_time and end_time <= job_end_time) or \
+               (start_time <= job_start_time and end_time >= job_end_time):
+                return True
     
     return False
