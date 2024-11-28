@@ -141,7 +141,7 @@ async def get_running_tasks(current_user: dict = Depends(get_current_user)):
         result = list(tasks_collection.find(
             {"email": current_user.get("email"), "status": "running"}, {"_id": 0, "activeJobs":0}))
         
-        result = get_Running_Tasks(result)
+        # result = get_Running_Tasks(result)
         for task in result:
             
             if 'activationDate' in task and isinstance(task['activationDate'], datetime):
