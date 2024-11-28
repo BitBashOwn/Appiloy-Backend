@@ -147,11 +147,11 @@ async def get_running_tasks(current_user: dict = Depends(get_current_user)):
             if 'activationDate' in task and isinstance(task['activationDate'], datetime):
                 task['activationDate'] = task['activationDate'].isoformat()
                 
-            if task.get("isScheduled"):
-                active_jobs = task.get("activeJobs", [])
-                for job in active_jobs:
-                    job["startTime"] = job["startTime"].isoformat()
-                    job["endTime"] = job["endTime"].isoformat()
+            # if task.get("isScheduled"):
+            #     active_jobs = task.get("activeJobs", [])
+            #     for job in active_jobs:
+            #         job["startTime"] = job["startTime"].isoformat()
+            #         job["endTime"] = job["endTime"].isoformat()
             
             bot_id = task.get("bot")
             if bot_id:
