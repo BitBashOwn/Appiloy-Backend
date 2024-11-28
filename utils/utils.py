@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 import uuid
 import pytz
 from models.users import user_collection
+from models.tasks import tasks_collection
 
 load_dotenv()
 
@@ -207,7 +208,7 @@ def send_password_email_email(to_email: str, token: str):
         <p><strong>Note:</strong> This password reset link is valid for only 2 minutes. If it expires, you’ll need to request a new one.</p>
         <p>If you didn’t request a password reset, you can safely ignore this email.</p>
         <p>Thank you, <br>The Appilot Team</p>
-        
+
       </div>
     </div>
   </body>
@@ -222,9 +223,8 @@ def send_password_email_email(to_email: str, token: str):
     })
     email: resend.Email = resend.Emails.send(params)
     return email
-  
-  
-  
+
+
 def send_account_creation_success_email(to_email: str):
     subject = "Account Created Successfully"
     body = f"""<!DOCTYPE html>
@@ -344,10 +344,8 @@ def send_account_creation_success_email(to_email: str):
     })
     email: resend.Email = resend.Emails.send(params)
     return email
-  
-  
-  
-  
+
+
 def create_access_token(email: str, user_id: str):
     to_encode = {"sub": email, "id": user_id}  # Payload data
     encoded_jwt = jwt.encode(to_encode, secret_key, algorithm=algo)
@@ -355,49 +353,48 @@ def create_access_token(email: str, user_id: str):
 
 
 async def get_current_user(request: Request):
-        token = request.headers.get("Authorization")
-        if not token:
-          print("No Token")
-          raise HTTPException(
+    token = request.headers.get("Authorization")
+    if not token:
+        print("No Token")
+        raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated",
             headers={"WWW-Authenticate": "Bearer"},
-          )
-        print("Token: " + token)
-        
-        try:
-          filtered_token = token.split("Bearer ")[1].split(";")[0]
-          print("Filtered Token: " + filtered_token)
-        # Decode the token without checking expiration
-          payload = jwt.decode(filtered_token, secret_key, algorithms=[algo])
-          email: str = payload.get("sub")
-          user_id: str = payload.get("id")
+        )
+    print("Token: " + token)
 
-          if email is None or user_id is None:
+    try:
+        filtered_token = token.split("Bearer ")[1].split(";")[0]
+        print("Filtered Token: " + filtered_token)
+    # Decode the token without checking expiration
+        payload = jwt.decode(filtered_token, secret_key, algorithms=[algo])
+        email: str = payload.get("sub")
+        user_id: str = payload.get("id")
+
+        if email is None or user_id is None:
             print("No Email or password in token")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid token",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-          print("user_Id: " + user_id)
-          print("Email: " + email)
-          existing_user = user_collection.find_one({"email": email})
+        print("user_Id: " + user_id)
+        print("Email: " + email)
+        existing_user = user_collection.find_one({"email": email})
 
-          if existing_user:
+        if existing_user:
             print('valid Token')
             return {"email": email, "id": user_id}
-          else:
+        else:
             print('Email not in DB')
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid token",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-          
 
-        except JWTError:
-          raise HTTPException(
+    except JWTError:
+        raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",
             headers={"WWW-Authenticate": "Bearer"},
@@ -449,22 +446,58 @@ async def get_current_user(request: Request):
 def get_Running_Tasks(
     tasks: List[dict],
 ) -> List[dict]:
-  current_Time = datetime.now(pytz.UTC)
-  runningTasks = []
-  for task in tasks:
-    activeJobs = task.get("activeJobs")
-    for job in activeJobs:
-      startTime = job.get("startTime")
-      endTime = job.get("endTime")
-      if isinstance(startTime, str):
-          startTime = datetime.fromisoformat(startTime)
-      if isinstance(endTime, str):
-          endTime = datetime.fromisoformat(endTime)
+    current_Time = datetime.now(pytz.UTC)
+    runningTasks = []
+    for task in tasks:
+        activeJobs = task.get("activeJobs")
+        for job in activeJobs:
+            startTime = job.get("startTime")
+            endTime = job.get("endTime")
+            if isinstance(startTime, str):
+                startTime = datetime.fromisoformat(startTime)
+            if isinstance(endTime, str):
+                endTime = datetime.fromisoformat(endTime)
 
-      if startTime and startTime.tzinfo is None:  # If it's naive, localize to UTC
-        startTime = pytz.UTC.localize(startTime)
-      if endTime and endTime.tzinfo is None:  # If it's naive, localize to UTC
-        endTime = pytz.UTC.localize(endTime)
-      if current_Time > startTime and current_Time < endTime:
-        runningTasks.append(task)
-  return runningTasks
+            if startTime and startTime.tzinfo is None:  # If it's naive, localize to UTC
+                startTime = pytz.UTC.localize(startTime)
+            if endTime and endTime.tzinfo is None:  # If it's naive, localize to UTC
+                endTime = pytz.UTC.localize(endTime)
+            if current_Time > startTime and current_Time < endTime:
+                runningTasks.append(task)
+    return runningTasks
+
+
+def check_for_Job_clashes(start_time: datetime, end_time: datetime, task_id: str, device_ids: List[str]) -> bool:
+    # Fetch active jobs for the task
+    task = tasks_collection.find_one(
+        {"id": task_id}, {"_id": 0, "activeJobs": 1}
+    )
+    
+    if not task or 'activeJobs' not in task:
+        return False
+    
+    # Iterate through active jobs
+    for active_job in task.get('activeJobs', []):
+        devices_list =  task.get('device_ids', [])
+        
+        if any(device_id in devices_list for device_id in device_ids):
+          
+          job_start_time = active_job.get("startTime")
+          job_end_time = active_job.get("endTime")
+          
+          # Check if job times are valid
+          if not job_start_time or not job_end_time:
+              continue
+          
+          # Convert to datetime if they're strings
+          if isinstance(job_start_time, str):
+              job_start_time = datetime.fromisoformat(job_start_time.replace('Z', '+00:00'))
+          if isinstance(job_end_time, str):
+              job_end_time = datetime.fromisoformat(job_end_time.replace('Z', '+00:00'))
+          
+          if (start_time >= job_start_time and start_time <= job_end_time) or \
+            (end_time >= job_start_time and end_time <= job_end_time) or \
+            (start_time <= job_start_time and end_time >= job_end_time):
+              return True
+    
+    return False

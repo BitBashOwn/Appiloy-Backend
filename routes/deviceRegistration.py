@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from typing import List, Tuple
 import random
 from datetime import datetime, timedelta
-from utils.utils import get_current_user
+from utils.utils import get_current_user, check_for_Job_clashes
 from models.tasks import tasks_collection
 # from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.date import DateTrigger
@@ -13,6 +13,7 @@ import pytz
 import json
 import uuid
 from models.tasks import tasks_collection
+from fastapi.responses import JSONResponse
 
 
 # MongoDB Connection
@@ -170,19 +171,19 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                 )
 
                 tasks_collection.update_one(
-                    {"id": task_id},
-                    {
-                        "$set": {
-                            "status": {
-                                "$cond": [
-                                    {"$eq": [{"$size": "$activeJobs"}, 0]},
-                                    "awaiting",
-                                    "scheduled"
-                                ]
+                        {"id": task_id},
+                        {
+                            "$set": {
+                                "status": {
+                                    "$cond": {
+                                        "if": {"$eq": [{"$size": "$activeJobs"}, 0]},
+                                        "then": "awaiting",
+                                        "else": "scheduled"
+                                    }
+                                }
                             }
                         }
-                    }
-                )
+                    )
 
             except json.JSONDecodeError:
                 print(f"Invalid JSON received from {device_id}: {data}")
@@ -301,6 +302,11 @@ async def send_command(request: CommandRequest, current_user: dict = Depends(get
             # Convert to UTC for scheduling
             target_time_utc = target_time.astimezone(pytz.UTC)
             target_end_time_utc = target_end_time.astimezone(pytz.UTC)
+            
+            clashes_check = check_for_Job_clashes(target_time_utc, target_end_time_utc, task_id, device_ids)
+            if clashes_check:
+                return JSONResponse(content={"message": "Task already Scheduled on this time"}, status_code=400)
+            
             job_id = f"cmd_{uuid.uuid4()}"
             jobInstance = {
                 "job_id": job_id,
@@ -332,7 +338,7 @@ async def send_command(request: CommandRequest, current_user: dict = Depends(get
                 tasks_collection.update_one(
                     {"id": task_id},
                     {"$set": {
-                        "isScheduled": True,
+                        "status": "scheduled",
                     },
                         "$push": {
                         "activeJobs": jobInstance
@@ -368,6 +374,11 @@ async def send_command(request: CommandRequest, current_user: dict = Depends(get
             if start_time < now:
                 start_time += timedelta(days=1)
                 end_time += timedelta(days=1)
+                
+                
+            clashes_check = check_for_Job_clashes(start_time, end_time, task_id, device_ids)
+            if clashes_check:
+                return JSONResponse(content={"message": "Task already Scheduled on this time"}, status_code=400)
 
             # Calculate time window in minutes
             time_window = (end_time - start_time).total_seconds() / 60
@@ -401,7 +412,7 @@ async def send_command(request: CommandRequest, current_user: dict = Depends(get
                     tasks_collection.update_one(
                         {"id": task_id},
                         {"$set": {
-                            "isScheduled": True,
+                            "status": "scheduled",
                         },
                             "$push": {
                             "activeJobs": jobInstance
