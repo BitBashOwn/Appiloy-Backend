@@ -305,6 +305,7 @@ async def send_command(request: CommandRequest, current_user: dict = Depends(get
             
             clashes_check = check_for_Job_clashes(target_time_utc, target_end_time_utc, task_id, device_ids)
             if clashes_check:
+                print("returned true from clash check")
                 return JSONResponse(content={"message": "Task already Scheduled on this time"}, status_code=400)
             
             job_id = f"cmd_{uuid.uuid4()}"
@@ -378,6 +379,7 @@ async def send_command(request: CommandRequest, current_user: dict = Depends(get
                 
             clashes_check = check_for_Job_clashes(start_time, end_time, task_id, device_ids)
             if clashes_check:
+                print("clash detected")
                 return JSONResponse(content={"message": "Task already Scheduled on this time"}, status_code=400)
 
             # Calculate time window in minutes

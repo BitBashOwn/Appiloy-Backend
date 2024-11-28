@@ -467,8 +467,67 @@ def get_Running_Tasks(
     return runningTasks
 
 
+# def check_for_Job_clashes(start_time: datetime, end_time: datetime, task_id: str, device_ids: List[str]) -> bool:
+#     print("entered check_for_Job_clashes")
+#     # Fetch active jobs for the task
+#     task = tasks_collection.find_one(
+#         {"id": task_id}, {"_id": 0, "activeJobs": 1}
+#     )
+    
+#     if not task or 'activeJobs' not in task:
+#         return False
+    
+#     # Iterate through active jobs
+#     for active_job in task.get('activeJobs', []):
+#         # Get device_ids from this specific job
+#         print(active_job)
+#         devices_list = active_job.get('device_ids', [])
+        
+#         # Check if there's any common device
+#         if set(devices_list) & set(device_ids):
+#             print("device found")
+#             job_start_time = active_job.get("startTime")
+#             job_end_time = active_job.get("endTime")
+#             print(start_time)
+#             print(end_time)
+#             print(job_start_time)
+#             print(job_end_time)
+#             # Check if job times are valid
+#             if not job_start_time or not job_end_time:
+#               print("job times are invalid")  
+#               continue
+#             print("job times are valid")  
+#             # Convert to datetime if they're strings
+#             try:
+#                 if isinstance(job_start_time, str):
+#                     job_start_time = datetime.fromisoformat(job_start_time)
+#                     job_start_time = job_start_time.replace(tzinfo=datetime.timezone.utc)
+                    
+#                 if isinstance(job_end_time, str):
+#                     job_end_time = datetime.fromisoformat(job_end_time)
+#                     job_end_time = job_end_time.replace(tzinfo=datetime.timezone.utc)
+                    
+#             except ValueError as e:
+#                 print(f"DateTime parsing error: {e}")
+#                 continue
+              
+#             print(start_time)
+#             print(end_time)
+#             print(job_start_time)
+#             print(job_end_time)
+            
+#             # Check for time overlaps
+#             if (start_time >= job_start_time and start_time <= job_end_time) or \
+#                (end_time >= job_start_time and end_time <= job_end_time) or \
+#                (start_time <= job_start_time and end_time >= job_end_time):
+#                 print("time clash detected")
+#                 return True
+#     print("no clash found")  
+#     return False
+
+
+
 def check_for_Job_clashes(start_time: datetime, end_time: datetime, task_id: str, device_ids: List[str]) -> bool:
-    # Fetch active jobs for the task
     task = tasks_collection.find_one(
         {"id": task_id}, {"_id": 0, "activeJobs": 1}
     )
@@ -476,30 +535,34 @@ def check_for_Job_clashes(start_time: datetime, end_time: datetime, task_id: str
     if not task or 'activeJobs' not in task:
         return False
     
-    # Iterate through active jobs
     for active_job in task.get('activeJobs', []):
-        # Get device_ids from this specific job
         devices_list = active_job.get('device_ids', [])
         
-        # Check if there's any common device
         if set(devices_list) & set(device_ids):
             job_start_time = active_job.get("startTime")
             job_end_time = active_job.get("endTime")
             
-            # Check if job times are valid
             if not job_start_time or not job_end_time:
                 continue
-            
-            # Convert to datetime if they're strings
-            if isinstance(job_start_time, str):
-                job_start_time = datetime.fromisoformat(job_start_time.replace('Z', '+00:00'))
-            if isinstance(job_end_time, str):
-                job_end_time = datetime.fromisoformat(job_end_time.replace('Z', '+00:00'))
-            
-            # Check for time overlaps
-            if (start_time >= job_start_time and start_time <= job_end_time) or \
-               (end_time >= job_start_time and end_time <= job_end_time) or \
-               (start_time <= job_start_time and end_time >= job_end_time):
-                return True
-    
+
+            try:
+                # Convert start_time and end_time to naive datetime for comparison
+                start_time_naive = start_time.replace(tzinfo=None)
+                end_time_naive = end_time.replace(tzinfo=None)
+                
+                if isinstance(job_start_time, str):
+                    job_start_time = datetime.fromisoformat(job_start_time)
+                if isinstance(job_end_time, str):
+                    job_end_time = datetime.fromisoformat(job_end_time)
+                
+                if (start_time_naive >= job_start_time and start_time_naive <= job_end_time) or \
+                   (end_time_naive >= job_start_time and end_time_naive <= job_end_time) or \
+                   (start_time_naive <= job_start_time and end_time_naive >= job_end_time):
+                    print("found clash")
+                    return True
+                    
+            except ValueError as e:
+                print(f"DateTime parsing error: {e}")
+                continue
+    print("no clash found")            
     return False
