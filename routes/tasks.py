@@ -109,7 +109,7 @@ async def get_scheduled_tasks(current_user: dict = Depends(get_current_user)):
     try:
         # Get scheduled tasks, excluding activeJobs and _id
         result = list(tasks_collection.find(
-            {"email": current_user.get("email"), "isScheduled": True}, {"_id": 0, "activeJobs": 0}))
+            {"email": current_user.get("email"), "status": "scheduled"}, {"_id": 0, "activeJobs": 0}))
 
         for task in result:
             # Convert activationDate to ISO format if it's a datetime object
@@ -139,7 +139,7 @@ async def get_running_tasks(current_user: dict = Depends(get_current_user)):
     try:
         # Get scheduled tasks, excluding activeJobs and _id
         result = list(tasks_collection.find(
-            {"email": current_user.get("email"), "isScheduled": True}, {"_id": 0}))
+            {"email": current_user.get("email"), "status": "running"}, {"_id": 0}))
         
         result = get_Running_Tasks(result)
         for task in result:

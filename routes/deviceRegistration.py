@@ -137,12 +137,6 @@ async def check_device_registration(device_id: str):
 #         device_connections.pop(device_id, None)
 
 
-
-
-
-
-
-
 @device_router.websocket("/ws/{device_id}")
 async def websocket_endpoint(websocket: WebSocket, device_id: str):
     await websocket.accept()
@@ -162,33 +156,48 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                 task_id = payload.get("task_id")
                 job_id = payload.get("job_id")
 
-                print(f"Parsed payload: message={message}, task_id={task_id}, job_id={job_id}")
-                
+                print(f"Parsed payload: message={
+                      message}, task_id={task_id}, job_id={job_id}"
+                      )
+
                 tasks_collection.update_one(
-                    {"id": task_id},
-                    {
-                        "$pull": {
-                            "activeJobs": {
-                                "job_id": job_id
+                        {"id": task_id},
+                        {
+                            "$pull": {
+                                "activeJobs": {
+                                    "job_id": job_id
+                                }
                             }
                         }
-                    }
-)
+                    )
 
-                
+                tasks_collection.update_one(
+                        {"id": task_id},
+                        {
+                            "$set": {
+                                "status": {
+                                    "$cond": [
+                                        {"$eq": [{"$size": "$activeJobs"}, 0]},
+                                            "awaiting",
+                                            "scheduled"
+                                        ]
+                                    }
+                                }
+                        }
+                    )
+
+
             except json.JSONDecodeError:
                 print(f"Invalid JSON received from {device_id}: {data}")
     except WebSocketDisconnect:
         print(f"Device {device_id} disconnected.")
         # Update device status to false when disconnected
-        device_collection.update_one({"deviceId": device_id}, {"$set": {"status": False}})
+        device_collection.update_one({"deviceId": device_id}, {
+                                     "$set": {"status": False}})
         active_connections.remove(websocket)
         device_connections.pop(device_id, None)
 
-        
-        
-        
-        
+
 # async def send_command_to_devices(device_ids, command):
 #     print(f"Executing command for devices: {device_ids}, command: {command}")
 #     for device_id in device_ids:
@@ -216,6 +225,7 @@ async def send_command_to_devices(device_ids, command):
             not_connected_devices.append(device_id)
 
     # Send commands to connected devices
+    task_status_updated = False 
     for device_id, websocket in connected_devices:
         try:
             await websocket.send_text(json.dumps(command))
@@ -223,11 +233,12 @@ async def send_command_to_devices(device_ids, command):
             print(f"Error sending command to device {device_id}: {str(e)}")
             not_connected_devices.append(device_id)
         else:
-            # Update task status if successfully sent
-            tasks_collection.update_one(
-                {"id": task_id},
-                {"$set": {"status": "running"}}
-            )
+            if not task_status_updated:
+                tasks_collection.update_one(
+                    {"id": task_id},
+                    {"$set": {"status": "running"}}
+                )
+                task_status_updated = True
 
     # Handle not connected devices
     if not_connected_devices:
@@ -300,8 +311,8 @@ async def send_command(request: CommandRequest, current_user: dict = Depends(get
                 "endTime": target_end_time_utc,
                 "device_ids": device_ids
             }
-            
-            command['job_id']= job_id
+
+            command['job_id'] = job_id
             print(f"Scheduling details:")
             print(f"Original time string: {time_str}")
             print(f"Target time (local): {target_time}")
@@ -320,7 +331,7 @@ async def send_command(request: CommandRequest, current_user: dict = Depends(get
                     id=job_id,  # Unique job ID
                     name=f"Command for devices {device_ids}"
                 )
-                
+
                 tasks_collection.update_one(
                     {"id": task_id},
                     {"$set": {
@@ -445,7 +456,8 @@ async def send_command(request: CommandRequest, current_user: dict = Depends(get
                                 "activeJobs": jobInstance
                             }}
                         )
-                        print(f"Scheduled part {i+1}: {duration} minutes at {start_time}")
+                        print(f"Scheduled part {
+                              i+1}: {duration} minutes at {start_time}")
                 except Exception as e:
                     print(f"Failed to schedule split jobs: {str(e)}")
                     raise HTTPException(
