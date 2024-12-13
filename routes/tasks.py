@@ -80,7 +80,7 @@ async def get_Task(current_user: dict = Depends(get_current_user)):
     print("entered /get-all-task")
     try:
         tasks = list(tasks_collection.find(
-            {"email": current_user.get("email")}, {"_id": 0}))
+            {"email": current_user.get("email")}, {"_id": 0, "activeJobs": 0}))
         for task in tasks:
             if 'activationDate' in task and isinstance(task['activationDate'], datetime):
                 task['activationDate'] = task['activationDate'].isoformat()
