@@ -57,6 +57,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import uvicorn
 from routes.bots import bots_router
 from routes.tasks import tasks_router
+from Bot.discord_bot import bot_instance
+import asyncio
 
 app = FastAPI()
 
@@ -86,28 +88,20 @@ app.include_router(reset_router)
 app.include_router(devices_router)
 app.include_router(bots_router)
 app.include_router(tasks_router)
-app.include_router(device_router, tags=["Android endpoints"])  # Added by "Sohaib"
-
+app.include_router(device_router, tags=["Android endpoints"])
+# app.include_router(device_router, tags=["Android endpoints"])  # Added by "Sohaib"
 
 #////////////////////////////////////
 scheduler = BackgroundScheduler()
 
-# Event to start the scheduler when the app starts
-# @app.on_event("startup")
-# async def start_scheduler():
-#     print("Starting scheduler...")
-#     scheduler.start()
-#     print("Scheduler started successfully.")
 
-# # Event to shut down the scheduler when the app stops
-# @app.on_event("shutdown")
-# async def shutdown_scheduler():
-#     print("Shutting down scheduler...")
-#     scheduler.shutdown()
-#     print("Scheduler shutdown complete.")
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(bot_instance.start_bot())
     
-#//////////////////////////////////////
-
-
+    
+# for route in app.routes:
+#     print(f"Route: {route.path}, Methods: {route.methods if hasattr(route, 'methods') else 'WebSocket'}")
+    
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

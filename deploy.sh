@@ -13,3 +13,11 @@ sudo systemctl reload nginx
 
 # run command
 # python -m uvicorn main:app --reload
+
+# deploy commands
+# cd /var/www/Appilot
+# chmod +x deploy.sh
+# sudo ./deploy.sh
+
+# to see logs 
+# sudo journalctl -u fastapi.service -f

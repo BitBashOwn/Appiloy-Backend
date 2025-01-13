@@ -134,6 +134,15 @@ async def get_scheduled_tasks(current_user: dict = Depends(get_current_user)):
         return JSONResponse(content={"message": "Error fetching scheduled tasks", "error": str(e)}, status_code=400)
     
     
+    
+    
+    
+    
+    
+    
+    
+    
+    
 @tasks_router.get("/get-running-tasks")
 async def get_running_tasks(current_user: dict = Depends(get_current_user)):
     try:
@@ -169,6 +178,13 @@ async def get_running_tasks(current_user: dict = Depends(get_current_user)):
         return JSONResponse(content={"message": "Error fetching running tasks", "error": str(e)}, status_code=400)
 
 
+
+
+
+
+
+
+
 @tasks_router.delete("/delete-tasks")
 async def delete_tasks(tasks: deleteRequest, current_user: dict = Depends(get_current_user)):
     # print("Devices to delete:", tasks.tasks)
@@ -178,6 +194,20 @@ async def delete_tasks(tasks: deleteRequest, current_user: dict = Depends(get_cu
         {"id": {"$in": tasks.tasks}, "email": current_user.get("email")})
 
     return JSONResponse(content={"message": "Devices deleted successfully"}, status_code=200)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 @tasks_router.get("/get-task-fields")
@@ -194,6 +224,13 @@ def get_task_fields(id: str, fields: List[str] = Query(...), current_user: dict 
         return JSONResponse(content={"message": "could not fetch data", "error": str(e)}, status_code=500)
 
 
+
+
+
+
+
+
+
 @tasks_router.post("/save-inputs")
 async def save_task_inputs(inputs: inputsSaveRequest, current_user: dict = Depends(get_current_user)):
     result = tasks_collection.update_one({"id": inputs.id, "email": current_user.get(
@@ -202,12 +239,24 @@ async def save_task_inputs(inputs: inputsSaveRequest, current_user: dict = Depen
     return JSONResponse(content={"message": "Inputs updated successfully"}, status_code=200)
 
 
+
+
+
+
+
+
 @tasks_router.post("/save-device")
 async def save_task_devices(data: devicesSaveRequest, current_user: dict = Depends(get_current_user)):
     result = tasks_collection.update_one({"id": data.id, "email": current_user.get(
         "email")}, {"$set": {"deviceIds": data.devices}})
 
     return JSONResponse(content={"message": "devices updated successfully"}, status_code=200)
+
+
+
+
+
+
 
 
 @tasks_router.put("/update-task")
