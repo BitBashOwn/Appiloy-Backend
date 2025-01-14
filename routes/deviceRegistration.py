@@ -136,8 +136,8 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                     "message": message,
                     "task_id": task_id,
                     "job_id": job_id,
-                    "server_id":1277527228401319936,
-                    "channel_id": 1326674015875764255
+                    "server_id":1322806619754598501,
+                    "channel_id": 1322806620199063604
                 })
 
                 # Update MongoDB
