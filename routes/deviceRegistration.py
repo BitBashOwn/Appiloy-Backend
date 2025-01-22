@@ -52,14 +52,6 @@ class CommandRequest(BaseModel):
     command: dict
     device_ids: List[str]
 
-# class CommandRequest(BaseModel):
-#     command: dict
-#     device_ids: List[str]
-#     task: dict
-
-# Dependency for registering and validating the device
-
-
 def register_device(device_data: DeviceRegistration):
     device = device_collection.find_one({"deviceId": device_data.deviceId})
     if device:
@@ -131,16 +123,27 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                 job_id = payload.get("job_id")
 
                 print(f"Parsed payload: message={message}, task_id={task_id}, job_id={job_id}")
+                
+                taskData = tasks_collection.find_one(
+                    {"id": task_id}, {"serverId": 1, "channelId": 1, "_id": 0}
+                )
 
-                await bot_instance.send_message({
-                    "message": message,
-                    "task_id": task_id,
-                    "job_id": job_id,
-                    "server_id":1322806619754598501,
-                    "channel_id": 1322806620199063604
-                })
+                if taskData and taskData.get("serverId") and taskData.get("channelId"):
+                    server_id = int(taskData["serverId"]) if isinstance(taskData["serverId"], str) and taskData["serverId"].isdigit() else taskData["serverId"]
+                    channel_id = int(taskData["channelId"]) if isinstance(taskData["channelId"], str) and taskData["channelId"].isdigit() else taskData["channelId"]
 
-                # Update MongoDB
+                    await bot_instance.send_message({
+                        "message": message,
+                        "task_id": task_id,
+                        "job_id": job_id,
+                        "server_id": server_id,
+                        "channel_id": channel_id
+                    })
+
+                else:
+                    print(f"Skipping message send. Missing or empty serverId/channelId for task {task_id}")
+
+
                 tasks_collection.update_one(
                     {"id": task_id},
                     {
@@ -171,19 +174,6 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
         )
         active_connections.remove(websocket)
         device_connections.pop(device_id, None)
-
-# async def send_command_to_devices(device_ids, command):
-#     print(f"Executing command for devices: {device_ids}, command: {command}")
-#     for device_id in device_ids:
-#         websocket = device_connections.get(device_id)
-#         if websocket:
-#             # Send command as JSON
-#             await websocket.send_text(json.dumps(command))
-
-
-
-
-
 
 async def send_command_to_devices(device_ids, command):
     print(f"Executing command for devices: {device_ids}, command: {command}")
@@ -243,9 +233,6 @@ async def send_command_to_devices(device_ids, command):
             if is_recurring:
                 task = tasks_collection.find_one({"id": task_id})  
                 schedule_recurring_job(command, device_ids)
-    
-
-
 
 def parse_time(time_str: str) -> tuple:
     """Parse time string in 'HH:MM' format to a tuple of integers (hour, minute)."""
@@ -286,19 +273,11 @@ def schedule_single_job(start_time, end_time, device_ids, command, job_id: str, 
         print(f"Failed to schedule single job: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to schedule job: {str(e)}")
 
-
-
-
-
 def generate_random_durations_and_start_times(duration: int, start_time: datetime, end_time: datetime) -> tuple:
     """Generate random durations and start times for split jobs."""
     random_durations = generate_random_durations(duration)
     start_times = get_random_start_times(start_time, end_time, random_durations)
     return random_durations, start_times
-
-
-
-
 
 def schedule_split_jobs(start_times: List[datetime], random_durations: List[int], device_ids: List[str], command: dict, task_id: str) -> None:
     """Schedule multiple jobs based on random start times and durations."""
@@ -333,9 +312,6 @@ def schedule_split_jobs(start_times: List[datetime], random_durations: List[int]
         except Exception as e:
             print(f"Failed to schedule split job {i+1}: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Failed to schedule job: {str(e)}")
-
-
-
 
 def schedule_recurring_job(command: dict, device_ids: List[str]) -> None:
     """Schedule the next day's task within the specified time window"""
@@ -416,8 +392,6 @@ def schedule_recurring_job(command: dict, device_ids: List[str]) -> None:
         print(f"Failed to schedule next day's job: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to schedule next day's job: {str(e)}")
 
-
-
 @device_router.post("/send_command")
 async def send_command(request: CommandRequest, current_user: dict = Depends(get_current_user)):
     task_id = request.command.get("task_id")
@@ -495,8 +469,82 @@ async def send_command(request: CommandRequest, current_user: dict = Depends(get
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
+def generate_random_durations(total_duration: int, min_duration: int = 30) -> List[int]:
+    """
+    Generate 2 to 4 random durations that sum up to the total duration.
+    Each duration will be at least min_duration minutes.
+    """
+    num_durations = random.randint(
+        2, 4)  # Limit the number of partitions to 2, 3, or 4
 
+    if total_duration <= min_duration:
+        return [total_duration]
 
+    durations = []
+    remaining = total_duration
+
+    for _ in range(num_durations - 1):
+        max_possible = min(remaining - min_duration,
+                           remaining // (num_durations - len(durations)))
+        if max_possible <= min_duration:
+            break
+        duration = random.randint(min_duration, max_possible)
+        durations.append(duration)
+        remaining -= duration
+
+    durations.append(remaining)  # Add the remaining time to the last partition
+
+    return durations
+
+def get_random_start_times(
+    start_time: datetime,
+    end_time: datetime,
+    durations: List[int],
+    min_gap: float = 1.5
+) -> List[datetime]:
+    """
+    Generate random start times for each duration, ensuring minimum gap between sessions.
+    If end_time is less than or equal to start_time, end_time is considered the next day.
+    Returns list of start times in chronological order.
+    """
+
+    # If end_time is less than or equal to start_time, treat it as next day's time
+    if end_time <= start_time:
+        end_time += timedelta(days=1)
+
+    total_time_needed = sum(durations) + (len(durations) - 1) * min_gap
+    available_time = (end_time - start_time).total_seconds() / \
+        60  # Convert to minutes
+
+    # Check if there is enough time in the window
+    if total_time_needed > available_time:
+        raise ValueError(
+            f"Not enough time in the window for all sessions with minimum gaps")
+
+    start_times = []
+    current_time = start_time
+
+    # Calculate maximum gap possible
+    remaining_gaps = len(durations) - 1
+    for i, duration in enumerate(durations):
+        start_times.append(current_time)
+
+        if remaining_gaps > 0:
+            # Calculate the remaining time and the maximum possible gap
+            time_left = (end_time - current_time).total_seconds() / 60
+            time_needed = sum(durations[i+1:]) + remaining_gaps * min_gap
+            max_gap = (time_left - time_needed) / remaining_gaps
+
+            # Add a random gap after the session, but ensure it's at least min_gap
+            gap = random.uniform(
+                min_gap, max_gap) if max_gap > min_gap else min_gap
+            current_time += timedelta(minutes=duration + gap)
+            remaining_gaps -= 1
+        else:
+            # No more gaps to add, just adjust the current time
+            current_time += timedelta(minutes=duration)
+
+    return start_times
 
 
 
@@ -835,103 +883,6 @@ async def send_command(request: CommandRequest, current_user: dict = Depends(get
 #             status_code=400, detail=f"Invalid time format: {str(e)}")
 #     except Exception as e:
 #         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
-
-
-def generate_random_durations(total_duration: int, min_duration: int = 30) -> List[int]:
-    """
-    Generate 2 to 4 random durations that sum up to the total duration.
-    Each duration will be at least min_duration minutes.
-    """
-    num_durations = random.randint(
-        2, 4)  # Limit the number of partitions to 2, 3, or 4
-
-    if total_duration <= min_duration:
-        return [total_duration]
-
-    durations = []
-    remaining = total_duration
-
-    for _ in range(num_durations - 1):
-        max_possible = min(remaining - min_duration,
-                           remaining // (num_durations - len(durations)))
-        if max_possible <= min_duration:
-            break
-        duration = random.randint(min_duration, max_possible)
-        durations.append(duration)
-        remaining -= duration
-
-    durations.append(remaining)  # Add the remaining time to the last partition
-
-    return durations
-
-
-def get_random_start_times(
-    start_time: datetime,
-    end_time: datetime,
-    durations: List[int],
-    min_gap: float = 1.5
-) -> List[datetime]:
-    """
-    Generate random start times for each duration, ensuring minimum gap between sessions.
-    If end_time is less than or equal to start_time, end_time is considered the next day.
-    Returns list of start times in chronological order.
-    """
-
-    # If end_time is less than or equal to start_time, treat it as next day's time
-    if end_time <= start_time:
-        end_time += timedelta(days=1)
-
-    total_time_needed = sum(durations) + (len(durations) - 1) * min_gap
-    available_time = (end_time - start_time).total_seconds() / \
-        60  # Convert to minutes
-
-    # Check if there is enough time in the window
-    if total_time_needed > available_time:
-        raise ValueError(
-            f"Not enough time in the window for all sessions with minimum gaps")
-
-    start_times = []
-    current_time = start_time
-
-    # Calculate maximum gap possible
-    remaining_gaps = len(durations) - 1
-    for i, duration in enumerate(durations):
-        start_times.append(current_time)
-
-        if remaining_gaps > 0:
-            # Calculate the remaining time and the maximum possible gap
-            time_left = (end_time - current_time).total_seconds() / 60
-            time_needed = sum(durations[i+1:]) + remaining_gaps * min_gap
-            max_gap = (time_left - time_needed) / remaining_gaps
-
-            # Add a random gap after the session, but ensure it's at least min_gap
-            gap = random.uniform(
-                min_gap, max_gap) if max_gap > min_gap else min_gap
-            current_time += timedelta(minutes=duration + gap)
-            remaining_gaps -= 1
-        else:
-            # No more gaps to add, just adjust the current time
-            current_time += timedelta(minutes=duration)
-
-    return start_times
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 # old 
 # @device_router.websocket("/ws/{device_id}")

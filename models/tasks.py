@@ -18,6 +18,8 @@ class taskModel(BaseModel):
     LastModifiedDate: Optional[datetime] = None
     activationDate: Optional[datetime] = None
     deviceIds: Optional[List[str]] = Field(default_factory=list)
+    serverId: Optional[str] = None
+    channelId: Optional[str] = None
     
 
 

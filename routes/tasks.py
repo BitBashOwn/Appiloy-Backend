@@ -14,16 +14,13 @@ import traceback
 class deleteRequest(BaseModel):
     tasks: list
 
-
 class inputsSaveRequest(BaseModel):
     inputs: list
     id: str
 
-
 class devicesSaveRequest(BaseModel):
     devices: list
     id: str
-
 
 tasks_router = APIRouter()
 
@@ -43,13 +40,11 @@ async def create_Task(task: taskModel, current_user: dict = Depends(get_current_
             "deviceIds": [],
             "schedules": bot.get("schedules")
         })
-        # task_dict["bot"] = ObjectId(task_dict["bot"])
         result = tasks_collection.insert_one(task_dict)
         return JSONResponse(content={"message": "Task created successfully!", "id": task_id}, status_code=200)
 
     except JWTError:
         return JSONResponse(content={"message": "sorry could not create task"}, status_code=400)
-
 
 @tasks_router.get("/get-task")
 async def get_Task(id: str, current_user: dict = Depends(get_current_user)):
@@ -73,7 +68,6 @@ async def get_Task(id: str, current_user: dict = Depends(get_current_user)):
         print(f"Error: {e}")
         raise HTTPException(
             status_code=400, detail="Error fetching task or bot data")
-
 
 @tasks_router.get("/get-all-task")
 async def get_Task(current_user: dict = Depends(get_current_user)):
@@ -132,17 +126,7 @@ async def get_scheduled_tasks(current_user: dict = Depends(get_current_user)):
         print(f"Exception occurred: {str(e)}")
         traceback.print_exc()
         return JSONResponse(content={"message": "Error fetching scheduled tasks", "error": str(e)}, status_code=400)
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
+
 @tasks_router.get("/get-running-tasks")
 async def get_running_tasks(current_user: dict = Depends(get_current_user)):
     try:
@@ -177,14 +161,6 @@ async def get_running_tasks(current_user: dict = Depends(get_current_user)):
         traceback.print_exc()
         return JSONResponse(content={"message": "Error fetching running tasks", "error": str(e)}, status_code=400)
 
-
-
-
-
-
-
-
-
 @tasks_router.delete("/delete-tasks")
 async def delete_tasks(tasks: deleteRequest, current_user: dict = Depends(get_current_user)):
     # print("Devices to delete:", tasks.tasks)
@@ -194,21 +170,6 @@ async def delete_tasks(tasks: deleteRequest, current_user: dict = Depends(get_cu
         {"id": {"$in": tasks.tasks}, "email": current_user.get("email")})
 
     return JSONResponse(content={"message": "Devices deleted successfully"}, status_code=200)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 @tasks_router.get("/get-task-fields")
 def get_task_fields(id: str, fields: List[str] = Query(...), current_user: dict = Depends(get_current_user)):
@@ -223,27 +184,12 @@ def get_task_fields(id: str, fields: List[str] = Query(...), current_user: dict 
     except Exception as e:
         return JSONResponse(content={"message": "could not fetch data", "error": str(e)}, status_code=500)
 
-
-
-
-
-
-
-
-
 @tasks_router.post("/save-inputs")
 async def save_task_inputs(inputs: inputsSaveRequest, current_user: dict = Depends(get_current_user)):
     result = tasks_collection.update_one({"id": inputs.id, "email": current_user.get(
         "email")}, {"$set": {"inputs": inputs.inputs}})
 
     return JSONResponse(content={"message": "Inputs updated successfully"}, status_code=200)
-
-
-
-
-
-
-
 
 @tasks_router.post("/save-device")
 async def save_task_devices(data: devicesSaveRequest, current_user: dict = Depends(get_current_user)):
@@ -252,13 +198,6 @@ async def save_task_devices(data: devicesSaveRequest, current_user: dict = Depen
 
     return JSONResponse(content={"message": "devices updated successfully"}, status_code=200)
 
-
-
-
-
-
-
-
 @tasks_router.put("/update-task")
 async def update_task(data: dict, current_user: dict = Depends(get_current_user)):
     print(data)
@@ -266,6 +205,3 @@ async def update_task(data: dict, current_user: dict = Depends(get_current_user)
         "email")}, {"$set": data["data"]})
 
     return JSONResponse(content={"message": "Updated successfully"}, status_code=200)
-
-
-

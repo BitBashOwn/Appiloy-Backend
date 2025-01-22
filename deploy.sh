@@ -12,7 +12,7 @@ sudo systemctl reload nginx
 
 
 # run command
-# python -m uvicorn main:app --reload
+# python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 # deploy commands
 # cd /var/www/Appilot
