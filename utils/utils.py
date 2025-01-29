@@ -566,3 +566,23 @@ def check_for_Job_clashes(start_time: datetime, end_time: datetime, task_id: str
                 continue
     print("no clash found")            
     return False
+  
+  
+  
+def split_message(message, max_length=2000):
+    """Splits a long message into chunks of max_length characters without breaking lines."""
+    chunks = []
+    lines = message.split("\n")
+    current_chunk = ""
+
+    for line in lines:
+        if len(current_chunk) + len(line) + 1 > max_length:
+            chunks.append(current_chunk)
+            current_chunk = line  # Start new chunk
+        else:
+            current_chunk += "\n" + line if current_chunk else line  # Append line
+    
+    if current_chunk:
+        chunks.append(current_chunk)  # Append the last chunk
+    
+    return chunks
