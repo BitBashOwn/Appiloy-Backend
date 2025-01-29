@@ -574,8 +574,7 @@ def schedule_recurring_job(command: dict, device_ids: List[str]) -> None:
             }
         )
 
-        print(f"Scheduled next day's task for {
-              random_start_time} ({time_zone})")
+        print(f"Scheduled next day's task for {random_start_time} ({time_zone})")
 
     except Exception as e:
         print(f"Failed to schedule next day's job: {str(e)}")
