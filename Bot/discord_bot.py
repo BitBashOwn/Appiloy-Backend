@@ -56,18 +56,17 @@ class AppilotBot:
             return
 
         try:
-            match type:
-                case "final":
+            if type == "final":
                     embed = discord.Embed(
                     title="Task Final Update",
                     color=discord.Color.green()
                 )
-                case "update":
+            elif type == "update":
                     embed = discord.Embed(
                     title="Task Update",
                     color=discord.Color.blue()
                 )
-                case "error":
+            elif type == "error":
                     embed = discord.Embed(
                     title="Error",
                     color=discord.Color.red()
