@@ -119,8 +119,23 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                             {"id": task_id}, {"serverId": 1, "channelId": 1, "_id": 0}
                         )
                 
-                match message_type:
-                    case "update":
+                if message_type == "update":
+                    if taskData and taskData.get("serverId") and taskData.get("channelId"):
+                        server_id = int(taskData["serverId"]) if isinstance(
+                            taskData["serverId"], str) and taskData["serverId"].isdigit() else taskData["serverId"]
+                        channel_id = int(taskData["channelId"]) if isinstance(
+                            taskData["channelId"], str) and taskData["channelId"].isdigit() else taskData["channelId"]
+
+                        await bot_instance.send_message({
+                            "message": message,
+                            "task_id": task_id,
+                            "job_id": job_id,
+                            "server_id": server_id,
+                            "channel_id": channel_id,
+                            "type": "update"
+                        })
+
+                    elif message_type == "error":
                         if taskData and taskData.get("serverId") and taskData.get("channelId"):
                             server_id = int(taskData["serverId"]) if isinstance(
                                 taskData["serverId"], str) and taskData["serverId"].isdigit() else taskData["serverId"]
@@ -128,31 +143,15 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                                 taskData["channelId"], str) and taskData["channelId"].isdigit() else taskData["channelId"]
 
                             await bot_instance.send_message({
-                                        "message": message,
-                                        "task_id": task_id,
-                                        "job_id": job_id,
-                                        "server_id": server_id,
-                                        "channel_id": channel_id,
-                                        "type":"update"
-                                    })
-                            
-                    case "error":
-                        if taskData and taskData.get("serverId") and taskData.get("channelId"):
-                            server_id = int(taskData["serverId"]) if isinstance(
-                                taskData["serverId"], str) and taskData["serverId"].isdigit() else taskData["serverId"]
-                            channel_id = int(taskData["channelId"]) if isinstance(
-                                taskData["channelId"], str) and taskData["channelId"].isdigit() else taskData["channelId"]
+                                "message": message,
+                                "task_id": task_id,
+                                "job_id": job_id,
+                                "server_id": server_id,
+                                "channel_id": channel_id,
+                                "type": "error"
+                            })
 
-                            await bot_instance.send_message({
-                                        "message": message,
-                                        "task_id": task_id,
-                                        "job_id": job_id,
-                                        "server_id": server_id,
-                                        "channel_id": channel_id,
-                                        "type":"error"
-                                    })
-                            
-                    case "final":
+                    elif message_type == "final":
                         if taskData and taskData.get("serverId") and taskData.get("channelId"):
                             server_id = int(taskData["serverId"]) if isinstance(
                                 taskData["serverId"], str) and taskData["serverId"].isdigit() else taskData["serverId"]
@@ -171,7 +170,7 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                                         "job_id": job_id,
                                         "server_id": server_id,
                                         "channel_id": channel_id,
-                                        "type":"final"
+                                        "type": "final"
                                     })
                             else:
                                 await bot_instance.send_message({
@@ -180,12 +179,11 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                                     "job_id": job_id,
                                     "server_id": server_id,
                                     "channel_id": channel_id,
-                                    "type":"final"
+                                    "type": "final"
                                 })
 
                         else:
-                            print(
-                                f"Skipping message send. Missing or empty serverId/channelId for task {task_id}")
+                            print(f"Skipping message send. Missing or empty serverId/channelId for task {task_id}")
 
                         tasks_collection.update_one(
                             {"id": task_id},
