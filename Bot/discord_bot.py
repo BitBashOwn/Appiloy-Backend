@@ -43,6 +43,7 @@ class AppilotBot:
         
         server_id = message_data.get("server_id")
         channel_id = message_data.get("channel_id")
+        type = message_data.get("type")
         
         self.guild = self.bot.get_guild(server_id)
         if not self.guild:
@@ -55,10 +56,23 @@ class AppilotBot:
             return
 
         try:
-            embed = discord.Embed(
-                title="Task Update",
-                color=discord.Color.blue()
-            )
+            match type:
+                case "final":
+                    embed = discord.Embed(
+                    title="Task Final Update",
+                    color=discord.Color.green()
+                )
+                case "update":
+                    embed = discord.Embed(
+                    title="Task Update",
+                    color=discord.Color.blue()
+                )
+                case "error":
+                    embed = discord.Embed(
+                    title="Error",
+                    color=discord.Color.red()
+                )
+                    
             embed.add_field(name="Stats", value=message_data.get("message", "No message"), inline=False)
             
             await self.channel.send(embed=embed)

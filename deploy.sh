@@ -21,3 +21,33 @@ sudo systemctl reload nginx
 
 # to see logs 
 # sudo journalctl -u fastapi.service -f
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# fastAPi.service file:
+# sudo nano /etc/systemd/system/fastapi.service
+
+# [Unit]
+# Description=FastAPI application
+# After=network.target
+
+# [Service]
+# User=root
+# Group=www-data
+# WorkingDirectory=/var/www/Appilot
+# ExecStart=/var/www/Appilot/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000
+# Restart=always
+
+# [Install]
+# WantedBy=multi-user.target

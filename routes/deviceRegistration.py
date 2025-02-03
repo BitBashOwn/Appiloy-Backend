@@ -33,8 +33,6 @@ active_connections: List[WebSocket] = []
 device_connections = {}  # To store device_id: websocket mapping
 
 # Device registration model with updated fields
-
-
 class DeviceRegistration(BaseModel):
     deviceName: str
     deviceId: str
@@ -45,8 +43,6 @@ class DeviceRegistration(BaseModel):
     email: str
 
 # Command model
-
-
 class CommandRequest(BaseModel):
     command: dict
     device_ids: List[str]
@@ -65,15 +61,11 @@ def register_device(device_data: DeviceRegistration):
     return {"message": "Device registered successfully", "deviceId": device_data.deviceId}
 
 # Device Registration Endpoint (POST)
-
-
 @device_router.post("/register_device")
 async def register_device_endpoint(device_data: DeviceRegistration):
     return register_device(device_data)
 
 # Endpoint to check the device status
-
-
 @device_router.get("/device_status/{device_id}")
 async def check_device_status(device_id: str):
     device = device_collection.find_one({"deviceId": device_id})
@@ -82,8 +74,6 @@ async def check_device_status(device_id: str):
     return {"device_id": device_id, "status": device["status"]}
 
 # Endpoint to update the device status
-
-
 @device_router.put("/update_status/{device_id}")
 async def update_device_status(device_id: str, status: bool):
     device = device_collection.find_one({"deviceId": device_id})
@@ -94,8 +84,6 @@ async def update_device_status(device_id: str, status: bool):
     return {"message": f"Device {device_id} status updated to {status}"}
 
 # Endpoint for checking device registration
-
-
 @device_router.get("/device_registration/{device_id}")
 async def check_device_registration(device_id: str):
     device = device_collection.find_one({"deviceId": device_id})
@@ -107,7 +95,6 @@ async def check_device_registration(device_id: str):
                                      "$set": {"status": True}})
 
     return True
-
 
 @device_router.websocket("/ws/{device_id}")
 async def websocket_endpoint(websocket: WebSocket, device_id: str):
@@ -126,64 +113,99 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                 message = payload.get("message")
                 task_id = payload.get("task_id")
                 job_id = payload.get("job_id")
-
+                message_type = payload.get("type")
                 print(f"Parsed payload: message={message}, task_id={task_id}, job_id={job_id}")
-
                 taskData = tasks_collection.find_one(
-                    {"id": task_id}, {"serverId": 1, "channelId": 1, "_id": 0}
-                )
+                            {"id": task_id}, {"serverId": 1, "channelId": 1, "_id": 0}
+                        )
+                
+                match message_type:
+                    case "update":
+                        if taskData and taskData.get("serverId") and taskData.get("channelId"):
+                            server_id = int(taskData["serverId"]) if isinstance(
+                                taskData["serverId"], str) and taskData["serverId"].isdigit() else taskData["serverId"]
+                            channel_id = int(taskData["channelId"]) if isinstance(
+                                taskData["channelId"], str) and taskData["channelId"].isdigit() else taskData["channelId"]
 
-                if taskData and taskData.get("serverId") and taskData.get("channelId"):
-                    server_id = int(taskData["serverId"]) if isinstance(
-                        taskData["serverId"], str) and taskData["serverId"].isdigit() else taskData["serverId"]
-                    channel_id = int(taskData["channelId"]) if isinstance(
-                        taskData["channelId"], str) and taskData["channelId"].isdigit() else taskData["channelId"]
-
-                    message_length = len(message) if message else 0
-                    print(f"Message Length: {message_length}")
-
-                    if message_length > 2000:
-                        message_chunks = split_message(message)
-                        for chunk in message_chunks:
                             await bot_instance.send_message({
-                                "message": chunk,
-                                "task_id": task_id,
-                                "job_id": job_id,
-                                "server_id": server_id,
-                                "channel_id": channel_id
-                            })
-                    else:
-                        await bot_instance.send_message({
-                            "message": message,
-                            "task_id": task_id,
-                            "job_id": job_id,
-                            "server_id": server_id,
-                            "channel_id": channel_id
-                        })
+                                        "message": message,
+                                        "task_id": task_id,
+                                        "job_id": job_id,
+                                        "server_id": server_id,
+                                        "channel_id": channel_id,
+                                        "type":"update"
+                                    })
+                            
+                    case "error":
+                        if taskData and taskData.get("serverId") and taskData.get("channelId"):
+                            server_id = int(taskData["serverId"]) if isinstance(
+                                taskData["serverId"], str) and taskData["serverId"].isdigit() else taskData["serverId"]
+                            channel_id = int(taskData["channelId"]) if isinstance(
+                                taskData["channelId"], str) and taskData["channelId"].isdigit() else taskData["channelId"]
 
-                else:
-                    print(
-                        f"Skipping message send. Missing or empty serverId/channelId for task {task_id}")
+                            await bot_instance.send_message({
+                                        "message": message,
+                                        "task_id": task_id,
+                                        "job_id": job_id,
+                                        "server_id": server_id,
+                                        "channel_id": channel_id,
+                                        "type":"error"
+                                    })
+                            
+                    case "final":
+                        if taskData and taskData.get("serverId") and taskData.get("channelId"):
+                            server_id = int(taskData["serverId"]) if isinstance(
+                                taskData["serverId"], str) and taskData["serverId"].isdigit() else taskData["serverId"]
+                            channel_id = int(taskData["channelId"]) if isinstance(
+                                taskData["channelId"], str) and taskData["channelId"].isdigit() else taskData["channelId"]
 
-                tasks_collection.update_one(
-                    {"id": task_id},
-                    {
-                        "$pull": {
-                            "activeJobs": {
-                                "job_id": job_id
+                            message_length = len(message) if message else 0
+                            print(f"Message Length: {message_length}")
+
+                            if message_length > 1000:
+                                message_chunks = split_message(message)
+                                for chunk in message_chunks:
+                                    await bot_instance.send_message({
+                                        "message": chunk,
+                                        "task_id": task_id,
+                                        "job_id": job_id,
+                                        "server_id": server_id,
+                                        "channel_id": channel_id,
+                                        "type":"final"
+                                    })
+                            else:
+                                await bot_instance.send_message({
+                                    "message": message,
+                                    "task_id": task_id,
+                                    "job_id": job_id,
+                                    "server_id": server_id,
+                                    "channel_id": channel_id,
+                                    "type":"final"
+                                })
+
+                        else:
+                            print(
+                                f"Skipping message send. Missing or empty serverId/channelId for task {task_id}")
+
+                        tasks_collection.update_one(
+                            {"id": task_id},
+                            {
+                                "$pull": {
+                                    "activeJobs": {
+                                        "job_id": job_id
+                                    }
+                                }
                             }
-                        }
-                    }
-                )
+                        )
 
-                task = tasks_collection.find_one({"id": task_id})
-                if task:
-                    status = "awaiting" if len(
-                        task.get("activeJobs", [])) == 0 else "scheduled"
-                    tasks_collection.update_one(
-                        {"id": task_id},
-                        {"$set": {"status": status}}
-                    )
+                        task = tasks_collection.find_one({"id": task_id})
+                        if task:
+                            status = "awaiting" if len(
+                                task.get("activeJobs", [])) == 0 else "scheduled"
+                            tasks_collection.update_one(
+                                {"id": task_id},
+                                {"$set": {"status": status}}
+                            )
 
             except json.JSONDecodeError:
                 print(f"Invalid JSON received from {device_id}: {data}")
@@ -196,7 +218,6 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
         )
         active_connections.remove(websocket)
         device_connections.pop(device_id, None)
-
 
 @device_router.post("/send_command")
 async def send_command(request: CommandRequest, current_user: dict = Depends(get_current_user)):
@@ -346,11 +367,13 @@ async def stop_task(request: StopTaskCommandRequest, current_user: dict = Depend
 
     print(f"[LOG] Connected devices: {connected_devices}")
     print(f"[LOG] Not connected devices: {list(not_connected_devices)}")  # Convert set to list for printing
+    task = tasks_collection.update_one(
+            {"id": task_Id}, 
+            {"$set":{"activeJobs": [], "status":"awaiting"}}
+        )
 
     return {"message": "Stop Command Sent successfully"}
-
-
-           
+       
 async def send_command_to_devices(device_ids, command):
     print(f"Executing command for devices: {device_ids}, command: {command}")
 
@@ -411,17 +434,14 @@ async def send_command_to_devices(device_ids, command):
             task = tasks_collection.find_one({"id": task_id})
             schedule_recurring_job(command, device_ids)
 
-
 def parse_time(time_str: str) -> tuple:
     """Parse time string in 'HH:MM' format to a tuple of integers (hour, minute)."""
     hour, minute = map(int, time_str.split(':'))
     return hour, minute
 
-
 def check_for_job_clashes(start_time, end_time, task_id, device_ids) -> bool:
     """Check for job clashes in the scheduled time window."""
     return check_for_Job_clashes(start_time, end_time, task_id, device_ids)
-
 
 def schedule_single_job(start_time, end_time, device_ids, command, job_id: str, task_id: str) -> None:
     """Schedule a single job with a defined start and end time."""
@@ -455,14 +475,12 @@ def schedule_single_job(start_time, end_time, device_ids, command, job_id: str, 
         raise HTTPException(
             status_code=500, detail=f"Failed to schedule job: {str(e)}")
 
-
 def generate_random_durations_and_start_times(duration: int, start_time: datetime, end_time: datetime) -> tuple:
     """Generate random durations and start times for split jobs."""
     random_durations = generate_random_durations(duration)
     start_times = get_random_start_times(
         start_time, end_time, random_durations)
     return random_durations, start_times
-
 
 def schedule_split_jobs(start_times: List[datetime], random_durations: List[int], device_ids: List[str], command: dict, task_id: str) -> None:
     """Schedule multiple jobs based on random start times and durations."""
@@ -498,7 +516,6 @@ def schedule_split_jobs(start_times: List[datetime], random_durations: List[int]
             print(f"Failed to schedule split job {i+1}: {str(e)}")
             raise HTTPException(
                 status_code=500, detail=f"Failed to schedule job: {str(e)}")
-
 
 def schedule_recurring_job(command: dict, device_ids: List[str]) -> None:
     """Schedule the next day's task within the specified time window"""
@@ -581,7 +598,6 @@ def schedule_recurring_job(command: dict, device_ids: List[str]) -> None:
         raise HTTPException(
             status_code=500, detail=f"Failed to schedule next day's job: {str(e)}")
 
-
 def generate_random_durations(total_duration: int, min_duration: int = 30) -> List[int]:
     """
     Generate 2 to 4 random durations that sum up to the total duration.
@@ -608,7 +624,6 @@ def generate_random_durations(total_duration: int, min_duration: int = 30) -> Li
     durations.append(remaining)  # Add the remaining time to the last partition
 
     return durations
-
 
 def get_random_start_times(
     start_time: datetime,

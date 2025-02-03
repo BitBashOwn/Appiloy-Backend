@@ -569,7 +569,7 @@ def check_for_Job_clashes(start_time: datetime, end_time: datetime, task_id: str
   
   
   
-def split_message(message, max_length=2000):
+def split_message(message, max_length=1000):
     """Splits a long message into chunks of max_length characters without breaking lines."""
     chunks = []
     lines = message.split("\n")
