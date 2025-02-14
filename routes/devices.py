@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from utils.utils import get_current_user
 # from models.devices import devices_collection
@@ -13,6 +13,11 @@ devices_router = APIRouter()
 
 class deleteRequest(BaseModel):
     devices: list
+
+
+class updateRequest(BaseModel):
+    devices: list
+    dataToUpdate: dict[str, str]
 
 
 # @devices_router.get("/devices")
@@ -42,7 +47,8 @@ def convert_object_id(data):
 async def get_devices(current_user: dict = Depends(get_current_user)):
 
     # Query the devices for the current user from MongoDB
-    data = list(db["devices"].find({"email": current_user.get("email")},{"_id":0}))
+    data = list(db["devices"].find(
+        {"email": current_user.get("email")}, {"_id": 0}))
 
     # Convert ObjectId fields to strings for JSON serialization
     # data = convert_object_id(data)
@@ -60,3 +66,29 @@ async def delete_devices(devices: deleteRequest, current_user: dict = Depends(ge
     print(result)
 
     return JSONResponse(content={"message": "Devices deleted successfully"}, status_code=200)
+
+
+@devices_router.patch("/edit-device")
+async def delete_devices(data: updateRequest, current_user: dict = Depends(get_current_user)):
+    print("Update Data Request Data:", data)
+
+    if not data.devices:
+        raise HTTPException(
+            status_code=400, detail="No devices provided for update.")
+    if not data.dataToUpdate:
+        raise HTTPException(
+            status_code=400, detail="No data provided to update")
+
+    update_query = {"$set": data.dataToUpdate}
+
+    result = db["devices"].update_many(
+        {"deviceId": {"$in": data.devices}, "email": current_user.get("email")}, update_query)
+
+    if result.matched_count == 0:
+        raise HTTPException(
+            status_code=404, detail="No devices found for the given IDs or user.")
+
+    return JSONResponse(
+        content={"message": f"{result.modified_count} devices updated successfully"},
+        status_code=200
+    )
