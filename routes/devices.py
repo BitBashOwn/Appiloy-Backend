@@ -6,7 +6,7 @@ from config.database import db
 from pydantic import BaseModel
 from bson import ObjectId
 import json
-
+from typing import Dict
 
 devices_router = APIRouter()
 
@@ -17,7 +17,7 @@ class deleteRequest(BaseModel):
 
 class updateRequest(BaseModel):
     devices: list
-    dataToUpdate: dict[str, str]
+    dataToUpdate: Dict[str, str]
 
 
 # @devices_router.get("/devices")
