@@ -1,7 +1,5 @@
 import discord
 from discord.ext import commands
-import asyncio
-import json
 
 class AppilotBot:
     def __init__(self):

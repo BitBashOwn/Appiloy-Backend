@@ -354,6 +354,8 @@ def create_access_token(email: str, user_id: str):
 
 async def get_current_user(request: Request):
     token = request.headers.get("Authorization")
+    print("token")
+    print(token)
     if not token:
         print("No Token")
         raise HTTPException(
