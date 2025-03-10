@@ -69,6 +69,11 @@ class AppilotBot:
                     title="Error",
                     color=discord.Color.red()
                 )
+            elif type == "info":
+                    embed = discord.Embed(
+                    title="Schedule",
+                    color=discord.Color.dark_green()
+                )
                     
             embed.add_field(name="Stats", value=message_data.get("message", "No message"), inline=False)
             
