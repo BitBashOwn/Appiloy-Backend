@@ -261,6 +261,12 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                 message_type = payload.get("type")
                 print(f"Parsed payload: message={message}, task_id={task_id}, job_id={job_id}")
                 
+                device_info = device_collection.find_one({"deviceId": device_id})
+                device_name = device_info.get("deviceName", device_id) if device_info else device_id
+                if message:
+                    message = f"Device Name: {device_name}\n\n{message}"
+                
+                
                 if message_type == "ping":
                     pong_response = {
                         "type": "pong",
@@ -1289,8 +1295,10 @@ async def send_schedule_notification(task, device_names, start_time, end_time, t
         return
     
     try:
+        user_tz = pytz.timezone(time_zone)
+        local_start_time = start_time.astimezone(user_tz)
         # Format times in user's timezone
-        formatted_start = start_time.strftime("%Y-%m-%d %H:%M")
+        formatted_start = local_start_time.strftime("%Y-%m-%d %H:%M")
         task_name = task.get("taskName", "Unknown Task")
         
         # Create device list string
@@ -1329,6 +1337,8 @@ async def send_split_schedule_notification(task, device_names, start_times, dura
         return
     
     try:
+        
+        
         task_name = task.get("taskName", "Unknown Task")
         device_list = ", ".join(device_names) if device_names else "No devices"
         
