@@ -13,6 +13,7 @@ from models.tasks import tasks_collection
 # from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.executors.pool import ThreadPoolExecutor
 import pytz
 import json
 import uuid
@@ -27,7 +28,15 @@ device_collection = db["devices"]
 
 # Create Router
 device_router = APIRouter(prefix="")
-scheduler = AsyncIOScheduler()
+executors = {
+    'default': ThreadPoolExecutor(20)  # 4 cores * 5
+}
+job_defaults = {
+    'misfire_grace_time': 300,  # Give jobs up to 5 minutes to execute if delayed
+    'coalesce': False           # Don't combine missed executions
+}
+scheduler = AsyncIOScheduler(executors=executors, job_defaults=job_defaults)
+# scheduler = AsyncIOScheduler()
 scheduler.start()
 print('started scheduling')
 
@@ -296,39 +305,9 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                             "channel_id": channel_id,
                             "type": "update"
                         })
-
-                    # For update messages, just remove the job_id from activeJobs without changing status
-                    tasks_collection.update_one(
-                        {"id": task_id},
-                        {
-                            "$pull": {
-                                "activeJobs": {
-                                    "job_id": job_id
-                                }
-                            }
-                        }
-                    )
-                    # Skip the status update for 'update' message type
                     continue
 
-                elif message_type == "error":
-                    print(f"Processing 'error' message for task_id {task_id}")
-                    if taskData and taskData.get("serverId") and taskData.get("channelId"):
-                        server_id = int(taskData["serverId"]) if isinstance(
-                            taskData["serverId"], str) and taskData["serverId"].isdigit() else taskData["serverId"]
-                        channel_id = int(taskData["channelId"]) if isinstance(
-                            taskData["channelId"], str) and taskData["channelId"].isdigit() else taskData["channelId"]
-
-                        await bot_instance.send_message({
-                            "message": message,
-                            "task_id": task_id,
-                            "job_id": job_id,
-                            "server_id": server_id,
-                            "channel_id": channel_id,
-                            "type": "error"
-                        })
-
-                elif message_type == "final":
+                elif message_type in ["error","final"]:
                     print(f"Processing 'final' message for task_id {task_id}")
                     if taskData and taskData.get("serverId") and taskData.get("channelId"):
                         server_id = int(taskData["serverId"]) if isinstance(
@@ -348,7 +327,7 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                                     "job_id": job_id,
                                     "server_id": server_id,
                                     "channel_id": channel_id,
-                                    "type": "final"
+                                    "type": message_type
                                 })
                         else:
                             await bot_instance.send_message({
@@ -357,14 +336,9 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                                 "job_id": job_id,
                                 "server_id": server_id,
                                 "channel_id": channel_id,
-                                "type": "final"
+                                "type": message_type
                             })
-
-                else:
-                    print(f"Skipping message send. Missing or empty serverId/channelId for task {task_id}")
-
-                # Update MongoDB to remove job_id from active jobs (only for non-update messages)
-                tasks_collection.update_one(
+                    tasks_collection.update_one(
                     {"id": task_id},
                     {
                         "$pull": {
@@ -373,16 +347,19 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                             }
                         }
                     }
-                )
-
-                # Check if task is still active and update status (only for non-update messages)
-                task = tasks_collection.find_one({"id": task_id})
-                if task:
-                    status = "awaiting" if len(task.get("activeJobs", [])) == 0 else "scheduled"
-                    tasks_collection.update_one(
-                        {"id": task_id},
-                        {"$set": {"status": status}}
                     )
+
+                    # Check if task is still active and update status (only for non-update messages)
+                    task = tasks_collection.find_one({"id": task_id})
+                    if task:
+                        status = "awaiting" if len(task.get("activeJobs", [])) == 0 else "scheduled"
+                        tasks_collection.update_one(
+                            {"id": task_id},
+                            {"$set": {"status": status}}
+                        )
+
+                else:
+                    print(f"Skipping message send. Missing or empty serverId/channelId for task {task_id}")
 
             except json.JSONDecodeError:
                 print(f"Invalid JSON received from {device_id}: {data}")
@@ -395,7 +372,6 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
         )
         active_connections.remove(websocket)
         device_connections.pop(device_id, None)
-
 
 @device_router.post("/send_command")
 async def send_command(request: CommandRequest, current_user: dict = Depends(get_current_user)):
@@ -489,6 +465,68 @@ async def send_command(request: CommandRequest, current_user: dict = Depends(get
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
+# @device_router.post("/stop_task")
+# async def stop_task(request: StopTaskCommandRequest, current_user: dict = Depends(get_current_user)):
+#     command = request.command
+#     task_ids = request.Task_ids
+
+#     print(f"[LOG] Received stop command: {command}")
+#     print(f"[LOG] Task IDs: {task_ids}")
+
+#     connected_devices = []
+#     not_connected_devices = set()
+
+#     for task_Id in task_ids:
+#         print(f"[LOG] Checking task ID: {task_Id}")
+
+#         task = tasks_collection.find_one(
+#             {"id": task_Id}
+#         )
+
+#         if not task:
+#             print(f"[LOG] Task {task_Id} not found in database.")
+#             continue  
+
+#         active_jobs = task.get("activeJobs", [])
+#         print(f"[LOG] Task {task_Id} has {len(active_jobs)} active jobs.")
+
+#         for job in active_jobs:
+#             job_id = job.get("job_id")
+#             device_ids = job.get("device_ids", [])
+
+#             if not job_id or not device_ids:
+#                 print(f"[LOG] Skipping job {job_id} due to missing fields.")
+#                 continue
+
+#             print(f"[LOG] Sending command for job {job_id}")
+
+#             for device_id in device_ids:
+#                 websocket = device_connections.get(device_id)
+#                 if websocket:
+#                     print(f"[LOG] Device {device_id} is connected for job {job_id}.")
+#                     connected_devices.append((device_id, websocket))
+#                 else:
+#                     print(f"[LOG] Device {device_id} is NOT connected for job {job_id}.")
+#                     not_connected_devices.add(device_id)
+
+#     print("[LOG] Attempting to send command to connected devices.")
+#     for device_id, websocket in connected_devices:
+#         try:
+#             await websocket.send_text(json.dumps(command))
+#             print(f"[LOG] Successfully sent command to device {device_id}")
+#         except Exception as e:
+#             print(f"[ERROR] Error sending command to device {device_id}: {str(e)}")
+#             not_connected_devices.add(device_id)
+
+#     print(f"[LOG] Connected devices: {connected_devices}")
+#     print(f"[LOG] Not connected devices: {list(not_connected_devices)}")  # Convert set to list for printing
+#     task = tasks_collection.update_one(
+#             {"id": task_Id}, 
+#             {"$set":{"activeJobs": [], "status":"awaiting"}}
+#         )
+
+#     return {"message": "Stop Command Sent successfully"}
+
 @device_router.post("/stop_task")
 async def stop_task(request: StopTaskCommandRequest, current_user: dict = Depends(get_current_user)):
     command = request.command
@@ -497,23 +535,35 @@ async def stop_task(request: StopTaskCommandRequest, current_user: dict = Depend
     print(f"[LOG] Received stop command: {command}")
     print(f"[LOG] Task IDs: {task_ids}")
 
+    if not task_ids:
+        return JSONResponse(status_code=404, content={"message": "No tasks provided"})
+
     connected_devices = []
     not_connected_devices = set()
+    device_names = {}
+    task_names = {}
+    
+    any_device_connected = False
 
-    for task_Id in task_ids:
-        print(f"[LOG] Checking task ID: {task_Id}")
+    # First, gather all device information
+    for task_id in task_ids:
+        print(f"[LOG] Checking task ID: {task_id}")
 
-        task = tasks_collection.find_one(
-            {"id": task_Id}, 
-            {"status": 1, "activeJobs": 1}  # Fetching only necessary fields
-        )
+        task = tasks_collection.find_one({"id": task_id})
 
         if not task:
-            print(f"[LOG] Task {task_Id} not found in database.")
-            continue  
+            print(f"[LOG] Task {task_id} not found in database.")
+            continue
+            
+        # Store task name for later use (using taskName field from the DB example)
+        task_names[task_id] = task.get("taskName", "Unknown Task")
 
         active_jobs = task.get("activeJobs", [])
-        print(f"[LOG] Task {task_Id} has {len(active_jobs)} active jobs.")
+        print(f"[LOG] Task {task_id} has {len(active_jobs)} active jobs.")
+        
+        if not active_jobs:
+            print(f"[LOG] No active jobs for task {task_id}")
+            continue
 
         for job in active_jobs:
             job_id = job.get("job_id")
@@ -523,32 +573,81 @@ async def stop_task(request: StopTaskCommandRequest, current_user: dict = Depend
                 print(f"[LOG] Skipping job {job_id} due to missing fields.")
                 continue
 
-            print(f"[LOG] Sending command for job {job_id}")
+            print(f"[LOG] Checking devices for job {job_id}")
 
+            # Get device names
             for device_id in device_ids:
+                # Get device name from database
+                device = device_collection.find_one({"id": device_id})
+                device_name = device.get("deviceName", device_id) if device else device_id
+                device_names[device_id] = device_name
+                
                 websocket = device_connections.get(device_id)
                 if websocket:
-                    print(f"[LOG] Device {device_id} is connected for job {job_id}.")
+                    print(f"[LOG] Device {device_id} ({device_name}) is connected for job {job_id}.")
                     connected_devices.append((device_id, websocket))
+                    any_device_connected = True
                 else:
-                    print(f"[LOG] Device {device_id} is NOT connected for job {job_id}.")
+                    print(f"[LOG] Device {device_id} ({device_name}) is NOT connected for job {job_id}.")
                     not_connected_devices.add(device_id)
 
+    # If no device is connected at all
+    if not any_device_connected:
+        return JSONResponse(status_code=404, content={"message": "No active devices connected"})
+
+    # Send stop command to connected devices
     print("[LOG] Attempting to send command to connected devices.")
     for device_id, websocket in connected_devices:
         try:
             await websocket.send_text(json.dumps(command))
-            print(f"[LOG] Successfully sent command to device {device_id}")
+            print(f"[LOG] Successfully sent command to device {device_id} ({device_names[device_id]})")
         except Exception as e:
-            print(f"[ERROR] Error sending command to device {device_id}: {str(e)}")
+            print(f"[ERROR] Error sending command to device {device_id} ({device_names[device_id]}): {str(e)}")
             not_connected_devices.add(device_id)
 
-    print(f"[LOG] Connected devices: {connected_devices}")
-    print(f"[LOG] Not connected devices: {list(not_connected_devices)}")  # Convert set to list for printing
-    task = tasks_collection.update_one(
-            {"id": task_Id}, 
-            {"$set":{"activeJobs": [], "status":"awaiting"}}
+    # Update tasks to remove active jobs
+    for task_id in task_ids:
+        tasks_collection.update_one(
+            {"id": task_id}, 
+            {"$set": {"activeJobs": [], "status": "awaiting"}}
         )
+
+    # # Send notification to Discord
+    # try:
+    #     for task_id in task_ids:
+    #         task = tasks_collection.find_one({"id": task_id})
+    #         if not task:
+    #             continue
+                
+    #         # Extract Discord notification details
+    #         server_id = task.get("serverId")
+    #         channel_id = task.get("channelId")
+    #         task_name = task.get("taskName", "Unknown Task")
+            
+    #         # Prepare message for Discord
+    #         message = f"All Jobs of Task {task_name} stopped.\n"
+            
+    #         # Add connected devices to message
+    #         connected_device_names = [device_names.get(device_id, device_id) for device_id, _ in connected_devices if device_id in task.get("deviceIds", [])]
+    #         if connected_device_names:
+    #             message += f"Connected devices: {', '.join(connected_device_names)}\n"
+            
+    #         # Add not connected devices to message
+    #         not_connected_device_names = [device_names.get(device_id, device_id) for device_id in not_connected_devices if device_id in task.get("deviceIds", [])]
+    #         if not_connected_device_names:
+    #             message += f"Not connected devices: {', '.join(not_connected_device_names)}"
+            
+    #         # Send to Discord using the provided method
+    #         if server_id and channel_id:
+    #             await bot_instance.send_message({
+    #                 "message": message,
+    #                 "task_id": task_id,
+    #                 "server_id": server_id,
+    #                 "channel_id": channel_id,
+    #                 "type": "update"
+    #             })
+    # except Exception as e:
+    #     print(f"[ERROR] Failed to send Discord notification: {str(e)}")
 
     return {"message": "Stop Command Sent successfully"}
     
@@ -782,10 +881,6 @@ def schedule_single_job(start_time, end_time, device_ids, command, job_id: str, 
         print(f"Failed to schedule single job: {str(e)}")
         raise HTTPException(
             status_code=500, detail=f"Failed to schedule job: {str(e)}")
-
-
-
-
 
 def generate_random_durations_and_start_times(duration: int, start_time: datetime, end_time: datetime) -> tuple:
     """Generate random durations and start times for split jobs."""
