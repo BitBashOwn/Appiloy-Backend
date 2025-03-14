@@ -32,8 +32,9 @@ executors = {
     'default': ThreadPoolExecutor(20)  # 4 cores * 5
 }
 job_defaults = {
-    'misfire_grace_time': 300,  # Give jobs up to 5 minutes to execute if delayed
-    'coalesce': False           # Don't combine missed executions
+    'misfire_grace_time': 300,  # Allow jobs to execute up to 5 minutes late
+    'coalesce': False,          # Don't combine missed executions
+    'max_instances': 10         # Allow many instances of the same job to run concurrently
 }
 scheduler = AsyncIOScheduler(executors=executors, job_defaults=job_defaults)
 # scheduler = AsyncIOScheduler()
