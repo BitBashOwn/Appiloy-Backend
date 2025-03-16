@@ -957,7 +957,7 @@ def schedule_split_jobs(start_times: List[datetime], random_durations: List[int]
         modified_command = {**command, "duration": duration, "job_id": job_id}
         try:
             scheduler.add_job(
-                send_command_to_devices,
+                wrapper_for_send_command,
                 trigger=DateTrigger(
                     run_date=start_time.astimezone(pytz.UTC),
                     timezone=pytz.UTC
@@ -1260,7 +1260,7 @@ def schedule_recurring_job(command: dict, device_ids: List[str]) -> None:
 
     try:
         scheduler.add_job(
-            send_command_to_devices,
+            wrapper_for_send_command,
             trigger=DateTrigger(
                 run_date=start_time_utc,
                 timezone=pytz.UTC
