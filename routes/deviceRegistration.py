@@ -652,6 +652,17 @@ async def stop_task(request: StopTaskCommandRequest, current_user: dict = Depend
 
     return {"message": "Stop Command Sent successfully"}
     
+def wrapper_for_send_command(device_ids, command):
+    # Create a new event loop for this thread
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        # Run the coroutine in this event loop
+        return loop.run_until_complete(send_command_to_devices(device_ids, command))
+    finally:
+        # Clean up
+        loop.close()
+
 async def send_command_to_devices(device_ids, command):
     print(f"Executing command for devices: {device_ids}, command: {command}")
 
@@ -845,7 +856,7 @@ def schedule_single_job(start_time, end_time, device_ids, command, job_id: str, 
 
     try:
         scheduler.add_job(
-            send_command_to_devices,
+            wrapper_for_send_command,
             trigger=DateTrigger(
                 run_date=start_time.astimezone(pytz.UTC),
                 timezone=pytz.UTC
