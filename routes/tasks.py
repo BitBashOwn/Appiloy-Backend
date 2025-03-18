@@ -1,18 +1,23 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pymongo import UpdateOne
 from models.tasks import taskModel, tasks_collection
 from models.bots import bots_collection
-from bson import ObjectId
 from fastapi.responses import JSONResponse
 from jose import JWTError
 from utils.utils import generate_unique_id, get_current_user,get_Running_Tasks
-from datetime import datetime
+from datetime import datetime, timedelta
 from pydantic import BaseModel
 from typing import List
 import traceback
+import pytz
 
 
 class deleteRequest(BaseModel):
     tasks: list
+    
+class clearOldJobsRequest(BaseModel):
+    tasks: list
+    command: dict
 
 class inputsSaveRequest(BaseModel):
     inputs: list
@@ -70,7 +75,7 @@ async def get_Task(id: str, current_user: dict = Depends(get_current_user)):
             status_code=400, detail="Error fetching task or bot data")
 
 @tasks_router.get("/get-all-task")
-async def get_Task(current_user: dict = Depends(get_current_user)):
+async def get_all_Task(current_user: dict = Depends(get_current_user)):
     print("entered /get-all-task")
     try:
         tasks = list(tasks_collection.find(
@@ -205,3 +210,169 @@ async def update_task(data: dict, current_user: dict = Depends(get_current_user)
         "email")}, {"$set": data["data"]})
 
     return JSONResponse(content={"message": "Updated successfully"}, status_code=200)
+
+@tasks_router.put("/clear-old-jobs")
+async def clear_old_jobs(tasks: clearOldJobsRequest, current_user: dict = Depends(get_current_user)):
+    task_ids = tasks.Task_ids
+    time_zone = tasks.command.get("timeZone", "UTC")
+    
+    print(f"[LOG] Clearing old jobs for tasks: {task_ids}")
+    print(f"[LOG] Using time zone: {time_zone}")
+    
+    if not task_ids:
+        return JSONResponse(content={"message": "No tasks provided"}, status_code=400)
+        
+    try:
+        # Get current time in the specified timezone
+        user_tz = pytz.timezone(time_zone)
+        current_time = datetime.now(user_tz)
+        print(f"[LOG] Current time in {time_zone}: {current_time}")
+        
+        # Calculate the cutoff time for running tasks (24 hours ago)
+        cutoff_time_running = current_time - timedelta(hours=24)
+        print(f"[LOG] Cutoff time for running tasks in {time_zone}: {cutoff_time_running}")
+        
+        # Fetch all tasks that need to be processed
+        all_tasks = list(tasks_collection.find(
+            {"id": {"$in": task_ids}, "email": current_user.get("email")}
+        ))
+        
+        if not all_tasks:
+            print("[LOG] No tasks found for the provided IDs and user")
+            return JSONResponse(content={"message": "No tasks found"}, status_code=404)
+            
+        print(f"[LOG] Found {len(all_tasks)} tasks to process")
+        
+        bulk_operations = []
+        processed_tasks = 0
+        
+        for task in all_tasks:
+            task_id = task.get("id")
+            current_status = task.get("status", "awaiting")
+            current_jobs = task.get("activeJobs", [])
+            
+            # Skip tasks with no jobs
+            if not current_jobs:
+                print(f"[LOG] Task {task_id} has no active jobs, skipping")
+                continue
+                
+            future_jobs = []
+            old_jobs = []
+            
+            # Process each job in the task
+            for job in current_jobs:
+                start_time = job.get("startTime")
+                job_id = job.get("job_id", "unknown_job")
+                
+                if not start_time:
+                    old_jobs.append(job)  # Consider jobs without start time as old
+                    continue
+                    
+                try:
+                    # Handle different datetime formats
+                    if isinstance(start_time, dict) and "$date" in start_time:
+                        start_time_str = start_time["$date"]
+                        job_start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
+                    elif isinstance(start_time, datetime):
+                        job_start_time = start_time
+                    else:
+                        print(f"[ERROR] Unrecognized startTime format in task {task_id}, job {job_id}: {type(start_time)}")
+                        old_jobs.append(job)  # Consider problematic jobs as old to be safe
+                        continue
+                        
+                    # Ensure the time is timezone-aware
+                    if job_start_time.tzinfo is None:
+                        # If time is naive (no timezone), assume it's in UTC
+                        job_start_time = pytz.UTC.localize(job_start_time)
+                    
+                    # Convert job time to user's timezone for comparison
+                    job_start_time = job_start_time.astimezone(user_tz)
+                    
+                    print(f"[LOG] Job {job_id} start time in {time_zone}: {job_start_time}")
+                    
+                    # Different handling based on task status
+                    if current_status == "running":
+                        # For running tasks, only clear jobs older than 24 hours
+                        if job_start_time < cutoff_time_running:
+                            print(f"[LOG] Job {job_id} is older than 24 hours, marking as old")
+                            old_jobs.append(job)
+                        else:
+                            print(f"[LOG] Job {job_id} is within 24 hours, keeping it")
+                            future_jobs.append(job)
+                    else:
+                        # For non-running tasks, check against current time
+                        if job_start_time > current_time:
+                            print(f"[LOG] Job {job_id} is in the future, keeping it")
+                            future_jobs.append(job)
+                        else:
+                            print(f"[LOG] Job {job_id} is in the past, marking as old")
+                            old_jobs.append(job)
+                            
+                except Exception as e:
+                    print(f"[ERROR] Error processing job {job_id} in task {task_id}: {str(e)}")
+                    old_jobs.append(job)  # Consider problematic jobs as old to be safe
+            
+            # Skip update if no jobs were classified as old
+            if not old_jobs:
+                print(f"[LOG] No old jobs found for task {task_id}, skipping update")
+                continue
+                
+            # Determine new status based on remaining jobs and current status
+            if future_jobs:
+                new_status = "scheduled"
+            else:
+                new_status = "awaiting"
+                
+            # Keep running status if the task is currently running and we still have future jobs
+            if current_status == "running" and future_jobs:
+                new_status = "running"
+                
+            print(f"[LOG] Task {task_id}: Total jobs: {len(current_jobs)}, Old jobs: {len(old_jobs)}, Future jobs: {len(future_jobs)}")
+            print(f"[LOG] Task {task_id}: Old status: {current_status}, New status: {new_status}")
+            
+            # Add update operation to bulk operations
+            bulk_operations.append(UpdateOne(
+                {"id": task_id},
+                {"$set": {"activeJobs": future_jobs, "status": new_status}}
+            ))
+            
+            processed_tasks += 1
+            
+        # Execute bulk update if there are any operations
+        if bulk_operations:
+            result = tasks_collection.bulk_write(bulk_operations)
+            print(f"[LOG] Updated {result.modified_count} tasks")
+            return JSONResponse(
+                content={
+                    "message": "Clear Old Jobs successfully",
+                    "processed_tasks": processed_tasks,
+                    "modified_tasks": result.modified_count
+                }, 
+                status_code=200
+            )
+        else:
+            print("[LOG] No tasks needed updating")
+            return JSONResponse(
+                content={
+                    "message": "No tasks needed updating",
+                    "processed_tasks": 0,
+                    "modified_tasks": 0
+                }, 
+                status_code=200
+            )
+            
+    except pytz.exceptions.UnknownTimeZoneError:
+        error_msg = f"Invalid timezone: {time_zone}"
+        print(f"[ERROR] {error_msg}")
+        return JSONResponse(
+            status_code=400,
+            content={"message": error_msg}
+        )
+    except Exception as e:
+        print(f"[ERROR] General error in clear_old_jobs: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"message": f"An error occurred: {str(e)}"}
+        )

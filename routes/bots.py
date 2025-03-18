@@ -1,9 +1,7 @@
-from fastapi import APIRouter, Query, File, UploadFile, Form, Depends
+from fastapi import APIRouter, Query, Depends
 from models.bots import bots_collection
 from fastapi.responses import JSONResponse
-from bson import ObjectId
 from typing import List
-from config.database import db
 from utils.utils import get_current_user
 
 

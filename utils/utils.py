@@ -1,10 +1,7 @@
-from email.mime.multipart import MIMEMultipart
 import resend
 from typing import List
-import smtplib
 from fastapi import Request
-from fastapi import Depends, HTTPException, status
-from email.mime.text import MIMEText
+from fastapi import HTTPException, status
 from jose import jwt, JWTError
 from datetime import datetime, timedelta
 from fastapi.security import OAuth2PasswordBearer
@@ -47,7 +44,7 @@ def create_reset_password_token(user: User):
     return encoded_jwt
 
 
-#####################################################
+
 def send_confirmation_email(to_email: str, token: str):
     subject = "Confirm your Email"
     body = f"""<!DOCTYPE html>
@@ -137,7 +134,6 @@ def send_confirmation_email(to_email: str, token: str):
     })
     email: resend.Email = resend.Emails.send(params)
     return email
-#####################################################
 
 
 def send_password_email_email(to_email: str, token: str):
@@ -402,48 +398,6 @@ async def get_current_user(request: Request):
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-# def create_access_token(email: str, user_id: str, expires_delta: timedelta):
-#     # Set expiration time
-#     # expire = datetime.utcnow() + expires_delta
-#     to_encode = {"sub": email, "id": user_id}  # Payload data
-#     # Encode the token using JWT
-#     encoded_jwt = jwt.encode(to_encode, secret_key, algorithm=algo)
-#     return encoded_jwt
-
-
-# async def get_current_user(request: Request):
-#     token = request.headers.get('Authorization')
-#     if not token:
-#         raise HTTPException(
-#             status_code=status.HTTP_401_UNAUTHORIZED,
-#             detail="Not authenticated",
-#             headers={"WWW-Authenticate": "Bearer"},
-#         )
-
-#     try:
-#         # Decode the token
-#         payload = jwt.decode(token.replace("Bearer ", ""),
-#                              secret_key, algorithms=[algo])
-
-#         email: str = payload.get("sub")
-#         user_id: str = payload.get("id")
-
-#         if email is None or user_id is None:
-#             raise HTTPException(
-#                 status_code=status.HTTP_401_UNAUTHORIZED,
-#                 detail="Invalid token",
-#                 headers={"WWW-Authenticate": "Bearer"},
-#             )
-
-#         return {"email": email, "id": user_id}
-
-#     except JWTError:
-#         raise HTTPException(
-#             status_code=status.HTTP_401_UNAUTHORIZED,
-#             detail="Could not validate credentials",
-#             headers={"WWW-Authenticate": "Bearer"},
-#         )
-
 
 def get_Running_Tasks(
     tasks: List[dict],
@@ -468,64 +422,6 @@ def get_Running_Tasks(
                 runningTasks.append(task)
     return runningTasks
 
-
-# def check_for_Job_clashes(start_time: datetime, end_time: datetime, task_id: str, device_ids: List[str]) -> bool:
-#     print("entered check_for_Job_clashes")
-#     # Fetch active jobs for the task
-#     task = tasks_collection.find_one(
-#         {"id": task_id}, {"_id": 0, "activeJobs": 1}
-#     )
-    
-#     if not task or 'activeJobs' not in task:
-#         return False
-    
-#     # Iterate through active jobs
-#     for active_job in task.get('activeJobs', []):
-#         # Get device_ids from this specific job
-#         print(active_job)
-#         devices_list = active_job.get('device_ids', [])
-        
-#         # Check if there's any common device
-#         if set(devices_list) & set(device_ids):
-#             print("device found")
-#             job_start_time = active_job.get("startTime")
-#             job_end_time = active_job.get("endTime")
-#             print(start_time)
-#             print(end_time)
-#             print(job_start_time)
-#             print(job_end_time)
-#             # Check if job times are valid
-#             if not job_start_time or not job_end_time:
-#               print("job times are invalid")  
-#               continue
-#             print("job times are valid")  
-#             # Convert to datetime if they're strings
-#             try:
-#                 if isinstance(job_start_time, str):
-#                     job_start_time = datetime.fromisoformat(job_start_time)
-#                     job_start_time = job_start_time.replace(tzinfo=datetime.timezone.utc)
-                    
-#                 if isinstance(job_end_time, str):
-#                     job_end_time = datetime.fromisoformat(job_end_time)
-#                     job_end_time = job_end_time.replace(tzinfo=datetime.timezone.utc)
-                    
-#             except ValueError as e:
-#                 print(f"DateTime parsing error: {e}")
-#                 continue
-              
-#             print(start_time)
-#             print(end_time)
-#             print(job_start_time)
-#             print(job_end_time)
-            
-#             # Check for time overlaps
-#             if (start_time >= job_start_time and start_time <= job_end_time) or \
-#                (end_time >= job_start_time and end_time <= job_end_time) or \
-#                (start_time <= job_start_time and end_time >= job_end_time):
-#                 print("time clash detected")
-#                 return True
-#     print("no clash found")  
-#     return False
 
 
 

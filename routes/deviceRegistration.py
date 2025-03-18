@@ -1,9 +1,7 @@
-
-
 import asyncio
 import time
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends
-from pymongo import MongoClient
+from pymongo import MongoClient, UpdateOne
 from pydantic import BaseModel
 from typing import List
 import random
@@ -64,15 +62,6 @@ class StopTaskCommandRequest(BaseModel):
     command: dict
     Task_ids: List[str]
 
-
-def register_device(device_data: DeviceRegistration):
-    device = device_collection.find_one({"deviceId": device_data.deviceId})
-    if device:
-        raise HTTPException(
-            status_code=400, detail="Device already registered")
-    device_collection.insert_one(device_data.dict())
-    return {"message": "Device registered successfully", "deviceId": device_data.deviceId}
-
 # Device Registration Endpoint (POST)
 @device_router.post("/register_device")
 async def register_device_endpoint(device_data: DeviceRegistration):
@@ -108,148 +97,6 @@ async def check_device_registration(device_id: str):
                                      "$set": {"status": True}})
 
     return True
-
-# @device_router.websocket("/ws/{device_id}")
-# async def websocket_endpoint(websocket: WebSocket, device_id: str):
-#     await websocket.accept()
-#     device_connections[device_id] = websocket
-#     active_connections.append(websocket)
-
-#     try:
-#         while True:
-#             # Receive JSON message from client
-#             data = await websocket.receive_text()
-#             print(f"Message from {device_id}: {data}")
-
-#             try:
-                
-                
-#                 payload = json.loads(data)
-#                 message = payload.get("message")
-#                 task_id = payload.get("task_id")
-#                 job_id = payload.get("job_id")
-#                 message_type = payload.get("type")
-#                 print(f"Parsed payload: message={message}, task_id={task_id}, job_id={job_id}")
-                
-                
-#                 if message_type == "ping":
-#                     pong_response = {
-#                         "type": "pong",
-#                         "timestamp": payload.get("timestamp", int(time.time() * 1000))
-#                     }
-#                     await websocket.send_text(json.dumps(pong_response))
-#                     print(f"Sent pong response to ({device_id})")
-#                     continue
-                
-                
-#                 taskData = tasks_collection.find_one(
-#                     {"id": task_id}, {"serverId": 1, "channelId": 1, "_id": 0}
-#                 )
-
-#                 if message_type == "update":
-#                     print(f"Processing 'update' message for task_id {task_id}")
-#                     if taskData and taskData.get("serverId") and taskData.get("channelId"):
-#                         server_id = int(taskData["serverId"]) if isinstance(
-#                             taskData["serverId"], str) and taskData["serverId"].isdigit() else taskData["serverId"]
-#                         channel_id = int(taskData["channelId"]) if isinstance(
-#                             taskData["channelId"], str) and taskData["channelId"].isdigit() else taskData["channelId"]
-
-#                         await bot_instance.send_message({
-#                             "message": message,
-#                             "task_id": task_id,
-#                             "job_id": job_id,
-#                             "server_id": server_id,
-#                             "channel_id": channel_id,
-#                             "type": "update"
-#                         })
-
-#                 elif message_type == "error":
-#                     print(f"Processing 'error' message for task_id {task_id}")
-#                     if taskData and taskData.get("serverId") and taskData.get("channelId"):
-#                         server_id = int(taskData["serverId"]) if isinstance(
-#                             taskData["serverId"], str) and taskData["serverId"].isdigit() else taskData["serverId"]
-#                         channel_id = int(taskData["channelId"]) if isinstance(
-#                             taskData["channelId"], str) and taskData["channelId"].isdigit() else taskData["channelId"]
-
-#                         await bot_instance.send_message({
-#                             "message": message,
-#                             "task_id": task_id,
-#                             "job_id": job_id,
-#                             "server_id": server_id,
-#                             "channel_id": channel_id,
-#                             "type": "error"
-#                         })
-
-#                 elif message_type == "final":
-#                     print(f"Processing 'final' message for task_id {task_id}")
-#                     if taskData and taskData.get("serverId") and taskData.get("channelId"):
-#                         server_id = int(taskData["serverId"]) if isinstance(
-#                             taskData["serverId"], str) and taskData["serverId"].isdigit() else taskData["serverId"]
-#                         channel_id = int(taskData["channelId"]) if isinstance(
-#                             taskData["channelId"], str) and taskData["channelId"].isdigit() else taskData["channelId"]
-
-#                         message_length = len(message) if message else 0
-#                         print(f"Message Length: {message_length}")
-
-#                         if message_length > 1000:
-#                             message_chunks = split_message(message)
-#                             for chunk in message_chunks:
-#                                 await bot_instance.send_message({
-#                                     "message": chunk,
-#                                     "task_id": task_id,
-#                                     "job_id": job_id,
-#                                     "server_id": server_id,
-#                                     "channel_id": channel_id,
-#                                     "type": "final"
-#                                 })
-#                         else:
-#                             await bot_instance.send_message({
-#                                 "message": message,
-#                                 "task_id": task_id,
-#                                 "job_id": job_id,
-#                                 "server_id": server_id,
-#                                 "channel_id": channel_id,
-#                                 "type": "final"
-#                             })
-
-#                 else:
-#                     print(f"Skipping message send. Missing or empty serverId/channelId for task {task_id}")
-
-#                 # Update MongoDB to remove job_id from active jobs
-#                 tasks_collection.update_one(
-#                     {"id": task_id},
-#                     {
-#                         "$pull": {
-#                             "activeJobs": {
-#                                 "job_id": job_id
-#                             }
-#                         }
-#                     }
-#                 )
-
-#                 # Check if task is still active
-#                 task = tasks_collection.find_one({"id": task_id})
-#                 if task:
-#                     status = "awaiting" if len(task.get("activeJobs", [])) == 0 else "scheduled"
-#                     tasks_collection.update_one(
-#                         {"id": task_id},
-#                         {"$set": {"status": status}}
-#                     )
-
-#             except json.JSONDecodeError:
-#                 print(f"Invalid JSON received from {device_id}: {data}")
-
-#     except WebSocketDisconnect:
-#         print(f"Device {device_id} disconnected.")
-#         device_collection.update_one(
-#             {"deviceId": device_id},
-#             {"$set": {"status": False}}
-#         )
-#         active_connections.remove(websocket)
-#         device_connections.pop(device_id, None)
-
-
-
 
 @device_router.websocket("/ws/{device_id}")
 async def websocket_endpoint(websocket: WebSocket, device_id: str):
@@ -466,192 +313,213 @@ async def send_command(request: CommandRequest, current_user: dict = Depends(get
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
-# @device_router.post("/stop_task")
-# async def stop_task(request: StopTaskCommandRequest, current_user: dict = Depends(get_current_user)):
-#     command = request.command
-#     task_ids = request.Task_ids
-
-#     print(f"[LOG] Received stop command: {command}")
-#     print(f"[LOG] Task IDs: {task_ids}")
-
-#     connected_devices = []
-#     not_connected_devices = set()
-
-#     for task_Id in task_ids:
-#         print(f"[LOG] Checking task ID: {task_Id}")
-
-#         task = tasks_collection.find_one(
-#             {"id": task_Id}
-#         )
-
-#         if not task:
-#             print(f"[LOG] Task {task_Id} not found in database.")
-#             continue  
-
-#         active_jobs = task.get("activeJobs", [])
-#         print(f"[LOG] Task {task_Id} has {len(active_jobs)} active jobs.")
-
-#         for job in active_jobs:
-#             job_id = job.get("job_id")
-#             device_ids = job.get("device_ids", [])
-
-#             if not job_id or not device_ids:
-#                 print(f"[LOG] Skipping job {job_id} due to missing fields.")
-#                 continue
-
-#             print(f"[LOG] Sending command for job {job_id}")
-
-#             for device_id in device_ids:
-#                 websocket = device_connections.get(device_id)
-#                 if websocket:
-#                     print(f"[LOG] Device {device_id} is connected for job {job_id}.")
-#                     connected_devices.append((device_id, websocket))
-#                 else:
-#                     print(f"[LOG] Device {device_id} is NOT connected for job {job_id}.")
-#                     not_connected_devices.add(device_id)
-
-#     print("[LOG] Attempting to send command to connected devices.")
-#     for device_id, websocket in connected_devices:
-#         try:
-#             await websocket.send_text(json.dumps(command))
-#             print(f"[LOG] Successfully sent command to device {device_id}")
-#         except Exception as e:
-#             print(f"[ERROR] Error sending command to device {device_id}: {str(e)}")
-#             not_connected_devices.add(device_id)
-
-#     print(f"[LOG] Connected devices: {connected_devices}")
-#     print(f"[LOG] Not connected devices: {list(not_connected_devices)}")  # Convert set to list for printing
-#     task = tasks_collection.update_one(
-#             {"id": task_Id}, 
-#             {"$set":{"activeJobs": [], "status":"awaiting"}}
-#         )
-
-#     return {"message": "Stop Command Sent successfully"}
-
 @device_router.post("/stop_task")
 async def stop_task(request: StopTaskCommandRequest, current_user: dict = Depends(get_current_user)):
     command = request.command
     task_ids = request.Task_ids
-
+    time_zone = request.command.get("timeZone", "UTC")
     print(f"[LOG] Received stop command: {command}")
     print(f"[LOG] Task IDs: {task_ids}")
 
     if not task_ids:
         return JSONResponse(status_code=404, content={"message": "No tasks provided"})
-
-    connected_devices = []
-    not_connected_devices = set()
-    device_names = {}
-    task_names = {}
     
-    any_device_connected = False
-
-    # First, gather all device information
-    for task_id in task_ids:
-        print(f"[LOG] Checking task ID: {task_id}")
-
-        task = tasks_collection.find_one({"id": task_id})
-
-        if not task:
-            print(f"[LOG] Task {task_id} not found in database.")
-            continue
-            
-        # Store task name for later use (using taskName field from the DB example)
-        task_names[task_id] = task.get("taskName", "Unknown Task")
-
-        active_jobs = task.get("activeJobs", [])
-        print(f"[LOG] Task {task_id} has {len(active_jobs)} active jobs.")
+    try:
+        # Get current time in the specified timezone
+        user_tz = pytz.timezone(time_zone)
+        current_time = datetime.now(user_tz)
+        print(f"[LOG] Current time: {current_time}")
         
-        if not active_jobs:
-            print(f"[LOG] No active jobs for task {task_id}")
-            continue
-
-        for job in active_jobs:
-            job_id = job.get("job_id")
-            device_ids = job.get("device_ids", [])
-
-            if not job_id or not device_ids:
-                print(f"[LOG] Skipping job {job_id} due to missing fields.")
-                continue
-
-            print(f"[LOG] Checking devices for job {job_id}")
-
-            # Get device names
-            for device_id in device_ids:
-                # Get device name from database
-                device = device_collection.find_one({"id": device_id})
-                device_name = device.get("deviceName", device_id) if device else device_id
-                device_names[device_id] = device_name
+        # Collect all tasks in a single query instead of querying one by one
+        tasks = list(tasks_collection.find({"id": {"$in": task_ids}}))
+        
+        if not tasks:
+            return JSONResponse(status_code=404, content={"message": "No tasks found"})
+        
+        # Collect all device IDs from old jobs
+        all_device_ids = set()
+        tasks_to_update = []
+        
+        for task in tasks:
+            task_id = task.get("id")
+            task_name = task.get("taskName", "Unknown Task")
+            
+            current_jobs = task.get("activeJobs", [])
+            future_jobs = []
+            old_jobs = []
+            
+            # Separate future jobs from old jobs
+            for job in current_jobs:
+                # Handle MongoDB datetime format
+                start_time = job.get("startTime")
+                job_id = job.get("job_id", "unknown_job")
+                if not start_time:
+                    continue
                 
-                websocket = device_connections.get(device_id)
-                if websocket:
-                    print(f"[LOG] Device {device_id} ({device_name}) is connected for job {job_id}.")
-                    connected_devices.append((device_id, websocket))
-                    any_device_connected = True
-                else:
-                    print(f"[LOG] Device {device_id} ({device_name}) is NOT connected for job {job_id}.")
+                try:
+                    # Check if startTime is in MongoDB format with $date field
+                    if isinstance(start_time, dict) and "$date" in start_time:
+                        start_time_str = start_time["$date"]
+                        # Convert string time to datetime object
+                        job_start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
+                    # If startTime is already a datetime object
+                    elif isinstance(start_time, datetime):
+                        job_start_time = start_time
+                    else:
+                        print(f"[ERROR] Unrecognized startTime format in task {task_id}, job {job_id}: {type(start_time)}")
+                        old_jobs.append(job)  # Consider problematic jobs as old to be safe
+                        all_device_ids.update(job.get("device_ids", []))
+                        continue
+                    
+                    # Ensure job_start_time is in UTC before converting to user timezone
+                    if job_start_time.tzinfo is None:
+                        # If time is naive (no timezone), assume it's in UTC
+                        job_start_time = pytz.UTC.localize(job_start_time)
+                    
+                    # Convert job time to user's timezone for comparison
+                    job_start_time = job_start_time.astimezone(user_tz)
+                    
+                    # Get the job's end time (if available)
+                    end_time = job.get("endTime")
+                    if end_time:
+                        if isinstance(end_time, dict) and "$date" in end_time:
+                            end_time_str = end_time["$date"]
+                            job_end_time = datetime.fromisoformat(end_time_str.replace('Z', '+00:00'))
+                        elif isinstance(end_time, datetime):
+                            job_end_time = end_time
+                        else:
+                            job_end_time = None
+                            
+                        if job_end_time:
+                            if job_end_time.tzinfo is None:
+                                # If time is naive (no timezone), assume it's in UTC
+                                job_end_time = pytz.UTC.localize(job_end_time)
+                            # Convert to user's timezone
+                            job_end_time = job_end_time.astimezone(user_tz)
+                    else:
+                        job_end_time = None
+                    
+                    # Debug information
+                    print(f"[LOG] Job {job_id} start time: {job_start_time}")
+                    if job_end_time:
+                        print(f"[LOG] Job {job_id} end time: {job_end_time}")
+                    
+                    # Fix for the time issue - check if the job is scheduled for today
+                    if job_start_time.date() == current_time.date():
+                        # For jobs scheduled today, compare the full datetime
+                        if job_start_time > current_time:
+                            print(f"[LOG] Job {job_id} is today but in the future, keeping it")
+                            future_jobs.append(job)
+                        else:
+                            print(f"[LOG] Job {job_id} is today and in the past, marking as old")
+                            old_jobs.append(job)
+                            all_device_ids.update(job.get("device_ids", []))
+                    else:
+                        # For jobs on different days, compare the dates
+                        if job_start_time.date() > current_time.date():
+                            print(f"[LOG] Job {job_id} is on a future date, keeping it")
+                            future_jobs.append(job)
+                        else:
+                            print(f"[LOG] Job {job_id} is on a past date, marking as old")
+                            old_jobs.append(job)
+                            all_device_ids.update(job.get("device_ids", []))
+                
+                except Exception as e:
+                    print(f"[ERROR] Error processing job {job_id} in task {task_id}: {str(e)}")
+                    old_jobs.append(job)  # Consider problematic jobs as old to be safe
+                    all_device_ids.update(job.get("device_ids", []))
+            
+            # Determine new status based on remaining jobs
+            new_status = "scheduled" if future_jobs else "awaiting"
+            
+            # Print job counts for debugging
+            print(f"[LOG] Task {task_id}: Total jobs: {len(current_jobs)}, Old jobs: {len(old_jobs)}, Future jobs: {len(future_jobs)}")
+            
+            # Save task update information
+            tasks_to_update.append({
+                "task_id": task_id,
+                "old_jobs": old_jobs,
+                "new_jobs": future_jobs,
+                "new_status": new_status,
+                "task_name": task_name,
+                "device_ids": task.get("deviceIds", []),
+                "server_id": task.get("serverId"),
+                "channel_id": task.get("channelId")
+            })
+        
+        # Get device info for all devices in a single query
+        devices = list(device_collection.find({"id": {"$in": list(all_device_ids)}}))
+        device_names = {device.get("id"): device.get("deviceName", device.get("id")) 
+                        for device in devices}
+        
+        # Check which devices are connected
+        connected_devices = []
+        not_connected_devices = set()
+        
+        for device_id in all_device_ids:
+            websocket = device_connections.get(device_id)
+            device_name = device_names.get(device_id, device_id)
+            
+            if websocket:
+                print(f"[LOG] Device {device_id} ({device_name}) is connected.")
+                connected_devices.append((device_id, websocket))
+            else:
+                print(f"[LOG] Device {device_id} ({device_name}) is NOT connected.")
+                not_connected_devices.add(device_id)
+        
+        # If no devices are connected
+        if not connected_devices:
+            print("[LOG] No connected devices found for the old jobs.")
+        else:
+            # Send stop command only to devices with old jobs
+            print("[LOG] Sending stop command to connected devices with old jobs.")
+            for device_id, websocket in connected_devices:
+                try:
+                    await websocket.send_text(json.dumps(command))
+                    print(f"[LOG] Successfully sent command to device {device_id} ({device_names.get(device_id, device_id)})")
+                except Exception as e:
+                    print(f"[ERROR] Error sending command to device {device_id} ({device_names.get(device_id, device_id)}): {str(e)}")
                     not_connected_devices.add(device_id)
-
-    # If no device is connected at all
-    if not any_device_connected:
-        return JSONResponse(status_code=404, content={"message": "No active devices connected"})
-
-    # Send stop command to connected devices
-    print("[LOG] Attempting to send command to connected devices.")
-    for device_id, websocket in connected_devices:
-        try:
-            await websocket.send_text(json.dumps(command))
-            print(f"[LOG] Successfully sent command to device {device_id} ({device_names[device_id]})")
-        except Exception as e:
-            print(f"[ERROR] Error sending command to device {device_id} ({device_names[device_id]}): {str(e)}")
-            not_connected_devices.add(device_id)
-
-    # Update tasks to remove active jobs
-    for task_id in task_ids:
-        tasks_collection.update_one(
-            {"id": task_id}, 
-            {"$set": {"activeJobs": [], "status": "awaiting"}}
+        
+        # Update all tasks with bulk write operation
+        bulk_operations = []
+        for task_update in tasks_to_update:
+            # Only update if there are old jobs to remove
+            if task_update["old_jobs"]:
+                bulk_operations.append(UpdateOne(
+                    {"id": task_update["task_id"]},
+                    {"$set": {"activeJobs": task_update["new_jobs"], "status": task_update["new_status"]}}
+                ))
+        
+        if bulk_operations:
+            result = tasks_collection.bulk_write(bulk_operations)
+            print(f"[LOG] Updated {result.modified_count} tasks")
+        else:
+            print("[LOG] No tasks needed updating")
+        
+        return {
+            "message": "Tasks updated successfully", 
+            "stopped_jobs_count": sum(len(t["old_jobs"]) for t in tasks_to_update),
+            "remaining_jobs_count": sum(len(t["new_jobs"]) for t in tasks_to_update)
+        }
+    
+    except Exception as e:
+        print(f"[ERROR] General error in stop_task: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500, 
+            content={"message": f"An error occurred: {str(e)}"}
         )
 
-    # # Send notification to Discord
-    # try:
-    #     for task_id in task_ids:
-    #         task = tasks_collection.find_one({"id": task_id})
-    #         if not task:
-    #             continue
-                
-    #         # Extract Discord notification details
-    #         server_id = task.get("serverId")
-    #         channel_id = task.get("channelId")
-    #         task_name = task.get("taskName", "Unknown Task")
-            
-    #         # Prepare message for Discord
-    #         message = f"All Jobs of Task {task_name} stopped.\n"
-            
-    #         # Add connected devices to message
-    #         connected_device_names = [device_names.get(device_id, device_id) for device_id, _ in connected_devices if device_id in task.get("deviceIds", [])]
-    #         if connected_device_names:
-    #             message += f"Connected devices: {', '.join(connected_device_names)}\n"
-            
-    #         # Add not connected devices to message
-    #         not_connected_device_names = [device_names.get(device_id, device_id) for device_id in not_connected_devices if device_id in task.get("deviceIds", [])]
-    #         if not_connected_device_names:
-    #             message += f"Not connected devices: {', '.join(not_connected_device_names)}"
-            
-    #         # Send to Discord using the provided method
-    #         if server_id and channel_id:
-    #             await bot_instance.send_message({
-    #                 "message": message,
-    #                 "task_id": task_id,
-    #                 "server_id": server_id,
-    #                 "channel_id": channel_id,
-    #                 "type": "update"
-    #             })
-    # except Exception as e:
-    #     print(f"[ERROR] Failed to send Discord notification: {str(e)}")
+def register_device(device_data: DeviceRegistration):
+    device = device_collection.find_one({"deviceId": device_data.deviceId})
+    if device:
+        raise HTTPException(
+            status_code=400, detail="Device already registered")
+    device_collection.insert_one(device_data.dict())
+    return {"message": "Device registered successfully", "deviceId": device_data.deviceId}
 
-    return {"message": "Stop Command Sent successfully"}
-    
 def wrapper_for_send_command(device_ids, command):
     # Create a new event loop for this thread
     loop = asyncio.new_event_loop()
@@ -812,45 +680,16 @@ def check_for_job_clashes(start_time, end_time, task_id, device_ids) -> bool:
     """Check for job clashes in the scheduled time window."""
     return check_for_Job_clashes(start_time, end_time, task_id, device_ids)
 
-# def schedule_single_job(start_time, end_time, device_ids, command, job_id: str, task_id: str) -> None:
-#     """Schedule a single job with a defined start and end time."""
-#     jobInstance = {
-#         "job_id": job_id,
-#         "startTime": start_time,
-#         "endTime": end_time,
-#         "device_ids": device_ids
-#     }
-
-#     try:
-#         scheduler.add_job(
-#             send_command_to_devices,
-#             trigger=DateTrigger(
-#                 run_date=start_time.astimezone(pytz.UTC),
-#                 timezone=pytz.UTC
-#             ),
-#             args=[device_ids, {**command,
-#                                "duration": int(command.get("duration", 0))}],
-#             id=job_id,
-#             name=f"Single session command for devices {device_ids}"
-#         )
-
-#         tasks_collection.update_one(
-#             {"id": task_id},
-#             {"$set": {"status": "scheduled"},
-#              "$push": {"activeJobs": jobInstance}}
-#         )
-#     except Exception as e:
-#         print(f"Failed to schedule single job: {str(e)}")
-#         raise HTTPException(
-#             status_code=500, detail=f"Failed to schedule job: {str(e)}")
-
-
 def schedule_single_job(start_time, end_time, device_ids, command, job_id: str, task_id: str) -> None:
     """Schedule a single job with a defined start and end time."""
+    
+    start_time_utc = start_time.astimezone(pytz.UTC)
+    end_time_utc = end_time.astimezone(pytz.UTC)
+    
     jobInstance = {
         "job_id": job_id,
-        "startTime": start_time,
-        "endTime": end_time,
+        "startTime": start_time_utc,
+        "endTime": end_time_utc,
         "device_ids": device_ids
     }
 
@@ -867,10 +706,22 @@ def schedule_single_job(start_time, end_time, device_ids, command, job_id: str, 
             name=f"Single session command for devices {device_ids}"
         )
 
+        # tasks_collection.update_one(
+        #     {"id": task_id},
+        #     {"$set": {"status": "scheduled"},
+        #      "$push": {"activeJobs": jobInstance}}
+        # )
+        
+        # Update status only if it's not 'running'
+        tasks_collection.update_one(
+            {"id": task_id, "status": {"$ne": "running"}},
+            {"$set": {"status": "scheduled"}}
+        )
+        
+        # Always update activeJobs
         tasks_collection.update_one(
             {"id": task_id},
-            {"$set": {"status": "scheduled"},
-             "$push": {"activeJobs": jobInstance}}
+            {"$push": {"activeJobs": jobInstance}}
         )
         
         # Get device names for notification
@@ -901,43 +752,6 @@ def generate_random_durations_and_start_times(duration: int, start_time: datetim
         start_time, end_time, random_durations)
     return random_durations, start_times
 
-# def schedule_split_jobs(start_times: List[datetime], random_durations: List[int], device_ids: List[str], command: dict, task_id: str) -> None:
-#     """Schedule multiple jobs based on random start times and durations."""
-#     for i, (start_time, duration) in enumerate(zip(start_times, random_durations)):
-#         job_id = f"cmd_{uuid.uuid4()}"
-#         end_time = start_time + timedelta(minutes=duration)
-#         jobInstance = {
-#             "job_id": job_id,
-#             "startTime": start_time,
-#             "endTime": end_time,
-#             "device_ids": device_ids
-#         }
-
-#         modified_command = {**command, "duration": duration}
-#         try:
-#             scheduler.add_job(
-#                 send_command_to_devices,
-#                 trigger=DateTrigger(
-#                     run_date=start_time.astimezone(pytz.UTC),
-#                     timezone=pytz.UTC
-#                 ),
-#                 args=[device_ids, modified_command],
-#                 id=job_id,
-#                 name=f"Part {i+1} of split command for devices {device_ids}"
-#             )
-
-#             tasks_collection.update_one(
-#                 {"id": task_id},
-#                 {"$set": {"isScheduled": True},
-#                  "$push": {"activeJobs": jobInstance}}
-#             )
-#         except Exception as e:
-#             print(f"Failed to schedule split job {i+1}: {str(e)}")
-#             raise HTTPException(
-#                 status_code=500, detail=f"Failed to schedule job: {str(e)}")
-
-
-
 def schedule_split_jobs(start_times: List[datetime], random_durations: List[int], device_ids: List[str], command: dict, task_id: str) -> None:
     """Schedule multiple jobs based on random start times and durations."""
     job_instances = []
@@ -946,10 +760,12 @@ def schedule_split_jobs(start_times: List[datetime], random_durations: List[int]
     for i, (start_time, duration) in enumerate(zip(start_times, random_durations)):
         job_id = f"cmd_{uuid.uuid4()}"
         end_time = start_time + timedelta(minutes=duration)
+        start_time_utc = start_time.astimezone(pytz.UTC)
+        end_time_utc = end_time.astimezone(pytz.UTC)
         jobInstance = {
             "job_id": job_id,
-            "startTime": start_time,
-            "endTime": end_time,
+            "startTime": start_time_utc,
+            "endTime": end_time_utc,
             "device_ids": device_ids
         }
         job_instances.append(jobInstance)
@@ -981,11 +797,23 @@ def schedule_split_jobs(start_times: List[datetime], random_durations: List[int]
     
     # Only update database if all jobs were scheduled successfully
     if scheduled_jobs:
+        # Update status only if it's not 'running'
+        tasks_collection.update_one(
+            {"id": task_id, "status": {"$ne": "running"}},
+            {"$set": {"status": "scheduled"}}
+        )
+        
+        # Always update activeJobs
         tasks_collection.update_one(
             {"id": task_id},
-            {"$set": {"status": "scheduled"},
-             "$push": {"activeJobs": {"$each": job_instances}}}
+            {"$push": {"activeJobs": jobInstance}}
         )
+        
+        # tasks_collection.update_one(
+        #     {"id": task_id},
+        #     {"$set": {"status": "scheduled"},
+        #      "$push": {"activeJobs": {"$each": job_instances}}}
+        # )
         
         # Get device names for notification
         device_docs = list(device_collection.find(
@@ -1002,198 +830,6 @@ def schedule_split_jobs(start_times: List[datetime], random_durations: List[int]
         asyncio.create_task(
             send_split_schedule_notification(task, device_names, start_times, random_durations, time_zone)
         )
-
-
-
-
-# def schedule_recurring_job(command: dict, device_ids: List[str]) -> None:
-#     """Schedule the next day's task within the specified time window"""
-#     task_id = command.get("task_id")
-#     time_zone = command.get("timeZone", "UTC")
-#     user_tz = pytz.timezone(time_zone)
-
-#     # Get tomorrow's date
-#     now = datetime.now(user_tz)
-
-#     # Parse start and end times
-#     start_time_str = command.get("startInput")
-#     end_time_str = command.get("endInput")
-#     start_hour, start_minute = parse_time(start_time_str)
-#     end_hour, end_minute = parse_time(end_time_str)
-
-#     start_time = now.replace(
-#         hour=start_hour,
-#         minute=start_minute,
-#         second=0,
-#         microsecond=0
-#     )
-#     end_time = now.replace(
-#         hour=end_hour,
-#         minute=end_minute,
-#         second=0,
-#         microsecond=0
-#     )
-
-#     if start_time < now:
-#         start_time += timedelta(days=1)
-
-#     if end_time < start_time:
-#         end_time += timedelta(days=1)
-
-#     time_window_minutes = int((end_time - start_time).total_seconds() / 60)
-#     random_minutes = random.randint(
-#         0, time_window_minutes - int(command.get("duration", 0)))
-#     random_start_time = start_time + timedelta(minutes=random_minutes)
-
-#     start_time_utc = random_start_time.astimezone(pytz.UTC)
-
-#     new_job_id = f"cmd_{uuid.uuid4()}"
-#     modified_command = {
-#         **command,
-#         "job_id": new_job_id,
-#         "isRecurring": True
-#     }
-
-#     jobInstance = {
-#         "job_id": new_job_id,
-#         "startTime": start_time_utc,
-#         "device_ids": device_ids
-#     }
-
-#     try:
-#         scheduler.add_job(
-#             send_command_to_devices,
-#             trigger=DateTrigger(
-#                 run_date=start_time_utc,
-#                 timezone=pytz.UTC
-#             ),
-#             args=[device_ids, modified_command],
-#             id=new_job_id,
-#             name=f"Recurring random-time command for devices {device_ids}"
-#         )
-
-#         tasks_collection.update_one(
-#             {"id": task_id},
-#             {
-#                 "$set": {"status": "scheduled"},
-#                 "$push": {"activeJobs": jobInstance}
-#             }
-#         )
-
-#         print(f"Scheduled next day's task for {random_start_time} ({time_zone})")
-
-#     except Exception as e:
-#         print(f"Failed to schedule next day's job: {str(e)}")
-#         raise HTTPException(
-#             status_code=500, detail=f"Failed to schedule next day's job: {str(e)}")
-
-
-# def schedule_recurring_job(command: dict, device_ids: List[str]) -> None:
-#     """Schedule the next day's task within the specified time window"""
-#     task_id = command.get("task_id")
-#     time_zone = command.get("timeZone", "UTC")
-#     user_tz = pytz.timezone(time_zone)
-
-#     # Get tomorrow's date
-#     now = datetime.now(user_tz)
-
-#     # Parse start and end times
-#     start_time_str = command.get("startInput")
-#     end_time_str = command.get("endInput")
-#     start_hour, start_minute = parse_time(start_time_str)
-#     end_hour, end_minute = parse_time(end_time_str)
-
-#     start_time = now.replace(
-#         hour=start_hour,
-#         minute=start_minute,
-#         second=0,
-#         microsecond=0
-#     )
-#     end_time = now.replace(
-#         hour=end_hour,
-#         minute=end_minute,
-#         second=0,
-#         microsecond=0
-#     )
-
-#     if start_time < now:
-#         start_time += timedelta(days=1)
-
-#     if end_time < start_time:
-#         end_time += timedelta(days=1)
-
-#     time_window_minutes = int((end_time - start_time).total_seconds() / 60)
-#     duration = int(command.get("duration", 0))
-    
-#     # Ensure we don't schedule if the duration exceeds available time
-#     if duration > time_window_minutes:
-#         print(f"Duration ({duration}) exceeds available time window ({time_window_minutes})")
-#         return
-        
-#     random_minutes = random.randint(0, time_window_minutes - duration)
-#     random_start_time = start_time + timedelta(minutes=random_minutes)
-#     random_end_time = random_start_time + timedelta(minutes=duration)
-
-#     start_time_utc = random_start_time.astimezone(pytz.UTC)
-#     end_time_utc = random_end_time.astimezone(pytz.UTC)
-
-#     new_job_id = f"cmd_{uuid.uuid4()}"
-#     modified_command = {
-#         **command,
-#         "job_id": new_job_id,
-#         "isRecurring": True
-#     }
-
-#     jobInstance = {
-#         "job_id": new_job_id,
-#         "startTime": start_time_utc,
-#         "endTime": end_time_utc,
-#         "device_ids": device_ids
-#     }
-
-#     try:
-#         scheduler.add_job(
-#             send_command_to_devices,
-#             trigger=DateTrigger(
-#                 run_date=start_time_utc,
-#                 timezone=pytz.UTC
-#             ),
-#             args=[device_ids, modified_command],
-#             id=new_job_id,
-#             name=f"Recurring random-time command for devices {device_ids}"
-#         )
-
-#         tasks_collection.update_one(
-#             {"id": task_id},
-#             {
-#                 "$set": {"status": "scheduled"},
-#                 "$push": {"activeJobs": jobInstance}
-#             }
-#         )
-
-#         # Get device names for notification
-#         device_docs = list(device_collection.find(
-#             {"deviceId": {"$in": device_ids}}, 
-#             {"deviceId": 1, "deviceName": 1, "_id": 0}
-#         ))
-#         device_names = [doc.get("deviceName", "Unknown Device") for doc in device_docs]
-        
-#         # Get task details for notification
-#         task = tasks_collection.find_one({"id": task_id})
-        
-#         # Send schedule notification asynchronously
-#         asyncio.create_task(
-#             send_schedule_notification(task, device_names, random_start_time, random_end_time, time_zone, new_job_id)
-#         )
-
-#         print(f"Scheduled next day's task for {random_start_time} ({time_zone})")
-
-#     except Exception as e:
-#         print(f"Failed to schedule next day's job: {str(e)}")
-#         raise HTTPException(
-#             status_code=500, detail=f"Failed to schedule next day's job: {str(e)}")
-
-
 
 def schedule_recurring_job(command: dict, device_ids: List[str]) -> None:
     """Schedule the next day's task within the specified time window"""
@@ -1313,9 +949,6 @@ def schedule_recurring_job(command: dict, device_ids: List[str]) -> None:
         raise HTTPException(
             status_code=500, detail=f"Failed to schedule next day's job: {str(e)}")
 
-
-
-
 def generate_random_durations(total_duration: int, min_duration: int = 30) -> List[int]:
     """
     Generate 2 to 4 random durations that sum up to the total duration.
@@ -1393,8 +1026,6 @@ def get_random_start_times(
 
     return start_times
 
-
-
 async def send_schedule_notification(task, device_names, start_time, end_time, time_zone, job_id):
     """Send a notification to Discord about a scheduled task."""
     if not task or not task.get("serverId") or not task.get("channelId"):
@@ -1434,8 +1065,6 @@ async def send_schedule_notification(task, device_names, start_time, end_time, t
         })
     except Exception as e:
         print(f"Error sending schedule notification: {str(e)}")
-        
-        
 
 async def send_split_schedule_notification(task, device_names, start_times, durations, time_zone):
     """Send a notification to Discord about split scheduled tasks."""
@@ -1478,3 +1107,4 @@ async def send_split_schedule_notification(task, device_names, start_times, dura
         })
     except Exception as e:
         print(f"Error sending split schedule notification: {str(e)}")
+        
