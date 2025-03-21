@@ -24,6 +24,21 @@ sudo systemctl reload nginx
 
 
 
+# [Unit]
+# Description=FastAPI application
+# After=network.target
+
+# [Service]
+# User=root
+# Group=www-data
+# WorkingDirectory=/var/www/Appilot
+# ExecStart=/var/www/Appilot/venv/bin/gunicorn main:app -w 3 -k uvicorn.workers.UvicornWorker -b 127.0.0.1:8000
+# Restart=always
+
+# [Install]
+# WantedBy=multi-user.target
+
+
 
 
 
