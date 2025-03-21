@@ -17,6 +17,7 @@ import json
 import uuid
 from fastapi.responses import JSONResponse
 from Bot.discord_bot import bot_instance
+from scheduler import scheduler
 
 # MongoDB Connection
 client = MongoClient(
@@ -26,17 +27,17 @@ device_collection = db["devices"]
 
 # Create Router
 device_router = APIRouter(prefix="")
-executors = {
-    'default': ThreadPoolExecutor(20)  # 4 cores * 5
-}
-job_defaults = {
-    'misfire_grace_time': 300,  # Allow jobs to execute up to 5 minutes late
-    'coalesce': False,          # Don't combine missed executions
-    'max_instances': 10         # Allow many instances of the same job to run concurrently
-}
-scheduler = AsyncIOScheduler(executors=executors, job_defaults=job_defaults)
+# executors = {
+#     'default': ThreadPoolExecutor(20)  # 4 cores * 5
+# }
+# job_defaults = {
+#     'misfire_grace_time': 300,  # Allow jobs to execute up to 5 minutes late
+#     'coalesce': False,          # Don't combine missed executions
+#     'max_instances': 10         # Allow many instances of the same job to run concurrently
+# }
+# scheduler = AsyncIOScheduler(executors=executors, job_defaults=job_defaults)
 # scheduler = AsyncIOScheduler()
-scheduler.start()
+# scheduler.start()
 print('started scheduling')
 
 # In-memory storage for WebSocket connections and mapping them to device IDs
@@ -98,220 +99,7 @@ async def check_device_registration(device_id: str):
 
     return True
 
-@device_router.websocket("/ws/{device_id}")
-async def websocket_endpoint(websocket: WebSocket, device_id: str):
-    await websocket.accept()
-    device_connections[device_id] = websocket
-    active_connections.append(websocket)
 
-    try:
-        while True:
-            # Receive JSON message from client
-            data = await websocket.receive_text()
-            print(f"Message from {device_id}: {data}")
-
-            try:
-                payload = json.loads(data)
-                message = payload.get("message")
-                task_id = payload.get("task_id")
-                job_id = payload.get("job_id")
-                message_type = payload.get("type")
-                print(f"Parsed payload: message={message}, task_id={task_id}, job_id={job_id}")
-                
-                device_info = device_collection.find_one({"deviceId": device_id})
-                device_name = device_info.get("deviceName", device_id) if device_info else device_id
-                if message:
-                    message = f"Device Name: {device_name}\n\n{message}"
-                
-                
-                if message_type == "ping":
-                    pong_response = {
-                        "type": "pong",
-                        "timestamp": payload.get("timestamp", int(time.time() * 1000))
-                    }
-                    await websocket.send_text(json.dumps(pong_response))
-                    print(f"Sent pong response to ({device_id})")
-                    continue
-                
-                taskData = tasks_collection.find_one(
-                    {"id": task_id}, {"serverId": 1, "channelId": 1, "_id": 0}
-                )
-
-                if message_type == "update":
-                    print(f"Processing 'update' message for task_id {task_id}")
-                    if taskData and taskData.get("serverId") and taskData.get("channelId"):
-                        server_id = int(taskData["serverId"]) if isinstance(
-                            taskData["serverId"], str) and taskData["serverId"].isdigit() else taskData["serverId"]
-                        channel_id = int(taskData["channelId"]) if isinstance(
-                            taskData["channelId"], str) and taskData["channelId"].isdigit() else taskData["channelId"]
-
-                        await bot_instance.send_message({
-                            "message": message,
-                            "task_id": task_id,
-                            "job_id": job_id,
-                            "server_id": server_id,
-                            "channel_id": channel_id,
-                            "type": "update"
-                        })
-                    continue
-
-                elif message_type in ["error","final"]:
-                    print(f"Processing 'final' message for task_id {task_id}")
-                    if taskData and taskData.get("serverId") and taskData.get("channelId"):
-                        server_id = int(taskData["serverId"]) if isinstance(
-                            taskData["serverId"], str) and taskData["serverId"].isdigit() else taskData["serverId"]
-                        channel_id = int(taskData["channelId"]) if isinstance(
-                            taskData["channelId"], str) and taskData["channelId"].isdigit() else taskData["channelId"]
-
-                        message_length = len(message) if message else 0
-                        print(f"Message Length: {message_length}")
-
-                        if message_length > 1000:
-                            message_chunks = split_message(message)
-                            for chunk in message_chunks:
-                                await bot_instance.send_message({
-                                    "message": chunk,
-                                    "task_id": task_id,
-                                    "job_id": job_id,
-                                    "server_id": server_id,
-                                    "channel_id": channel_id,
-                                    "type": message_type
-                                })
-                        else:
-                            await bot_instance.send_message({
-                                "message": message,
-                                "task_id": task_id,
-                                "job_id": job_id,
-                                "server_id": server_id,
-                                "channel_id": channel_id,
-                                "type": message_type
-                            })
-                    tasks_collection.update_one(
-                    {"id": task_id},
-                    {
-                        "$pull": {
-                            "activeJobs": {
-                                "job_id": job_id
-                            }
-                        }
-                    }
-                    )
-
-                    # Check if task is still active and update status (only for non-update messages)
-                    task = tasks_collection.find_one({"id": task_id})
-                    if task:
-                        status = "awaiting" if len(task.get("activeJobs", [])) == 0 else "scheduled"
-                        tasks_collection.update_one(
-                            {"id": task_id},
-                            {"$set": {"status": status}}
-                        )
-
-                else:
-                    print(f"Skipping message send. Missing or empty serverId/channelId for task {task_id}")
-
-            except json.JSONDecodeError:
-                print(f"Invalid JSON received from {device_id}: {data}")
-
-    except WebSocketDisconnect:
-        print(f"Device {device_id} disconnected.")
-        device_collection.update_one(
-            {"deviceId": device_id},
-            {"$set": {"status": False}}
-        )
-        active_connections.remove(websocket)
-        device_connections.pop(device_id, None)
-
-@device_router.post("/send_command")
-async def send_command(request: CommandRequest, current_user: dict = Depends(get_current_user)):
-    task_id = request.command.get("task_id")
-    command = request.command
-    print(command)
-    device_ids = request.device_ids
-    duration = int(command.get("duration", 0))
-    durationType = request.command.get("durationType")
-    time_zone = request.command.get("timeZone", "UTC")
-    newInputs = request.command.get("newInputs")
-    newSchedules = request.command.get("newSchecdules")
-    tasks_collection.update_one(
-        {"id": task_id}, {"$set": {"inputs": newInputs, "deviceIds":device_ids}})
-    
-
-    try:
-
-        user_tz = pytz.timezone(time_zone)
-        now = datetime.now(user_tz)
-        print(f"Current time in {time_zone}: {now}")
-
-        if durationType in ['DurationWithExactStartTime', 'ExactStartTime']:
-            time_str = request.command.get("exactStartTime")
-            hour, minute = parse_time(time_str)
-
-            target_time = now.replace(
-                hour=hour, minute=minute, second=0, microsecond=0)
-            end_time_delta = timedelta(minutes=duration)
-            target_end_time = target_time + end_time_delta
-
-            if target_time < now:
-                target_time += timedelta(days=1)
-                target_end_time += timedelta(days=1)
-
-            target_time_utc = target_time.astimezone(pytz.UTC)
-            target_end_time_utc = target_end_time.astimezone(pytz.UTC)
-
-            if check_for_job_clashes(target_time_utc, target_end_time_utc, task_id, device_ids):
-                return JSONResponse(content={"message": "Task already Scheduled on this time"}, status_code=400)
-
-            job_id = f"cmd_{uuid.uuid4()}"
-            command['job_id'] = job_id
-            schedule_single_job(
-                target_time_utc, target_end_time_utc, device_ids, command, job_id, task_id)
-
-        elif durationType == 'DurationWithTimeWindow':
-            start_time_str = command.get("startInput")
-            end_time_str = command.get("endInput")
-
-            start_hour, start_minute = parse_time(start_time_str)
-            end_hour, end_minute = parse_time(end_time_str)
-
-            start_time = now.replace(
-                hour=start_hour, minute=start_minute, second=0, microsecond=0)
-            end_time = now.replace(
-                hour=end_hour, minute=end_minute, second=0, microsecond=0)
-
-            if end_time < start_time:
-                end_time += timedelta(days=1)
-            if start_time < now:
-                start_time += timedelta(days=1)
-                end_time += timedelta(days=1)
-
-            if check_for_job_clashes(start_time, end_time, task_id, device_ids):
-                return JSONResponse(content={"message": "Task already Scheduled on this time"}, status_code=400)
-
-            time_window = (end_time - start_time).total_seconds() / 60
-            if abs(time_window - duration) <= 10:
-                job_id = f"cmd_{uuid.uuid4()}"
-                command['job_id'] = job_id
-                schedule_single_job(start_time, end_time,
-                                    device_ids, command, job_id, task_id)
-            else:
-                random_durations, start_times = generate_random_durations_and_start_times(
-                    duration, start_time, end_time)
-                schedule_split_jobs(
-                    start_times, random_durations, device_ids, command, task_id)
-
-        elif durationType == 'EveryDayAutomaticRun':
-            schedule_recurring_job(command, device_ids)
-
-        return {"message": "Command scheduled successfully"}
-
-    except pytz.exceptions.UnknownTimeZoneError:
-        raise HTTPException(
-            status_code=400, detail=f"Invalid timezone: {time_zone}")
-    except ValueError as e:
-        raise HTTPException(
-            status_code=400, detail=f"Invalid time format: {str(e)}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
 @device_router.post("/stop_task")
 async def stop_task(request: StopTaskCommandRequest, current_user: dict = Depends(get_current_user)):
@@ -680,6 +468,222 @@ def check_for_job_clashes(start_time, end_time, task_id, device_ids) -> bool:
     """Check for job clashes in the scheduled time window."""
     return check_for_Job_clashes(start_time, end_time, task_id, device_ids)
 
+
+@device_router.websocket("/ws/{device_id}")
+async def websocket_endpoint(websocket: WebSocket, device_id: str):
+    await websocket.accept()
+    device_connections[device_id] = websocket
+    active_connections.append(websocket)
+
+    try:
+        while True:
+            # Receive JSON message from client
+            data = await websocket.receive_text()
+            print(f"Message from {device_id}: {data}")
+
+            try:
+                payload = json.loads(data)
+                message = payload.get("message")
+                task_id = payload.get("task_id")
+                job_id = payload.get("job_id")
+                message_type = payload.get("type")
+                print(f"Parsed payload: message={message}, task_id={task_id}, job_id={job_id}")
+                
+                device_info = device_collection.find_one({"deviceId": device_id})
+                device_name = device_info.get("deviceName", device_id) if device_info else device_id
+                if message:
+                    message = f"Device Name: {device_name}\n\n{message}"
+                
+                
+                if message_type == "ping":
+                    pong_response = {
+                        "type": "pong",
+                        "timestamp": payload.get("timestamp", int(time.time() * 1000))
+                    }
+                    await websocket.send_text(json.dumps(pong_response))
+                    print(f"Sent pong response to ({device_id})")
+                    continue
+                
+                taskData = tasks_collection.find_one(
+                    {"id": task_id}, {"serverId": 1, "channelId": 1, "_id": 0}
+                )
+
+                if message_type == "update":
+                    print(f"Processing 'update' message for task_id {task_id}")
+                    if taskData and taskData.get("serverId") and taskData.get("channelId"):
+                        server_id = int(taskData["serverId"]) if isinstance(
+                            taskData["serverId"], str) and taskData["serverId"].isdigit() else taskData["serverId"]
+                        channel_id = int(taskData["channelId"]) if isinstance(
+                            taskData["channelId"], str) and taskData["channelId"].isdigit() else taskData["channelId"]
+
+                        await bot_instance.send_message({
+                            "message": message,
+                            "task_id": task_id,
+                            "job_id": job_id,
+                            "server_id": server_id,
+                            "channel_id": channel_id,
+                            "type": "update"
+                        })
+                    continue
+
+                elif message_type in ["error","final"]:
+                    print(f"Processing 'final' message for task_id {task_id}")
+                    if taskData and taskData.get("serverId") and taskData.get("channelId"):
+                        server_id = int(taskData["serverId"]) if isinstance(
+                            taskData["serverId"], str) and taskData["serverId"].isdigit() else taskData["serverId"]
+                        channel_id = int(taskData["channelId"]) if isinstance(
+                            taskData["channelId"], str) and taskData["channelId"].isdigit() else taskData["channelId"]
+
+                        message_length = len(message) if message else 0
+                        print(f"Message Length: {message_length}")
+
+                        if message_length > 1000:
+                            message_chunks = split_message(message)
+                            for chunk in message_chunks:
+                                await bot_instance.send_message({
+                                    "message": chunk,
+                                    "task_id": task_id,
+                                    "job_id": job_id,
+                                    "server_id": server_id,
+                                    "channel_id": channel_id,
+                                    "type": message_type
+                                })
+                        else:
+                            await bot_instance.send_message({
+                                "message": message,
+                                "task_id": task_id,
+                                "job_id": job_id,
+                                "server_id": server_id,
+                                "channel_id": channel_id,
+                                "type": message_type
+                            })
+                    tasks_collection.update_one(
+                    {"id": task_id},
+                    {
+                        "$pull": {
+                            "activeJobs": {
+                                "job_id": job_id
+                            }
+                        }
+                    }
+                    )
+
+                    # Check if task is still active and update status (only for non-update messages)
+                    task = tasks_collection.find_one({"id": task_id})
+                    if task:
+                        status = "awaiting" if len(task.get("activeJobs", [])) == 0 else "scheduled"
+                        tasks_collection.update_one(
+                            {"id": task_id},
+                            {"$set": {"status": status}}
+                        )
+
+                else:
+                    print(f"Skipping message send. Missing or empty serverId/channelId for task {task_id}")
+
+            except json.JSONDecodeError:
+                print(f"Invalid JSON received from {device_id}: {data}")
+
+    except WebSocketDisconnect:
+        print(f"Device {device_id} disconnected.")
+        device_collection.update_one(
+            {"deviceId": device_id},
+            {"$set": {"status": False}}
+        )
+        active_connections.remove(websocket)
+        device_connections.pop(device_id, None)
+
+@device_router.post("/send_command")
+async def send_command(request: CommandRequest, current_user: dict = Depends(get_current_user)):
+    task_id = request.command.get("task_id")
+    command = request.command
+    print(command)
+    device_ids = request.device_ids
+    duration = int(command.get("duration", 0))
+    durationType = request.command.get("durationType")
+    time_zone = request.command.get("timeZone", "UTC")
+    newInputs = request.command.get("newInputs")
+    newSchedules = request.command.get("newSchecdules")
+    tasks_collection.update_one(
+        {"id": task_id}, {"$set": {"inputs": newInputs, "deviceIds":device_ids}})
+    
+
+    try:
+
+        user_tz = pytz.timezone(time_zone)
+        now = datetime.now(user_tz)
+        print(f"Current time in {time_zone}: {now}")
+
+        if durationType in ['DurationWithExactStartTime', 'ExactStartTime']:
+            time_str = request.command.get("exactStartTime")
+            hour, minute = parse_time(time_str)
+
+            target_time = now.replace(
+                hour=hour, minute=minute, second=0, microsecond=0)
+            end_time_delta = timedelta(minutes=duration)
+            target_end_time = target_time + end_time_delta
+
+            if target_time < now:
+                target_time += timedelta(days=1)
+                target_end_time += timedelta(days=1)
+
+            target_time_utc = target_time.astimezone(pytz.UTC)
+            target_end_time_utc = target_end_time.astimezone(pytz.UTC)
+
+            if check_for_job_clashes(target_time_utc, target_end_time_utc, task_id, device_ids):
+                return JSONResponse(content={"message": "Task already Scheduled on this time"}, status_code=400)
+
+            job_id = f"cmd_{uuid.uuid4()}"
+            command['job_id'] = job_id
+            schedule_single_job(
+                target_time_utc, target_end_time_utc, device_ids, command, job_id, task_id)
+
+        elif durationType == 'DurationWithTimeWindow':
+            start_time_str = command.get("startInput")
+            end_time_str = command.get("endInput")
+
+            start_hour, start_minute = parse_time(start_time_str)
+            end_hour, end_minute = parse_time(end_time_str)
+
+            start_time = now.replace(
+                hour=start_hour, minute=start_minute, second=0, microsecond=0)
+            end_time = now.replace(
+                hour=end_hour, minute=end_minute, second=0, microsecond=0)
+
+            if end_time < start_time:
+                end_time += timedelta(days=1)
+            if start_time < now:
+                start_time += timedelta(days=1)
+                end_time += timedelta(days=1)
+
+            if check_for_job_clashes(start_time, end_time, task_id, device_ids):
+                return JSONResponse(content={"message": "Task already Scheduled on this time"}, status_code=400)
+
+            time_window = (end_time - start_time).total_seconds() / 60
+            if abs(time_window - duration) <= 10:
+                job_id = f"cmd_{uuid.uuid4()}"
+                command['job_id'] = job_id
+                schedule_single_job(start_time, end_time,
+                                    device_ids, command, job_id, task_id)
+            else:
+                random_durations, start_times = generate_random_durations_and_start_times(
+                    duration, start_time, end_time)
+                schedule_split_jobs(
+                    start_times, random_durations, device_ids, command, task_id)
+
+        elif durationType == 'EveryDayAutomaticRun':
+            schedule_recurring_job(command, device_ids)
+
+        return {"message": "Command scheduled successfully"}
+
+    except pytz.exceptions.UnknownTimeZoneError:
+        raise HTTPException(
+            status_code=400, detail=f"Invalid timezone: {time_zone}")
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400, detail=f"Invalid time format: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+    
 def schedule_single_job(start_time, end_time, device_ids, command, job_id: str, task_id: str) -> None:
     """Schedule a single job with a defined start and end time."""
     
@@ -744,6 +748,47 @@ def schedule_single_job(start_time, end_time, device_ids, command, job_id: str, 
         print(f"Failed to schedule single job: {str(e)}")
         raise HTTPException(
             status_code=500, detail=f"Failed to schedule job: {str(e)}")
+
+
+async def send_schedule_notification(task, device_names, start_time, end_time, time_zone, job_id):
+    """Send a notification to Discord about a scheduled task."""
+    if not task or not task.get("serverId") or not task.get("channelId"):
+        print("Skipping notification. Missing serverId/channelId for task")
+        return
+    
+    try:
+        user_tz = pytz.timezone(time_zone)
+        local_start_time = start_time.astimezone(user_tz)
+        # Format times in user's timezone
+        formatted_start = local_start_time.strftime("%Y-%m-%d %H:%M")
+        task_name = task.get("taskName", "Unknown Task")
+        
+        # Create device list string
+        device_list = ", ".join(device_names) if device_names else "No devices"
+        
+        # Create notification message
+        message = (
+            f"📅 **Task Scheduled**: {task_name}\n"
+            f"⏰ **Start Time**: {formatted_start} ({time_zone})\n"
+            f"🔌 **Devices**: {device_list}"
+        )
+        
+        server_id = int(task["serverId"]) if isinstance(
+            task["serverId"], str) and task["serverId"].isdigit() else task["serverId"]
+        channel_id = int(task["channelId"]) if isinstance(
+            task["channelId"], str) and task["channelId"].isdigit() else task["channelId"]
+        
+        # Send message to Discord
+        await bot_instance.send_message({
+            "message": message,
+            "task_id": task.get("id"),
+            "job_id": job_id,
+            "server_id": server_id,
+            "channel_id": channel_id,
+            "type": "info"
+        })
+    except Exception as e:
+        print(f"Error sending schedule notification: {str(e)}")
 
 def generate_random_durations_and_start_times(duration: int, start_time: datetime, end_time: datetime) -> tuple:
     """Generate random durations and start times for split jobs."""
@@ -1026,45 +1071,6 @@ def get_random_start_times(
 
     return start_times
 
-async def send_schedule_notification(task, device_names, start_time, end_time, time_zone, job_id):
-    """Send a notification to Discord about a scheduled task."""
-    if not task or not task.get("serverId") or not task.get("channelId"):
-        print("Skipping notification. Missing serverId/channelId for task")
-        return
-    
-    try:
-        user_tz = pytz.timezone(time_zone)
-        local_start_time = start_time.astimezone(user_tz)
-        # Format times in user's timezone
-        formatted_start = local_start_time.strftime("%Y-%m-%d %H:%M")
-        task_name = task.get("taskName", "Unknown Task")
-        
-        # Create device list string
-        device_list = ", ".join(device_names) if device_names else "No devices"
-        
-        # Create notification message
-        message = (
-            f"📅 **Task Scheduled**: {task_name}\n"
-            f"⏰ **Start Time**: {formatted_start} ({time_zone})\n"
-            f"🔌 **Devices**: {device_list}"
-        )
-        
-        server_id = int(task["serverId"]) if isinstance(
-            task["serverId"], str) and task["serverId"].isdigit() else task["serverId"]
-        channel_id = int(task["channelId"]) if isinstance(
-            task["channelId"], str) and task["channelId"].isdigit() else task["channelId"]
-        
-        # Send message to Discord
-        await bot_instance.send_message({
-            "message": message,
-            "task_id": task.get("id"),
-            "job_id": job_id,
-            "server_id": server_id,
-            "channel_id": channel_id,
-            "type": "info"
-        })
-    except Exception as e:
-        print(f"Error sending schedule notification: {str(e)}")
 
 async def send_split_schedule_notification(task, device_names, start_times, durations, time_zone):
     """Send a notification to Discord about split scheduled tasks."""
