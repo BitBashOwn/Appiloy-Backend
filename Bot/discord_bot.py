@@ -29,7 +29,9 @@ class AppilotBot:
     async def start_bot(self):
         """Start the Discord bot"""
         try:
+            print("starting discord bot")
             await self.bot.start(self.DISCORD_TOKEN)
+            print("Discord Bot started")
         except Exception as e:
             print(f"Error starting Discord bot: {e}")
 

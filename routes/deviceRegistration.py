@@ -38,7 +38,7 @@ device_router = APIRouter(prefix="")
 # scheduler = AsyncIOScheduler(executors=executors, job_defaults=job_defaults)
 # scheduler = AsyncIOScheduler()
 # scheduler.start()
-print('started scheduling')
+# print('started scheduling')
 
 # In-memory storage for WebSocket connections and mapping them to device IDs
 active_connections: List[WebSocket] = []

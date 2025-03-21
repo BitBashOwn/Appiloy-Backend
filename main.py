@@ -82,31 +82,11 @@ from scheduler import scheduler
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Start the bot first
-    print("Starting Discord bot...")
-    bot_task = asyncio.create_task(bot_instance.start_bot())
-    
-    # Give the bot some time to connect before starting the scheduler
-    await asyncio.sleep(5)
-    
-    # Then start the scheduler
     print("Starting scheduler...")
-    scheduler.start()  # No await here since it's likely synchronous
-    
-    # Send message to Discord
-    await bot_instance.send_message({
-        "server_id": 1328759015261601894,
-        "channel_id": 1352554327398547457,
-        "type": "update",
-        "message": "Server has started and scheduler is running!"
-    })
-    
-    yield  # This is where FastAPI serves requests
-    
-    try:
-        await bot_task
-    except asyncio.CancelledError:
-        print("Bot task cancelled")
+    scheduler.start()  # Start the scheduler 
+    print("started worker scheduler")
+    yield
+
 
 # Use the lifespan parameter when creating the FastAPI app
 app = FastAPI(lifespan=lifespan)
@@ -122,9 +102,9 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  
     allow_credentials=True,
-    allow_methods=["*"],  
-    allow_headers=["*"],  
-    expose_headers=["Set-Cookie"]  
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["Set-Cookie"]
 )
 
 @app.get("/")
@@ -141,9 +121,16 @@ app.include_router(device_router, tags=["Android endpoints"])
 
 # Remove these as they're duplicates of what's in the lifespan
 # scheduler.start()
-# @app.on_event("startup")
-# async def startup_event():
-#     asyncio.create_task(bot_instance.start_bot())
+@app.on_event("startup")
+async def startup_event():
+    try:
+        print("Starting Discord bot...")
+        asyncio.create_task(bot_instance.start_bot())
+        print("Discord bot started successfully.")
+    except Exception as e:
+        print(f"Error starting Discord bot: {e}")
+
+
     
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
