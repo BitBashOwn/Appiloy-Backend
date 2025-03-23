@@ -1,4 +1,5 @@
 # connection_registry.py
+import time
 import redis
 import os
 import uuid
@@ -27,9 +28,11 @@ GLOBAL_COMMAND_CHANNEL = "device_commands"
 def register_device_connection(device_id):
     """Register which worker has this device connection"""
     # Store the worker ID in a hash
+    timestamp = int(time.time())
     redis_client.hset("device_connections", device_id, WORKER_ID)
     # Set device as online in a separate hash for quick status checks
     redis_client.hset("device_status", device_id, "1")
+    redis_client.hset("device_timestamps", device_id, timestamp)
     return True
 
 def unregister_device_connection(device_id):
@@ -49,3 +52,12 @@ def is_device_connected(device_id):
 def get_connected_device_count():
     """Get count of connected devices"""
     return redis_client.hlen("device_status")
+
+
+def track_reconnection(device_id):
+    """Track device reconnection attempts"""
+    key = f"reconnections:{device_id}"
+    count = redis_client.incr(key)
+    # Set expiry to reset count after 1 hour
+    redis_client.expire(key, 3600)
+    return count

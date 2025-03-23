@@ -1,4 +1,5 @@
 import asyncio
+import socket
 import time
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends
 from pymongo import MongoClient, UpdateOne
@@ -18,7 +19,7 @@ import uuid
 from fastapi.responses import JSONResponse
 from Bot.discord_bot import bot_instance
 from scheduler import scheduler
-from connection_registry import register_device_connection, unregister_device_connection, is_device_connected, WORKER_ID
+from connection_registry import register_device_connection, track_reconnection, unregister_device_connection, is_device_connected, WORKER_ID
 from routes.command_router import set_device_connections, start_command_listener, send_commands_to_devices
 
 # Initialize global connection dictionaries
@@ -699,6 +700,14 @@ def check_for_job_clashes(start_time, end_time, task_id, device_ids) -> bool:
 @device_router.websocket("/ws/{device_id}")
 async def websocket_endpoint(websocket: WebSocket, device_id: str):
     await websocket.accept()
+    reconnection_count = track_reconnection(device_id)
+    if reconnection_count > 10:
+        print(f"Warning: Device {device_id} has reconnected {reconnection_count} times in the last hour")
+    # websocket._socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    # # Adjust these values according to your environment
+    # websocket._socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+    # websocket._socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+    # websocket._socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
     
     device_connections[device_id] = websocket
     active_connections.append(websocket)
