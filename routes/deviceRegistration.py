@@ -19,7 +19,7 @@ import uuid
 from fastapi.responses import JSONResponse
 from Bot.discord_bot import bot_instance
 from scheduler import scheduler
-from connection_registry import register_device_connection, track_reconnection, unregister_device_connection, is_device_connected, WORKER_ID
+from connection_registry import register_device_connection, track_reconnection, unregister_device_connection, is_device_connected, log_all_connected_devices, WORKER_ID
 from routes.command_router import set_device_connections, start_command_listener, send_commands_to_devices
 
 # Initialize global connection dictionaries
@@ -722,6 +722,7 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
     )
     
     print(f"Device {device_id} connected to worker {WORKER_ID}")
+    log_all_connected_devices()
 
     try:
         while True:

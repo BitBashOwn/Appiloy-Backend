@@ -61,3 +61,65 @@ def track_reconnection(device_id):
     # Set expiry to reset count after 1 hour
     redis_client.expire(key, 3600)
     return count
+
+
+def get_all_connected_devices():
+    """
+    Get a dictionary of all connected devices with their worker IDs and connection timestamps.
+    
+    Returns:
+        dict: A dictionary with device_id as key and a dict containing worker_id and timestamp as value.
+    """
+    result = {}
+    
+    # Get all device connections
+    all_connections = redis_client.hgetall("device_connections")
+    
+    # Get all timestamps
+    all_timestamps = redis_client.hgetall("device_timestamps")
+    
+    # Combine the information
+    for device_id, worker_id in all_connections.items():
+        timestamp = all_timestamps.get(device_id, 0)
+        
+        # Convert timestamp to human-readable format
+        connection_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(int(timestamp))) if timestamp else "Unknown"
+        
+        # Add to result
+        result[device_id] = {
+            "worker_id": worker_id,
+            "connected_since": connection_time,
+            "timestamp": timestamp
+        }
+    
+    return result
+
+def log_all_connected_devices():
+    """
+    Log all connected devices with their worker IDs and connection times.
+    """
+    devices = get_all_connected_devices()
+    device_count = len(devices)
+    
+    print(f"===== {device_count} Connected Devices =====")
+    print(f"Current worker: {WORKER_ID}")
+    
+    # Group devices by worker
+    workers = {}
+    for device_id, info in devices.items():
+        worker_id = info["worker_id"]
+        if worker_id not in workers:
+            workers[worker_id] = []
+        workers[worker_id].append((device_id, info["connected_since"]))
+    
+    # Print devices grouped by worker
+    for worker_id, device_list in workers.items():
+        is_current = " (current)" if worker_id == WORKER_ID else ""
+        print(f"\nWorker: {worker_id}{is_current} - {len(device_list)} devices")
+        
+        for device_id, connected_since in device_list:
+            print(f"  - {device_id}: connected since {connected_since}")
+    
+    print("\n===============================")
+    
+    return devices
