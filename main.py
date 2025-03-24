@@ -135,7 +135,7 @@
 # if __name__ == "__main__":
 #     uvicorn.run(app, host="0.0.0.0", port=8000)
 
-
+# main.py
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
@@ -158,11 +158,30 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# @asynccontextmanager
+# async def lifespan(app: FastAPI):
+#     logger.info("Starting scheduler...")
+#     scheduler.start()  # Start the scheduler 
+#     logger.info("Started worker scheduler")
+    
+#     yield
+    
+#     # Cleanup code if needed
+#     logger.info("Shutting down application...")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting scheduler...")
     scheduler.start()  # Start the scheduler 
-    logger.info("Started worker scheduler")
+    
+    # Clean up devices for the current worker
+    try:
+        from connection_registry import cleanup_worker_devices
+        cleanup_worker_devices()
+        logger.info("Cleaned up devices for the current worker.")
+    except Exception as e:
+        logger.error(f"Failed to clean up worker devices: {e}")
     
     yield
     

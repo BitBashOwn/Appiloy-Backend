@@ -3,7 +3,6 @@ import time
 import redis
 import os
 import uuid
-
 # Configuration
 REDIS_HOST = os.getenv('REDIS_HOST')
 REDIS_PORT = int(os.getenv('REDIS_PORT'))
@@ -123,3 +122,19 @@ def log_all_connected_devices():
     print("\n===============================")
     
     return devices
+
+
+def cleanup_worker_devices():
+    """
+    Remove all devices associated with the current worker from Redis.
+    """
+    print(f"Cleaning up devices for worker: {WORKER_ID}")
+    
+    # Get all device connections
+    all_connections = redis_client.hgetall("device_connections")
+    
+    # Iterate over the connections and remove devices linked to the current worker
+    for device_id, worker_id in all_connections.items():
+        if worker_id == WORKER_ID:
+            print(f"Removing device {device_id} from worker {WORKER_ID}")
+            unregister_device_connection(device_id)
