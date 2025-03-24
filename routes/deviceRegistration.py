@@ -275,7 +275,9 @@ async def stop_task(request: StopTaskCommandRequest, current_user: dict = Depend
         else:
             # Send stop command only to devices with old jobs
             print("[LOG] Sending stop command to connected devices with old jobs.")
-            result = await send_commands_to_devices(connected_devices,json.dumps(command))
+            print("[LOG] devices found:")
+            print(connected_devices)
+            result = await send_commands_to_devices(connected_devices,command)
             # for device_id, websocket in connected_devices:
             #     try:
             #         await websocket.send_text(json.dumps(command))
