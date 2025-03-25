@@ -199,11 +199,3 @@ def cleanup_stale_workers():
 
     except Exception as e:
         logger.error(f"Error during stale worker cleanup: {str(e)}")
-
-
-async def release_discord_bot_lock():
-    try:
-        redis_client.delete("discord_bot_lock")
-        print("Discord bot lock forcibly released")
-    except Exception as e:
-        print(f"Error releasing lock: {e}")
