@@ -17,7 +17,7 @@ import pytz
 import json
 import uuid
 from fastapi.responses import JSONResponse
-# from Bot.discord_bot import bot_instance
+from Bot.discord_bot import bot_instance
 from scheduler import scheduler
 from connection_registry import register_device_connection, track_reconnection, unregister_device_connection, is_device_connected, log_all_connected_devices, WORKER_ID
 from routes.command_router import set_device_connections, start_command_listener, send_commands_to_devices
@@ -531,25 +531,25 @@ async def send_command_to_devices(device_ids, command):
         failed_names = [device_name_map.get(d_id, "Unknown Device") for d_id in results['failed']]
         error_msg = f"Error: The following devices are not connected: {', '.join(failed_names)}"
         
-        # await bot_instance.send_message({
-        #     "message": error_msg,
-        #     "task_id": task_id,
-        #     "job_id": job_id,
-        #     "server_id": server_id, 
-        #     "channel_id": channel_id,
-        #     "type": "error"
-        # })
-        message = {
+        await bot_instance.send_message({
             "message": error_msg,
             "task_id": task_id,
             "job_id": job_id,
             "server_id": server_id, 
             "channel_id": channel_id,
             "type": "error"
-        }
+        })
+    #     message = {
+    #         "message": error_msg,
+    #         "task_id": task_id,
+    #         "job_id": job_id,
+    #         "server_id": server_id, 
+    #         "channel_id": channel_id,
+    #         "type": "error"
+    #     }
     
-    # Publish the message to the Redis channel your bot is listening to
-        redis_client.publish("discord_bot_channel", json.dumps(message))
+    # # Publish the message to the Redis channel your bot is listening to
+    #     redis_client.publish("discord_bot_channel", json.dumps(message))
         
         # Update database to remove failed devices
         tasks_collection.update_one(
@@ -566,25 +566,25 @@ async def send_command_to_devices(device_ids, command):
         
         all_disconnected_msg = f"Task cannot be executed. All target devices are disconnected."
         
-        # await bot_instance.send_message({
-        #     "message": all_disconnected_msg,
-        #     "task_id": task_id,
-        #     "job_id": job_id,
-        #     "server_id": server_id,
-        #     "channel_id": channel_id,
-        #     "type": "error"
-        # })
-        
-        message = {
+        await bot_instance.send_message({
             "message": all_disconnected_msg,
             "task_id": task_id,
             "job_id": job_id,
             "server_id": server_id,
             "channel_id": channel_id,
             "type": "error"
-        }
+        })
         
-        redis_client.publish("discord_bot_channel", json.dumps(message))
+        # message = {
+        #     "message": all_disconnected_msg,
+        #     "task_id": task_id,
+        #     "job_id": job_id,
+        #     "server_id": server_id,
+        #     "channel_id": channel_id,
+        #     "type": "error"
+        # }
+        
+        # redis_client.publish("discord_bot_channel", json.dumps(message))
         
         print(f"Job {job_id} is no longer active as no devices are connected.")
 
@@ -792,25 +792,25 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                         channel_id = int(taskData["channelId"]) if isinstance(
                             taskData["channelId"], str) and taskData["channelId"].isdigit() else taskData["channelId"]
 
-                        # await bot_instance.send_message({
-                        #     "message": message,
-                        #     "task_id": task_id,
-                        #     "job_id": job_id,
-                        #     "server_id": server_id,
-                        #     "channel_id": channel_id,
-                        #     "type": "update"
-                        # })
-                        
-                        message = {
+                        await bot_instance.send_message({
                             "message": message,
                             "task_id": task_id,
                             "job_id": job_id,
                             "server_id": server_id,
                             "channel_id": channel_id,
                             "type": "update"
-                        }
+                        })
+                        
+                        # message = {
+                        #     "message": message,
+                        #     "task_id": task_id,
+                        #     "job_id": job_id,
+                        #     "server_id": server_id,
+                        #     "channel_id": channel_id,
+                        #     "type": "update"
+                        # }
 
-                        redis_client.publish("discord_bot_channel", json.dumps(message))
+                        # redis_client.publish("discord_bot_channel", json.dumps(message))
                     continue
 
                 elif message_type in ["error","final"]:
@@ -827,43 +827,43 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                         if message_length > 1000:
                             message_chunks = split_message(message)
                             for chunk in message_chunks:
-                                # await bot_instance.send_message({
-                                #     "message": chunk,
-                                #     "task_id": task_id,
-                                #     "job_id": job_id,
-                                #     "server_id": server_id,
-                                #     "channel_id": channel_id,
-                                #     "type": message_type
-                                # })
-                                
-                                message = {
+                                await bot_instance.send_message({
                                     "message": chunk,
                                     "task_id": task_id,
                                     "job_id": job_id,
                                     "server_id": server_id,
                                     "channel_id": channel_id,
                                     "type": message_type
-                                } 
+                                })
                                 
-                                redis_client.publish("discord_bot_channel", json.dumps(message))
+                                # message = {
+                                #     "message": chunk,
+                                #     "task_id": task_id,
+                                #     "job_id": job_id,
+                                #     "server_id": server_id,
+                                #     "channel_id": channel_id,
+                                #     "type": message_type
+                                # } 
+                                
+                                # redis_client.publish("discord_bot_channel", json.dumps(message))
                         else:
-                            # await bot_instance.send_message({
-                            #     "message": message,
-                            #     "task_id": task_id,
-                            #     "job_id": job_id,
-                            #     "server_id": server_id,
-                            #     "channel_id": channel_id,
-                            #     "type": message_type
-                            # })
-                            message = {
+                            await bot_instance.send_message({
                                 "message": message,
                                 "task_id": task_id,
                                 "job_id": job_id,
                                 "server_id": server_id,
                                 "channel_id": channel_id,
                                 "type": message_type
-                            }
-                            redis_client.publish("discord_bot_channel", json.dumps(message))
+                            })
+                            # message = {
+                            #     "message": message,
+                            #     "task_id": task_id,
+                            #     "job_id": job_id,
+                            #     "server_id": server_id,
+                            #     "channel_id": channel_id,
+                            #     "type": message_type
+                            # }
+                            # redis_client.publish("discord_bot_channel", json.dumps(message))
                     tasks_collection.update_one(
                     {"id": task_id},
                     {
@@ -1093,25 +1093,25 @@ async def send_schedule_notification(task, device_names, start_time, end_time, t
             task["channelId"], str) and task["channelId"].isdigit() else task["channelId"]
         
         # Send message to Discord
-        # await bot_instance.send_message({
-        #     "message": message,
-        #     "task_id": task.get("id"),
-        #     "job_id": job_id,
-        #     "server_id": server_id,
-        #     "channel_id": channel_id,
-        #     "type": "info"
-        # })
-        
-        message = {
+        await bot_instance.send_message({
             "message": message,
             "task_id": task.get("id"),
             "job_id": job_id,
             "server_id": server_id,
             "channel_id": channel_id,
             "type": "info"
-        }
+        })
         
-        redis_client.publish("discord_bot_channel", json.dumps(message))
+        # message = {
+        #     "message": message,
+        #     "task_id": task.get("id"),
+        #     "job_id": job_id,
+        #     "server_id": server_id,
+        #     "channel_id": channel_id,
+        #     "type": "info"
+        # }
+        
+        # redis_client.publish("discord_bot_channel", json.dumps(message))
          
     except Exception as e:
         print(f"Error sending schedule notification: {str(e)}")
@@ -1429,25 +1429,25 @@ async def send_split_schedule_notification(task, device_names, start_times, dura
             task["channelId"], str) and task["channelId"].isdigit() else task["channelId"]
         
         # Send message to Discord
-        # await bot_instance.send_message({
-        #     "message": message,
-        #     "task_id": task.get("id"),
-        #     "job_id": f"split_{uuid.uuid4()}", # Generate a unique ID for this notification
-        #     "server_id": server_id,
-        #     "channel_id": channel_id,
-        #     "type": "info"
-        # })
-        
-        message = {
+        await bot_instance.send_message({
             "message": message,
             "task_id": task.get("id"),
             "job_id": f"split_{uuid.uuid4()}", # Generate a unique ID for this notification
             "server_id": server_id,
             "channel_id": channel_id,
             "type": "info"
-        }
+        })
         
-        redis_client.publish("discord_bot_channel", json.dumps(message))
+        # message = {
+        #     "message": message,
+        #     "task_id": task.get("id"),
+        #     "job_id": f"split_{uuid.uuid4()}", # Generate a unique ID for this notification
+        #     "server_id": server_id,
+        #     "channel_id": channel_id,
+        #     "type": "info"
+        # }
+        
+        # redis_client.publish("discord_bot_channel", json.dumps(message))
     except Exception as e:
         print(f"Error sending split schedule notification: {str(e)}")
         

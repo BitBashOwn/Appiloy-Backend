@@ -95,6 +95,11 @@ class AppilotBot:
 bot_instance = AppilotBot()
 
 
+
+
+
+
+
 # # discord_bot.py
 # import discord
 # from discord.ext import commands
@@ -199,85 +204,6 @@ bot_instance = AppilotBot()
 #         )
 #     except Exception as e:
 #         print(f"Error in main Discord bot function: {e}")
-
-# if __name__ == "__main__":
-#     asyncio.run(main())
-
-
-
-# # discord_bot.py
-# import discord
-# from discord.ext import commands
-# from redis_client import get_redis_client
-# import json
-# import asyncio
-# import os
-# from logger import logger
-
-# redis_client = get_redis_client()
-# # Initialize the Discord bot client
-# intents = discord.Intents.default()
-# intents.message_content = True
-# bot = commands.Bot(command_prefix="!", intents=intents)
-
-# # Initialize Redis client (shared among all workers)
-
-# channel_name = "discord_bot_channel"
-
-# DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-# if not DISCORD_BOT_TOKEN:
-#     raise ValueError("No Discord bot token provided")
-
-
-# @bot.event
-# async def on_ready():
-#     print(f'{bot.user} has connected to Discord!')
-#     logger.info(f'Discord bot started and connected as {bot.user}')
-
-# # Function to handle messages from Redis
-# async def listen_for_messages():
-#     pubsub = redis_client.pubsub()
-#     pubsub.subscribe(channel_name)
-#     print("Listening for messages from Redis...")
-
-#     try:
-#         while True:
-#             message = pubsub.get_message()
-#             if message and message['type'] == 'message':
-#                 message_data = json.loads(message['data'])
-#                 print(f"Received message: {message_data}")
-#                 await send_discord_message(message_data)
-#             await asyncio.sleep(0.1)  # Prevent blocking
-#     except Exception as e:
-#         print(f"Error in pubsub listener: {e}")
-#     finally:
-#         await pubsub.unsubscribe(channel_name)
-
-# # Function to send messages to Discord
-# async def send_discord_message(message_data):
-#     server_id = int(message_data['server_id'])
-#     channel_id = int(message_data['channel_id'])
-#     content = message_data['message']
-
-#     guild = bot.get_guild(server_id)
-#     if not guild:
-#         print(f"Guild not found: {server_id}")
-#         return
-
-#     channel = guild.get_channel(channel_id)
-#     if not channel:
-#         print(f"Channel not found: {channel_id}")
-#         return
-
-#     await channel.send(content)
-#     print(f"Message sent to {channel.name}")
-
-# # Run the bot client and listen for messages
-# async def main():
-#     await asyncio.gather(
-#         bot.start(DISCORD_BOT_TOKEN), 
-#         listen_for_messages()
-#     )
 
 # if __name__ == "__main__":
 #     asyncio.run(main())
