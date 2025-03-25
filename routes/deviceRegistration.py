@@ -815,31 +815,31 @@ def schedule_single_job(
         # )
 
         # Update status only if it's not 'running'
-        # tasks_collection.update_one(
-        #     {"id": task_id, "status": {"$ne": "running"}},
-        #     {"$set": {"status": "scheduled"}}
-        # )
+        tasks_collection.update_one(
+            {"id": task_id, "status": {"$ne": "running"}},
+            {"$set": {"status": "scheduled"}}
+        )
 
-        # # Always update activeJobs
-        # tasks_collection.update_one(
-        #     {"id": task_id},
-        #     {"$push": {"activeJobs": jobInstance}}
-        # )
+        # Always update activeJobs
         tasks_collection.update_one(
             {"id": task_id},
-            {
-                "$set": {
-                    "status": {
-                        "$cond": [
-                            {"$ne": ["$status", "running"]},
-                            "scheduled",
-                            "$status",
-                        ]
-                    }
-                },
-                "$push": {"activeJobs": jobInstance},
-            },
+            {"$push": {"activeJobs": jobInstance}}
         )
+        # tasks_collection.update_one(
+        #     {"id": task_id},
+        #     {
+        #         "$set": {
+        #             "status": {
+        #                 "$cond": [
+        #                     {"$ne": ["$status", "running"]},
+        #                     "scheduled",
+        #                     "$status",
+        #                 ]
+        #             }
+        #         },
+        #         "$push": {"activeJobs": jobInstance},
+        #     },
+        # )
 
         # Get device names for notification
         device_docs = list(
