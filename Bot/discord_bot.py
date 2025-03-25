@@ -18,7 +18,7 @@ class AppilotBot:
             print(f'{self.bot.user} has connected to Discord!')
             # Define server and channel IDs
             server_id = 1328759015261601894
-            channel_id = 1352554327398547457
+            channel_id = 1354001745251926117
             
             # Send a welcome message when the bot connects
             message_data = {
