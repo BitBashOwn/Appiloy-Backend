@@ -20,7 +20,7 @@ git pull origin main
 # Add this line to reload systemd configuration
 sudo systemctl daemon-reload
 
-sudo journalctl -u fastapi.service -f
+sudo systemctl restart fastapi.service
 sudo systemctl reload nginx
 
 
