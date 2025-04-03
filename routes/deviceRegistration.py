@@ -987,19 +987,43 @@ async def send_command_to_devices(device_ids, command, main_loop=None):
                 )
             else:
                 # Schedule on the main loop and wait for completion
-                future = asyncio.run_coroutine_threadsafe(
-                    bot_instance.send_message(
-                    {
-                        "message": error_message,
-                        "task_id": task_id,
-                        "job_id": job_id,
-                        "server_id": server_id,
-                        "channel_id": channel_id,
-                        "type": "error",
-                    }
-                ), main_loop
-                )
-                await asyncio.wrap_future(future)  # Wait in the current loop
+                try:
+                    logger.info(f"Attempting to schedule message on main loop: {id(main_loop)}")
+                    future = asyncio.run_coroutine_threadsafe(
+                            bot_instance.send_message(
+                            {
+                                "message": error_message,
+                                "task_id": task_id,
+                                "job_id": job_id,
+                                "server_id": server_id,
+                                "channel_id": channel_id,
+                                "type": "error",
+                            }
+                        ), main_loop
+                        )
+                    logger.info(f"Message scheduled, waiting for completion")
+                    
+                    # Set a timeout to prevent indefinite blocking
+                    try:
+                        await asyncio.wait_for(asyncio.wrap_future(future), timeout=5.0)
+                        logger.info("Message sent successfully")
+                    except asyncio.TimeoutError:
+                        logger.error("Timed out waiting for message to be sent")
+                except Exception as e:
+                    logger.error(f"Error scheduling message on main loop: {e}")
+                # future = asyncio.run_coroutine_threadsafe(
+                #     bot_instance.send_message(
+                #     {
+                #         "message": error_message,
+                #         "task_id": task_id,
+                #         "job_id": job_id,
+                #         "server_id": server_id,
+                #         "channel_id": channel_id,
+                #         "type": "error",
+                #     }
+                # ), main_loop
+                # )
+                # await asyncio.wrap_future(future)  # Wait in the current loop
 
             # Update database to remove failed devices
             logger.info(f"Removing failed devices from active jobs.")
