@@ -31,6 +31,7 @@ from routes.command_router import (
 from Bot.discord_bot import get_bot_instance
 
 from redis_client import get_redis_client
+from logger import logger
 
 
 redis_client = get_redis_client()
@@ -740,15 +741,176 @@ def wrapper_for_send_command(device_ids, command):
     finally:
         loop.close()
 
+# async def send_command_to_devices(device_ids, command, main_loop=None):
+#     """Send command to devices with improved async handling"""
+#     print(f"Executing command for devices: {device_ids}")
+
+#     task_id = command.get("task_id")
+#     job_id = command.get("job_id")
+#     is_recurring = command.get("isRecurring", False)
+
+#     try:
+#         # Use asyncio.to_thread for blocking database operations
+#         task = await asyncio.to_thread(
+#             tasks_collection.find_one,
+#             {"id": task_id},
+#             {"serverId": 1, "channelId": 1, "_id": 0},
+#         )
+
+#         if not task:
+#             print(f"Task {task_id} not found")
+#             return
+
+#         server_id = (
+#             int(task["serverId"])
+#             if isinstance(task["serverId"], str) and task["serverId"].isdigit()
+#             else task["serverId"]
+#         )
+
+#         channel_id = (
+#             int(task["channelId"])
+#             if isinstance(task["channelId"], str) and task["channelId"].isdigit()
+#             else task["channelId"]
+#         )
+
+#         # Fetch device names asynchronously
+#         device_name_map = {}
+#         if device_ids:
+#             device_docs = await asyncio.to_thread(
+#                 list,
+#                 device_collection.find(
+#                     {"deviceId": {"$in": device_ids}},
+#                     {"deviceId": 1, "deviceName": 1, "_id": 0},
+#                 ),
+#             )
+
+#             device_name_map = {
+#                 doc.get("deviceId"): doc.get("deviceName", "Unknown Device")
+#                 for doc in device_docs
+#             }
+
+#         # Send commands
+#         results = await send_commands_to_devices(device_ids, command)
+
+#         if results['success']:
+#             # Update task status
+#             await asyncio.to_thread(tasks_collection.update_one(
+#                 {"id": task_id},
+#                 {"$set": {"status": "running"}}
+#             ))
+            
+            
+#         # Handle failed devices
+#         if results["failed"]:
+#             failed_names = [
+#                 device_name_map.get(d_id, "Unknown Device")
+#                 for d_id in results["failed"]
+#             ]
+#             error_message = f"Error: The following devices are not connected: {', '.join(failed_names)}"
+
+#             if main_loop is None:
+#                 # Fallback if main_loop isn't provided (not recommended)
+#                 await bot_instance.send_message(
+#                     {
+#                         "message": error_message,
+#                         "task_id": task_id,
+#                         "job_id": job_id,
+#                         "server_id": server_id,
+#                         "channel_id": channel_id,
+#                         "type": "error",
+#                     }
+#                 )
+#             else:
+#                 # Schedule on the main loop and wait for completion
+#                 future = asyncio.run_coroutine_threadsafe(
+#                     bot_instance.send_message(
+#                     {
+#                         "message": error_message,
+#                         "task_id": task_id,
+#                         "job_id": job_id,
+#                         "server_id": server_id,
+#                         "channel_id": channel_id,
+#                         "type": "error",
+#                     }
+#                 ), main_loop
+#                 )
+#                 await asyncio.wrap_future(future)  # Wait in the current loop
+
+#             # Update database to remove failed devices
+#             await asyncio.to_thread(
+#                 tasks_collection.update_one,
+#                 {"id": task_id, "activeJobs.job_id": job_id},
+#                 {"$pull": {"activeJobs.$.device_ids": {"$in": results["failed"]}}},
+#             )
+
+#         # Handle complete device failure
+#         if len(results["failed"]) == len(device_ids):
+#             # Remove job from active jobs
+#             await asyncio.to_thread(
+#                 tasks_collection.update_one,
+#                 {"id": task_id},
+#                 {"$pull": {"activeJobs": {"job_id": job_id}}},
+#             )
+
+#             # Send all devices disconnected message
+#             error_message_all_devices_not_connected = (
+#                 "Task cannot be executed. All target devices are disconnected."
+#             )
+
+#             if main_loop is None:
+#                 # Fallback if main_loop isn't provided (not recommended)
+#                 await bot_instance.send_message(
+#                     {
+#                         "message": error_message_all_devices_not_connected,
+#                         "task_id": task_id,
+#                         "job_id": job_id,
+#                         "server_id": server_id,
+#                         "channel_id": channel_id,
+#                         "type": "error",
+#                     }
+#                 )
+#             else:
+#                 # Schedule on the main loop and wait for completion
+#                 future = asyncio.run_coroutine_threadsafe(
+#                     bot_instance.send_message(
+#                     {
+#                         "message": error_message_all_devices_not_connected,
+#                         "task_id": task_id,
+#                         "job_id": job_id,
+#                         "server_id": server_id,
+#                         "channel_id": channel_id,
+#                         "type": "error",
+#                     }
+#                 ), main_loop
+#                 )
+#                 await asyncio.wrap_future(future)  # Wait in the current loop
+
+#             print(f"Job {job_id} is no longer active as no devices are connected.")
+
+#         # Handle recurring job if applicable
+#         if is_recurring:
+#             await asyncio.to_thread(schedule_recurring_job, command, device_ids, main_loop)
+
+#         return results
+
+#     except Exception as e:
+#         print(f"Error in send_command_to_devices: {e}")
+#         import traceback
+
+#         traceback.print_exc()
+#         return None
+
+
 async def send_command_to_devices(device_ids, command, main_loop=None):
     """Send command to devices with improved async handling"""
-    print(f"Executing command for devices: {device_ids}")
+    logger.info(f"Executing command for devices: {device_ids}")
 
     task_id = command.get("task_id")
     job_id = command.get("job_id")
     is_recurring = command.get("isRecurring", False)
 
     try:
+        logger.info(f"Retrieving task with ID: {task_id}")
         # Use asyncio.to_thread for blocking database operations
         task = await asyncio.to_thread(
             tasks_collection.find_one,
@@ -757,9 +919,10 @@ async def send_command_to_devices(device_ids, command, main_loop=None):
         )
 
         if not task:
-            print(f"Task {task_id} not found")
+            logger.warning(f"Task {task_id} not found")
             return
 
+        logger.info(f"Task {task_id} found. Extracting server and channel IDs.")
         server_id = (
             int(task["serverId"])
             if isinstance(task["serverId"], str) and task["serverId"].isdigit()
@@ -775,6 +938,7 @@ async def send_command_to_devices(device_ids, command, main_loop=None):
         # Fetch device names asynchronously
         device_name_map = {}
         if device_ids:
+            logger.info(f"Fetching device names for device IDs: {device_ids}")
             device_docs = await asyncio.to_thread(
                 list,
                 device_collection.find(
@@ -789,15 +953,16 @@ async def send_command_to_devices(device_ids, command, main_loop=None):
             }
 
         # Send commands
+        logger.info(f"Sending commands to devices: {device_ids}")
         results = await send_commands_to_devices(device_ids, command)
 
         if results['success']:
+            logger.info(f"Command successfully executed. Updating task status.")
             # Update task status
             await asyncio.to_thread(tasks_collection.update_one(
                 {"id": task_id},
                 {"$set": {"status": "running"}}
             ))
-            
             
         # Handle failed devices
         if results["failed"]:
@@ -806,6 +971,7 @@ async def send_command_to_devices(device_ids, command, main_loop=None):
                 for d_id in results["failed"]
             ]
             error_message = f"Error: The following devices are not connected: {', '.join(failed_names)}"
+            logger.warning(error_message)
 
             if main_loop is None:
                 # Fallback if main_loop isn't provided (not recommended)
@@ -836,6 +1002,7 @@ async def send_command_to_devices(device_ids, command, main_loop=None):
                 await asyncio.wrap_future(future)  # Wait in the current loop
 
             # Update database to remove failed devices
+            logger.info(f"Removing failed devices from active jobs.")
             await asyncio.to_thread(
                 tasks_collection.update_one,
                 {"id": task_id, "activeJobs.job_id": job_id},
@@ -844,6 +1011,7 @@ async def send_command_to_devices(device_ids, command, main_loop=None):
 
         # Handle complete device failure
         if len(results["failed"]) == len(device_ids):
+            logger.info(f"All devices failed. Removing job from active jobs.")
             # Remove job from active jobs
             await asyncio.to_thread(
                 tasks_collection.update_one,
@@ -884,16 +1052,17 @@ async def send_command_to_devices(device_ids, command, main_loop=None):
                 )
                 await asyncio.wrap_future(future)  # Wait in the current loop
 
-            print(f"Job {job_id} is no longer active as no devices are connected.")
+            logger.info(f"Job {job_id} is no longer active as no devices are connected.")
 
         # Handle recurring job if applicable
         if is_recurring:
+            logger.info(f"Scheduling recurring job for task {task_id}.")
             await asyncio.to_thread(schedule_recurring_job, command, device_ids, main_loop)
 
         return results
 
     except Exception as e:
-        print(f"Error in send_command_to_devices: {e}")
+        logger.error(f"Error in send_command_to_devices: {e}")
         import traceback
 
         traceback.print_exc()
