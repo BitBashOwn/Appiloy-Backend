@@ -16,7 +16,7 @@ class deleteRequest(BaseModel):
     tasks: list
     
 class clearOldJobsRequest(BaseModel):
-    tasks: list
+    Task_ids: list
     command: dict
 
 class inputsSaveRequest(BaseModel):

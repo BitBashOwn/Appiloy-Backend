@@ -91,6 +91,7 @@ class AppilotBot:
         except Exception as e:
             print(f"Error sending message to Discord: {e}")
 
-
-# Create a singleton instance
 bot_instance = AppilotBot()
+
+def get_bot_instance():
+    return bot_instance
