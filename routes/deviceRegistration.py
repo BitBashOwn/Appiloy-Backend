@@ -345,6 +345,7 @@ async def stop_task(
         )
 
 
+
 @device_router.websocket("/ws/{device_id}")
 async def websocket_endpoint(websocket: WebSocket, device_id: str):
     await websocket.accept()
@@ -957,7 +958,7 @@ async def send_command_to_devices(device_ids, command, main_loop=None):
         results = await send_commands_to_devices(device_ids, command)
 
         if results['success']:
-            logger.info(f"Command successfully executed. Updating task status.")
+            logger.info("Command successfully executed. Updating task status.")
             # Update task status
             await asyncio.to_thread(tasks_collection.update_one(
                 {"id": task_id},
@@ -1001,7 +1002,7 @@ async def send_command_to_devices(device_ids, command, main_loop=None):
                             }
                         ), main_loop
                         )
-                    logger.info(f"Message scheduled, waiting for completion")
+                    logger.info("Message scheduled, waiting for completion")
                     
                     # Set a timeout to prevent indefinite blocking
                     try:
@@ -1026,7 +1027,7 @@ async def send_command_to_devices(device_ids, command, main_loop=None):
                 # await asyncio.wrap_future(future)  # Wait in the current loop
 
             # Update database to remove failed devices
-            logger.info(f"Removing failed devices from active jobs.")
+            logger.info("Removing failed devices from active jobs.")
             await asyncio.to_thread(
                 tasks_collection.update_one,
                 {"id": task_id, "activeJobs.job_id": job_id},
@@ -1035,7 +1036,7 @@ async def send_command_to_devices(device_ids, command, main_loop=None):
 
         # Handle complete device failure
         if len(results["failed"]) == len(device_ids):
-            logger.info(f"All devices failed. Removing job from active jobs.")
+            logger.info("All devices failed. Removing job from active jobs.")
             # Remove job from active jobs
             await asyncio.to_thread(
                 tasks_collection.update_one,

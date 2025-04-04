@@ -4,9 +4,10 @@ from utils.utils import get_current_user
 # from models.devices import devices_collection
 from config.database import db
 from pydantic import BaseModel
-from bson import ObjectId
-import json
 from typing import Dict
+from connection_registry import is_device_connected
+from models.devices import devices_collection
+from logger import logger
 
 devices_router = APIRouter()
 
@@ -14,7 +15,9 @@ devices_router = APIRouter()
 class deleteRequest(BaseModel):
     devices: list
 
-
+class updateStatusRequest(BaseModel):
+    devices: list
+    
 class updateRequest(BaseModel):
     devices: list
     dataToUpdate: Dict[str, str]
@@ -69,7 +72,7 @@ async def delete_devices(devices: deleteRequest, current_user: dict = Depends(ge
 
 
 @devices_router.patch("/edit-device")
-async def delete_devices(data: updateRequest, current_user: dict = Depends(get_current_user)):
+async def edit_devices(data: updateRequest, current_user: dict = Depends(get_current_user)):
     print("Update Data Request Data:", data)
 
     if not data.devices:
@@ -92,3 +95,61 @@ async def delete_devices(data: updateRequest, current_user: dict = Depends(get_c
         content={"message": f"{result.modified_count} devices updated successfully"},
         status_code=200
     )
+
+
+@devices_router.patch("/update-status")
+async def update_status(data: updateStatusRequest, current_user: dict = Depends(get_current_user)):
+    try:
+        logger.info(f"Update Data Request Data: {data}")
+
+        if not data.devices:
+            raise HTTPException(
+                status_code=400, detail="No devices provided for updating status."
+            )
+
+        connected_devices = []
+        not_connected_devices = []
+
+        for device in data.devices:
+            if is_device_connected(device):
+                connected_devices.append(device)
+            else:
+                not_connected_devices.append(device)
+
+        connected_result = None
+        not_connected_result = None
+
+        if connected_devices:
+            connected_result = devices_collection.update_many(
+                {"deviceId": {"$in": connected_devices}, "email": current_user.get("email")},
+                {"$set": {"status": True}}
+            )
+
+        if not_connected_devices:
+            not_connected_result = devices_collection.update_many(
+                {"deviceId": {"$in": not_connected_devices}, "email": current_user.get("email")},
+                {"$set": {"status": False}}
+            )
+
+        connected_count = connected_result.matched_count if connected_result else 0
+        not_connected_count = not_connected_result.matched_count if not_connected_result else 0
+
+        return_message = f"{connected_count} devices connected and {not_connected_count} devices not connected"
+        
+        logger.info(return_message)
+
+        return JSONResponse(
+            content={"message": return_message},
+            status_code=200
+        )
+
+    except HTTPException as e:
+        raise e  # Let FastAPI handle HTTPExceptions as-is
+
+    except Exception as e:
+        # Log the exception if you have a logger
+        logger.error(f"Unexpected error: {e}")
+        return JSONResponse(
+            content={"message": "An unexpected error occurred. Please try again later."},
+            status_code=500
+        )
