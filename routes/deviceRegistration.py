@@ -724,17 +724,6 @@ def schedule_single_job(
         print(f"Failed to schedule single job: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to schedule job: {str(e)}")
 
-def wrapper_for_send_command(device_ids, command):
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        # Pass the main_event_loop to the async function
-        return loop.run_until_complete(
-            send_command_to_devices(device_ids, command, main_event_loop)
-        )
-    finally:
-        loop.close()
-
 # async def send_command_to_devices(device_ids, command, main_loop=None):
 #     """Send command to devices with improved async handling"""
 #     print(f"Executing command for devices: {device_ids}")
@@ -895,8 +884,260 @@ def wrapper_for_send_command(device_ids, command):
 #         return None
 
 
+# def wrapper_for_send_command(device_ids, command):
+#     loop = asyncio.new_event_loop()
+#     asyncio.set_event_loop(loop)
+#     try:
+#         # Pass the main_event_loop to the async function
+#         return loop.run_until_complete(
+#             send_command_to_devices(device_ids, command, main_event_loop)
+#         )
+#     finally:
+#         loop.close()
 
-async def send_command_to_devices(device_ids, command, main_loop=None):
+
+# async def send_command_to_devices(device_ids, command, main_loop=None):
+#     """Send command to devices with improved async handling"""
+#     logger.info(f"Executing command for devices: {device_ids}")
+
+#     task_id = command.get("task_id")
+#     job_id = command.get("job_id")
+#     is_recurring = command.get("isRecurring", False)
+
+#     try:
+#         logger.info(f"Retrieving task with ID: {task_id}")
+#         # Use asyncio.to_thread for blocking database operations
+#         task = await asyncio.to_thread(
+#             tasks_collection.find_one,
+#             {"id": task_id},
+#             {"serverId": 1, "channelId": 1, "_id": 0},
+#         )
+
+#         if not task:
+#             logger.warning(f"Task {task_id} not found")
+#             return
+
+#         logger.info(f"Task {task_id} found. Extracting server and channel IDs.")
+#         server_id = (
+#             int(task["serverId"])
+#             if isinstance(task["serverId"], str) and task["serverId"].isdigit()
+#             else task["serverId"]
+#         )
+
+#         channel_id = (
+#             int(task["channelId"])
+#             if isinstance(task["channelId"], str) and task["channelId"].isdigit()
+#             else task["channelId"]
+#         )
+
+#         # Fetch device names asynchronously
+#         device_name_map = {}
+#         if device_ids:
+#             logger.info(f"Fetching device names for device IDs: {device_ids}")
+#             device_docs = await asyncio.to_thread(
+#                 list,
+#                 device_collection.find(
+#                     {"deviceId": {"$in": device_ids}},
+#                     {"deviceId": 1, "deviceName": 1, "_id": 0},
+#                 ),
+#             )
+
+#             device_name_map = {
+#                 doc.get("deviceId"): doc.get("deviceName", "Unknown Device")
+#                 for doc in device_docs
+#             }
+
+#         # Send commands
+#         logger.info(f"Sending commands to devices: {device_ids}")
+#         results = await send_commands_to_devices(device_ids, command)
+
+#         if results['success']:
+#             logger.info("Command successfully executed. Updating task status.")
+#             # Update task status
+#             result = await asyncio.to_thread(tasks_collection.update_one,
+#                     {"id": task_id},
+#                     {"$set": {"status": "running"}}
+#                 )
+#             if result.modified_count > 0:
+#                 logger.info("Task status updated successfully.")
+#             else:
+#                 logger.warning("Task status update failed.")
+                        
+#         # Handle failed devices
+#         if results["failed"]:
+#             failed_names = [
+#                 device_name_map.get(d_id, "Unknown Device")
+#                 for d_id in results["failed"]
+#             ]
+#             error_message = f"Error: The following devices are not connected: {', '.join(failed_names)}"
+#             logger.warning(error_message)
+
+#             if main_loop is None:
+#                 # Fallback if main_loop isn't provided (not recommended)
+#                 await bot_instance.send_message(
+#                     {
+#                         "message": error_message,
+#                         "task_id": task_id,
+#                         "job_id": job_id,
+#                         "server_id": server_id,
+#                         "channel_id": channel_id,
+#                         "type": "error",
+#                     }
+#                 )
+#             else:
+#                 # Schedule on the main loop and wait for completion
+#                 try:
+#                     logger.info(f"Attempting to schedule message on main loop: {id(main_loop)}")
+#                     future = asyncio.run_coroutine_threadsafe(
+#                             bot_instance.send_message(
+#                             {
+#                                 "message": error_message,
+#                                 "task_id": task_id,
+#                                 "job_id": job_id,
+#                                 "server_id": server_id,
+#                                 "channel_id": channel_id,
+#                                 "type": "error",
+#                             }
+#                         ), main_loop
+#                         )
+#                     logger.info("Message scheduled, waiting for completion")
+                    
+#                     # Set a timeout to prevent indefinite blocking
+#                     try:
+#                         await asyncio.wait_for(asyncio.wrap_future(future), timeout=5.0)
+#                         logger.info("Message sent successfully")
+#                     except asyncio.TimeoutError:
+#                         logger.error("Timed out waiting for message to be sent")
+#                 except Exception as e:
+#                     logger.error(f"Error scheduling message on main loop: {e}")
+#                 # future = asyncio.run_coroutine_threadsafe(
+#                 #     bot_instance.send_message(
+#                 #     {
+#                 #         "message": error_message,
+#                 #         "task_id": task_id,
+#                 #         "job_id": job_id,
+#                 #         "server_id": server_id,
+#                 #         "channel_id": channel_id,
+#                 #         "type": "error",
+#                 #     }
+#                 # ), main_loop
+#                 # )
+#                 # await asyncio.wrap_future(future)  # Wait in the current loop
+
+#             # Update database to remove failed devices
+#             logger.info("Removing failed devices from active jobs.")
+#             result = await asyncio.to_thread(
+#                 tasks_collection.update_one,
+#                 {"id": task_id, "activeJobs.job_id": job_id},
+#                 {"$pull": {"activeJobs.$.device_ids": {"$in": results["failed"]}}},
+#             )
+#             if result.modified_count > 0:
+#                 logger.info("Active jobs updated successfully.")
+#             else:
+#                 logger.warning("No active jobs were updated.")
+
+
+#         # Handle complete device failure
+#         if len(results["failed"]) == len(device_ids):
+#             logger.info("All devices failed. Removing job from active jobs.")
+#             # Remove job from active jobs
+#             result = await asyncio.to_thread(
+#                 tasks_collection.update_one,
+#                 {"id": task_id},
+#                 {"$pull": {"activeJobs": {"job_id": job_id}}},
+#             )
+            
+#             if result.modified_count > 0:
+#                 logger.info(f"Job {job_id} successfully removed from active jobs.")
+#             else:
+#                 logger.warning(f"Job {job_id} removal failed.")
+
+#             # Send all devices disconnected message
+#             error_message_all_devices_not_connected = (
+#                 "Task cannot be executed. All target devices are disconnected."
+#             )
+
+#             if main_loop is None:
+#                 # Fallback if main_loop isn't provided (not recommended)
+#                 await bot_instance.send_message(
+#                     {
+#                         "message": error_message_all_devices_not_connected,
+#                         "task_id": task_id,
+#                         "job_id": job_id,
+#                         "server_id": server_id,
+#                         "channel_id": channel_id,
+#                         "type": "error",
+#                     }
+#                 )
+#             else:
+#                 # Schedule on the main loop and wait for completion
+#                 future = asyncio.run_coroutine_threadsafe(
+#                     bot_instance.send_message(
+#                     {
+#                         "message": error_message_all_devices_not_connected,
+#                         "task_id": task_id,
+#                         "job_id": job_id,
+#                         "server_id": server_id,
+#                         "channel_id": channel_id,
+#                         "type": "error",
+#                     }
+#                 ), main_loop
+#                 )
+#                 await asyncio.wrap_future(future)  # Wait in the current loop
+
+#             logger.info(f"Job {job_id} is no longer active as no devices are connected.")
+
+#         # Handle recurring job if applicable
+#         if is_recurring:
+#             logger.info(f"Scheduling recurring job for task {task_id}.")
+#             await asyncio.to_thread(schedule_recurring_job, command, device_ids, main_loop)
+
+#         return results
+
+#     except Exception as e:
+#         logger.error(f"Error in send_command_to_devices: {e}")
+#         import traceback
+
+#         traceback.print_exc()
+#         return None
+
+
+
+
+# 1. Modify the wrapper_for_send_command function to avoid creating a new loop
+# if it's already running in an event loop
+def wrapper_for_send_command(device_ids, command):
+    try:
+        # Check if we're already in an event loop
+        try:
+            current_loop = asyncio.get_event_loop()
+            if current_loop.is_running():
+                # We're already in a running event loop, create a new one
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                return loop.run_until_complete(
+                    send_command_to_devices(device_ids, command)
+                )
+            else:
+                # We have a loop but it's not running, use it
+                return current_loop.run_until_complete(
+                    send_command_to_devices(device_ids, command)
+                )
+        except RuntimeError:
+            # No event loop exists, create one
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            return loop.run_until_complete(
+                send_command_to_devices(device_ids, command)
+            )
+    finally:
+        # Only close the loop if we created a new one
+        if 'loop' in locals() and loop is not asyncio.get_event_loop():
+            loop.close()
+
+
+# 2. Modify the send_command_to_devices function to not rely on main_loop
+async def send_command_to_devices(device_ids, command):
     """Send command to devices with improved async handling"""
     logger.info(f"Executing command for devices: {device_ids}")
 
@@ -972,8 +1213,10 @@ async def send_command_to_devices(device_ids, command, main_loop=None):
             error_message = f"Error: The following devices are not connected: {', '.join(failed_names)}"
             logger.warning(error_message)
 
-            if main_loop is None:
-                # Fallback if main_loop isn't provided (not recommended)
+            # Create a new task for sending the message instead of scheduling on main loop
+            try:
+                logger.info("Creating a new task to send error message")
+                # Use the bot_instance directly without trying to schedule on main loop
                 await bot_instance.send_message(
                     {
                         "message": error_message,
@@ -984,45 +1227,9 @@ async def send_command_to_devices(device_ids, command, main_loop=None):
                         "type": "error",
                     }
                 )
-            else:
-                # Schedule on the main loop and wait for completion
-                try:
-                    logger.info(f"Attempting to schedule message on main loop: {id(main_loop)}")
-                    future = asyncio.run_coroutine_threadsafe(
-                            bot_instance.send_message(
-                            {
-                                "message": error_message,
-                                "task_id": task_id,
-                                "job_id": job_id,
-                                "server_id": server_id,
-                                "channel_id": channel_id,
-                                "type": "error",
-                            }
-                        ), main_loop
-                        )
-                    logger.info("Message scheduled, waiting for completion")
-                    
-                    # Set a timeout to prevent indefinite blocking
-                    try:
-                        await asyncio.wait_for(asyncio.wrap_future(future), timeout=5.0)
-                        logger.info("Message sent successfully")
-                    except asyncio.TimeoutError:
-                        logger.error("Timed out waiting for message to be sent")
-                except Exception as e:
-                    logger.error(f"Error scheduling message on main loop: {e}")
-                # future = asyncio.run_coroutine_threadsafe(
-                #     bot_instance.send_message(
-                #     {
-                #         "message": error_message,
-                #         "task_id": task_id,
-                #         "job_id": job_id,
-                #         "server_id": server_id,
-                #         "channel_id": channel_id,
-                #         "type": "error",
-                #     }
-                # ), main_loop
-                # )
-                # await asyncio.wrap_future(future)  # Wait in the current loop
+                logger.info("Error message sent successfully")
+            except Exception as e:
+                logger.error(f"Error sending message: {e}")
 
             # Update database to remove failed devices
             logger.info("Removing failed devices from active jobs.")
@@ -1035,7 +1242,6 @@ async def send_command_to_devices(device_ids, command, main_loop=None):
                 logger.info("Active jobs updated successfully.")
             else:
                 logger.warning("No active jobs were updated.")
-
 
         # Handle complete device failure
         if len(results["failed"]) == len(device_ids):
@@ -1057,8 +1263,8 @@ async def send_command_to_devices(device_ids, command, main_loop=None):
                 "Task cannot be executed. All target devices are disconnected."
             )
 
-            if main_loop is None:
-                # Fallback if main_loop isn't provided (not recommended)
+            try:
+                # Use the bot_instance directly without trying to schedule on main loop
                 await bot_instance.send_message(
                     {
                         "message": error_message_all_devices_not_connected,
@@ -1069,28 +1275,16 @@ async def send_command_to_devices(device_ids, command, main_loop=None):
                         "type": "error",
                     }
                 )
-            else:
-                # Schedule on the main loop and wait for completion
-                future = asyncio.run_coroutine_threadsafe(
-                    bot_instance.send_message(
-                    {
-                        "message": error_message_all_devices_not_connected,
-                        "task_id": task_id,
-                        "job_id": job_id,
-                        "server_id": server_id,
-                        "channel_id": channel_id,
-                        "type": "error",
-                    }
-                ), main_loop
-                )
-                await asyncio.wrap_future(future)  # Wait in the current loop
+                logger.info("All devices disconnected message sent successfully")
+            except Exception as e:
+                logger.error(f"Error sending all devices disconnected message: {e}")
 
             logger.info(f"Job {job_id} is no longer active as no devices are connected.")
 
         # Handle recurring job if applicable
         if is_recurring:
             logger.info(f"Scheduling recurring job for task {task_id}.")
-            await asyncio.to_thread(schedule_recurring_job, command, device_ids, main_loop)
+            await asyncio.to_thread(schedule_recurring_job, command, device_ids)
 
         return results
 
@@ -1100,6 +1294,18 @@ async def send_command_to_devices(device_ids, command, main_loop=None):
 
         traceback.print_exc()
         return None
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def parse_time(time_str: str) -> tuple:
@@ -1254,7 +1460,132 @@ async def send_schedule_notification(
     except Exception as e:
         print(f"Error sending schedule notification: {str(e)}")
 
-def schedule_recurring_job(command: dict, device_ids: List[str], main_loop=None) -> None:
+# def schedule_recurring_job(command: dict, device_ids: List[str], main_loop=None) -> None:
+#     """Schedule the next day's task within the specified time window"""
+#     task_id = command.get("task_id")
+#     time_zone = command.get("timeZone", "UTC")
+#     user_tz = pytz.timezone(time_zone)
+
+#     # Get tomorrow's date
+#     now = datetime.now(user_tz)
+
+#     # Parse start and end times
+#     start_time_str = command.get("startInput")
+#     end_time_str = command.get("endInput")
+#     start_hour, start_minute = parse_time(start_time_str)
+#     end_hour, end_minute = parse_time(end_time_str)
+
+#     start_time = now.replace(
+#         hour=start_hour, minute=start_minute, second=0, microsecond=0
+#     )
+#     end_time = now.replace(hour=end_hour, minute=end_minute, second=0, microsecond=0)
+
+#     if start_time < now:
+#         start_time += timedelta(days=1)
+
+#     if end_time < start_time:
+#         end_time += timedelta(days=1)
+
+#     time_window_minutes = int((end_time - start_time).total_seconds() / 60)
+#     duration = int(command.get("duration", 0))
+
+#     # Ensure we don't schedule if the duration exceeds available time
+#     if duration > time_window_minutes:
+#         print(
+#             f"Duration ({duration}) exceeds available time window ({time_window_minutes})"
+#         )
+#         return
+
+#     random_minutes = random.randint(0, time_window_minutes - duration)
+#     random_start_time = start_time + timedelta(minutes=random_minutes)
+#     random_end_time = random_start_time + timedelta(minutes=duration)
+
+#     start_time_utc = random_start_time.astimezone(pytz.UTC)
+#     end_time_utc = random_end_time.astimezone(pytz.UTC)
+
+#     new_job_id = f"cmd_{uuid.uuid4()}"
+#     modified_command = {**command, "job_id": new_job_id, "isRecurring": True}
+
+#     jobInstance = {
+#         "job_id": new_job_id,
+#         "startTime": start_time_utc,
+#         "endTime": end_time_utc,
+#         "device_ids": device_ids,
+#     }
+
+#     try:
+#         scheduler.add_job(
+#             wrapper_for_send_command,
+#             trigger=DateTrigger(run_date=start_time_utc, timezone=pytz.UTC),
+#             args=[device_ids, modified_command],
+#             id=new_job_id,
+#             name=f"Recurring random-time command for devices {device_ids}",
+#         )
+
+#         # First, get current task status
+#         task = tasks_collection.find_one({"id": task_id}, {"status": 1})
+
+#         if task and task.get("status") == "awaiting":
+#             # Update both status and activeJobs if status is "awaiting"
+#             update_operation = {
+#                 "$set": {"status": "scheduled"},
+#                 "$push": {"activeJobs": jobInstance},
+#             }
+#         else:
+#             # Only update activeJobs if status is not "awaiting"
+#             update_operation = {"$push": {"activeJobs": jobInstance}}
+
+#         # Update the task in the database
+#         tasks_collection.update_one({"id": task_id}, update_operation)
+
+#         # Get device names for notification
+#         device_docs = list(
+#             device_collection.find(
+#                 {"deviceId": {"$in": device_ids}},
+#                 {"deviceId": 1, "deviceName": 1, "_id": 0},
+#             )
+#         )
+#         device_names = [doc.get("deviceName", "Unknown Device") for doc in device_docs]
+
+#         # Get updated task details for notification
+#         task = tasks_collection.find_one({"id": task_id})
+        
+#         if main_loop is None:
+#             # Send schedule notification asynchronously
+#             asyncio.create_task(
+#                 send_schedule_notification(
+#                     task,
+#                     device_names,
+#                     random_start_time,
+#                     random_end_time,
+#                     time_zone,
+#                     new_job_id,
+#                 )
+#             )
+#         else:
+#             asyncio.run_coroutine_threadsafe(
+#                 send_schedule_notification(
+#                     task,
+#                     device_names,
+#                     random_start_time,
+#                     random_end_time,
+#                     time_zone,
+#                     new_job_id,
+#                 ),
+#                 main_loop  # Pass the main loop from earlier
+#             )
+            
+#         print(f"Scheduled next day's task for {random_start_time} ({time_zone})")
+
+#     except Exception as e:
+#         print(f"Failed to schedule next day's job: {str(e)}")
+#         raise HTTPException(
+#             status_code=500, detail=f"Failed to schedule next day's job: {str(e)}"
+#         )
+
+
+
+def schedule_recurring_job(command: dict, device_ids: List[str]) -> None:
     """Schedule the next day's task within the specified time window"""
     task_id = command.get("task_id")
     time_zone = command.get("timeZone", "UTC")
@@ -1344,9 +1675,12 @@ def schedule_recurring_job(command: dict, device_ids: List[str], main_loop=None)
         # Get updated task details for notification
         task = tasks_collection.find_one({"id": task_id})
         
-        if main_loop is None:
-            # Send schedule notification asynchronously
-            asyncio.create_task(
+        # Create a new task for sending notification
+        # Create a new event loop for this thread if needed
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(
                 send_schedule_notification(
                     task,
                     device_names,
@@ -1356,18 +1690,9 @@ def schedule_recurring_job(command: dict, device_ids: List[str], main_loop=None)
                     new_job_id,
                 )
             )
-        else:
-            asyncio.run_coroutine_threadsafe(
-                send_schedule_notification(
-                    task,
-                    device_names,
-                    random_start_time,
-                    random_end_time,
-                    time_zone,
-                    new_job_id,
-                ),
-                main_loop  # Pass the main loop from earlier
-            )
+            loop.close()
+        except Exception as e:
+            print(f"Failed to send schedule notification: {str(e)}")
             
         print(f"Scheduled next day's task for {random_start_time} ({time_zone})")
 
@@ -1376,6 +1701,13 @@ def schedule_recurring_job(command: dict, device_ids: List[str], main_loop=None)
         raise HTTPException(
             status_code=500, detail=f"Failed to schedule next day's job: {str(e)}"
         )
+
+
+
+
+
+
+
 
 def generate_random_durations(total_duration: int, min_duration: int = 30) -> List[int]:
     """
