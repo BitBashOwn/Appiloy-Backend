@@ -95,7 +95,6 @@ async def update_device_status(device_id: str, status: bool):
     device_collection.update_one({"deviceId": device_id}, {"$set": {"status": status}})
     return {"message": f"Device {device_id} status updated to {status}"}
 
-
 @device_router.get("/device_registration/{device_id}")
 async def check_device_registration(device_id: str):
     device = device_collection.find_one({"deviceId": device_id})
@@ -108,7 +107,6 @@ async def check_device_registration(device_id: str):
         )
 
     return True
-
 
 @device_router.post("/stop_task")
 async def stop_task(
@@ -344,8 +342,6 @@ async def stop_task(
             status_code=500, content={"message": f"An error occurred: {str(e)}"}
         )
 
-
-
 @device_router.websocket("/ws/{device_id}")
 async def websocket_endpoint(websocket: WebSocket, device_id: str):
     await websocket.accept()
@@ -533,7 +529,6 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
         # Unregister from Redis
         unregister_device_connection(device_id)
 
-
 @device_router.post("/send_command")
 async def send_command(
     request: CommandRequest, current_user: dict = Depends(get_current_user)
@@ -652,7 +647,6 @@ async def send_command(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
-
 def register_device(device_data: DeviceRegistration):
     device = device_collection.find_one({"deviceId": device_data.deviceId})
     if device:
@@ -729,7 +723,6 @@ def schedule_single_job(
     except Exception as e:
         print(f"Failed to schedule single job: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to schedule job: {str(e)}")
-
 
 def wrapper_for_send_command(device_ids, command):
     loop = asyncio.new_event_loop()
@@ -902,6 +895,7 @@ def wrapper_for_send_command(device_ids, command):
 #         return None
 
 
+
 async def send_command_to_devices(device_ids, command, main_loop=None):
     """Send command to devices with improved async handling"""
     logger.info(f"Executing command for devices: {device_ids}")
@@ -960,11 +954,15 @@ async def send_command_to_devices(device_ids, command, main_loop=None):
         if results['success']:
             logger.info("Command successfully executed. Updating task status.")
             # Update task status
-            await asyncio.to_thread(tasks_collection.update_one(
-                {"id": task_id},
-                {"$set": {"status": "running"}}
-            ))
-            
+            result = await asyncio.to_thread(tasks_collection.update_one,
+                    {"id": task_id},
+                    {"$set": {"status": "running"}}
+                )
+            if result.modified_count > 0:
+                logger.info("Task status updated successfully.")
+            else:
+                logger.warning("Task status update failed.")
+                        
         # Handle failed devices
         if results["failed"]:
             failed_names = [
@@ -1028,21 +1026,31 @@ async def send_command_to_devices(device_ids, command, main_loop=None):
 
             # Update database to remove failed devices
             logger.info("Removing failed devices from active jobs.")
-            await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 tasks_collection.update_one,
                 {"id": task_id, "activeJobs.job_id": job_id},
                 {"$pull": {"activeJobs.$.device_ids": {"$in": results["failed"]}}},
             )
+            if result.modified_count > 0:
+                logger.info("Active jobs updated successfully.")
+            else:
+                logger.warning("No active jobs were updated.")
+
 
         # Handle complete device failure
         if len(results["failed"]) == len(device_ids):
             logger.info("All devices failed. Removing job from active jobs.")
             # Remove job from active jobs
-            await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 tasks_collection.update_one,
                 {"id": task_id},
                 {"$pull": {"activeJobs": {"job_id": job_id}}},
             )
+            
+            if result.modified_count > 0:
+                logger.info(f"Job {job_id} successfully removed from active jobs.")
+            else:
+                logger.warning(f"Job {job_id} removal failed.")
 
             # Send all devices disconnected message
             error_message_all_devices_not_connected = (
@@ -1099,8 +1107,6 @@ def parse_time(time_str: str) -> tuple:
     hour, minute = map(int, time_str.split(":"))
     return hour, minute
 
-
-
 def generate_random_durations_and_start_times(
     duration: int, start_time: datetime, end_time: datetime
 ) -> tuple:
@@ -1108,7 +1114,6 @@ def generate_random_durations_and_start_times(
     random_durations = generate_random_durations(duration)
     start_times = get_random_start_times(start_time, end_time, random_durations)
     return random_durations, start_times
-
 
 def schedule_split_jobs(
     start_times: List[datetime],
@@ -1198,7 +1203,6 @@ def schedule_split_jobs(
             )
         )
 
-
 async def send_schedule_notification(
     task, device_names, start_time, end_time, time_zone, job_id
 ):
@@ -1249,7 +1253,6 @@ async def send_schedule_notification(
 
     except Exception as e:
         print(f"Error sending schedule notification: {str(e)}")
-
 
 def schedule_recurring_job(command: dict, device_ids: List[str], main_loop=None) -> None:
     """Schedule the next day's task within the specified time window"""
@@ -1374,7 +1377,6 @@ def schedule_recurring_job(command: dict, device_ids: List[str], main_loop=None)
             status_code=500, detail=f"Failed to schedule next day's job: {str(e)}"
         )
 
-
 def generate_random_durations(total_duration: int, min_duration: int = 30) -> List[int]:
     """
     Generate 2 to 4 random durations that sum up to the total duration.
@@ -1401,7 +1403,6 @@ def generate_random_durations(total_duration: int, min_duration: int = 30) -> Li
     durations.append(remaining)  # Add the remaining time to the last partition
 
     return durations
-
 
 def get_random_start_times(
     start_time: datetime, end_time: datetime, durations: List[int], min_gap: float = 1.5
@@ -1448,7 +1449,6 @@ def get_random_start_times(
             current_time += timedelta(minutes=duration)
 
     return start_times
-
 
 async def send_split_schedule_notification(
     task, device_names, start_times, durations, time_zone
