@@ -494,19 +494,19 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                             except Exception as e:
                                 print(f"Failed to send message to bot: {e}")
                             
-                    await tasks_collection.update_one(
+                    tasks_collection.update_one(
                         {"id": task_id}, {"$pull": {"activeJobs": {"job_id": job_id}}}
                     )
 
                     # Check if task is still active and update status (only for non-update messages)
-                    task = await tasks_collection.find_one({"id": task_id})
+                    task = tasks_collection.find_one({"id": task_id})
                     if task:
                         status = (
                             "awaiting"
                             if len(task.get("activeJobs", [])) == 0
                             else "scheduled"
                         )
-                        await tasks_collection.update_one(
+                        tasks_collection.update_one(
                             {"id": task_id}, {"$set": {"status": status}}
                         )
 
