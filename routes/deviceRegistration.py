@@ -41,6 +41,7 @@ main_event_loop = asyncio.get_event_loop()
 client = MongoClient(
     "mongodb+srv://abdullahnoor94:dodge2018@appilot.ds9ll.mongodb.net/?retryWrites=true&w=majority&appName=Appilot"
 )
+
 db = client["Appilot"]
 device_collection = db["devices"]
 
@@ -712,13 +713,24 @@ async def send_command_to_devices(device_ids, command):
         task = await asyncio.to_thread(
             tasks_collection.find_one,
             {"id": task_id},
-            {"serverId": 1, "channelId": 1, "_id": 0},
+            {"serverId": 1, "channelId": 1, "_id": 0, "activeJobs": 1},
         )
 
         if not task:
             logger.warning(f"Task {task_id} not found")
             return
-
+        
+        activeJobs = task["activeJobs"]
+        jobFound = False
+        for job in activeJobs:
+            if job["job_id"] == job_id:
+                jobFound = True
+                break
+            
+        if not jobFound:
+            logger.warning(f"Job {job_id} in task {task_id} not found")
+            return
+        
         logger.info(f"Task {task_id} found. Extracting server and channel IDs.")
         server_id = (
             int(task["serverId"])
@@ -804,8 +816,7 @@ async def send_command_to_devices(device_ids, command):
                 logger.info("Active jobs updated successfully.")
             else:
                 logger.warning("No active jobs were updated.")
-
-        # Handle complete device failure
+        
         if len(results["failed"]) == len(device_ids):
             logger.info("All devices failed. Removing job from active jobs.")
             # Remove job from active jobs
@@ -817,9 +828,28 @@ async def send_command_to_devices(device_ids, command):
 
             if result.modified_count > 0:
                 logger.info(f"Job {job_id} successfully removed from active jobs.")
+                
+                # Get the updated task to check remaining active jobs
+                task_data = await asyncio.to_thread(
+                    tasks_collection.find_one,
+                    {"id": task_id},
+                    {"activeJobs": 1}
+                )
+                
+                # Update status based on remaining active jobs
+                status = "awaiting" if not task_data.get("activeJobs") or len(task_data["activeJobs"]) == 0 else "scheduled"
+                
+                # Update the task status
+                await asyncio.to_thread(
+                    tasks_collection.update_one,
+                    {"id": task_id},
+                    {"$set": {"status": status}},
+                )
+                
+                logger.info(f"Task status updated to: {status}")
             else:
                 logger.warning(f"Job {job_id} removal failed.")
-
+                
             # Send all devices disconnected message
             error_message_all_devices_not_connected = (
                 "Task cannot be executed. All target devices are disconnected."
@@ -1189,15 +1219,15 @@ def schedule_single_job(
         time_zone = command.get("timeZone", "UTC")
 
         # Send schedule notification asynchronously
-        # asyncio.create_task(
-        #     send_schedule_notification(
-        #         task, device_names, start_time, end_time, time_zone, job_id
-        #     )
-        # )
-        
-        schedule_notification(
+        asyncio.create_task(
+            send_schedule_notification(
                 task, device_names, start_time, end_time, time_zone, job_id
             )
+        )
+        
+        # schedule_notification(
+        #         task, device_names, start_time, end_time, time_zone, job_id
+        #     )
 
     except Exception as e:
         print(f"Failed to schedule single job: {str(e)}")

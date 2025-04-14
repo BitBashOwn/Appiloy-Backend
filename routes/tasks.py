@@ -15,6 +15,8 @@ import pytz
 class deleteRequest(BaseModel):
     tasks: list
     
+    
+    
 class clearOldJobsRequest(BaseModel):
     Task_ids: list
     command: dict
@@ -376,3 +378,27 @@ async def clear_old_jobs(tasks: clearOldJobsRequest, current_user: dict = Depend
             status_code=500,
             content={"message": f"An error occurred: {str(e)}"}
         )
+        
+        
+@tasks_router.patch("/unschedule-jobs")
+async def unschedule_jobs(tasks: deleteRequest, current_user: dict = Depends(get_current_user)):
+    print(f"[LOG] Unscheduling jobs for tasks: {tasks.tasks}")
+    
+    if not tasks.tasks:
+        return JSONResponse(content={"message": "No tasks provided"}, status_code=400)
+        
+    try:
+        # Fetch all tasks that need to be processed
+        result = tasks_collection.update_many(
+            {"id": {"$in": tasks.tasks}, "email": current_user.get("email")},
+            {"$set": {"activeJobs": [], "status": "awaiting"}}
+        )
+        
+        if result.matched_count == 0:
+            print("[LOG] No tasks found for the provided IDs and user")
+            return JSONResponse(content={"message": "No tasks found"}, status_code=404)
+        
+        return JSONResponse(content={"message": f"Successfully unscheduled {result.modified_count} tasks."}, status_code=200)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
