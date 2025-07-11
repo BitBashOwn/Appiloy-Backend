@@ -4,10 +4,10 @@ from models.tasks import taskModel, tasks_collection
 from models.bots import bots_collection
 from fastapi.responses import JSONResponse
 from jose import JWTError
-from utils.utils import generate_unique_id, get_current_user,get_Running_Tasks
+from utils.utils import generate_unique_id, get_current_user
 from datetime import datetime, timedelta
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 import traceback
 import pytz
 
@@ -28,6 +28,15 @@ class inputsSaveRequest(BaseModel):
 class devicesSaveRequest(BaseModel):
     devices: list
     id: str
+
+class taskCopyRequest(BaseModel):
+    taskName: str
+    email: str
+    bot: str
+    status: str = "awaiting"
+    serverId: Optional[str] = None
+    channelId: Optional[str] = None
+    taskTocopy: str  # ID of the task to copy inputs from
 
 tasks_router = APIRouter()
 
@@ -52,6 +61,79 @@ async def create_Task(task: taskModel, current_user: dict = Depends(get_current_
 
     except JWTError:
         return JSONResponse(content={"message": "sorry could not create task"}, status_code=400)
+    
+
+@tasks_router.post("/create-task-copy")
+async def create_Task_copy(task: taskCopyRequest, current_user: dict = Depends(get_current_user)):
+    try:
+        # Generate new task ID
+        task_id = generate_unique_id()
+        
+        # Find the task to copy inputs from
+        task_to_copy = tasks_collection.find_one(
+            {"id": task.taskTocopy, "email": current_user.get("email")}, 
+            {"inputs": 1}
+        )
+        
+        if not task_to_copy:
+            return JSONResponse(
+                content={"message": "Task to copy not found or access denied"}, 
+                status_code=404
+            )
+        
+        # Get bot information for schedules
+        bot = bots_collection.find_one(
+            {"id": task.bot}, {"inputs": 1, "schedules": 1}
+        )
+        
+        if not bot:
+            return JSONResponse(
+                content={"message": "Bot not found"}, 
+                status_code=404
+            )
+        
+        # Create new task dict
+        task_dict = {
+            "id": task_id,
+            "email": task.email,
+            "taskName": task.taskName,
+            "status": task.status,
+            "bot": task.bot,
+            "isScheduled": False,
+            "activeJobs": [],
+            "inputs": task_to_copy.get("inputs", bot.get("inputs", [])),  # Use copied inputs or bot defaults
+            "LastModifiedDate": datetime.utcnow().timestamp(),
+            "activationDate": datetime.utcnow(),
+            "deviceIds": [],
+            "schedules": bot.get("schedules", [])
+        }
+        
+        # Add optional fields if provided
+        if task.serverId:
+            task_dict["serverId"] = task.serverId
+        if task.channelId:
+            task_dict["channelId"] = task.channelId
+        
+        # Insert the new task
+        result = tasks_collection.insert_one(task_dict)
+        
+        return JSONResponse(
+            content={"message": "Task created successfully!", "id": task_id}, 
+            status_code=200
+        )
+
+    except JWTError:
+        return JSONResponse(
+            content={"message": "Sorry, could not create task"}, 
+            status_code=400
+        )
+    except Exception as e:
+        print(f"Error creating task copy: {e}")
+        return JSONResponse(
+            content={"message": "Error creating task copy", "error": str(e)}, 
+            status_code=500
+        )
+    
 
 @tasks_router.get("/get-task")
 async def get_Task(id: str, current_user: dict = Depends(get_current_user)):
@@ -141,17 +223,11 @@ async def get_running_tasks(current_user: dict = Depends(get_current_user)):
         result = list(tasks_collection.find(
             {"email": current_user.get("email"), "status": "running"}, {"_id": 0, "activeJobs":0}))
         
-        # result = get_Running_Tasks(result)
         for task in result:
             
             if 'activationDate' in task and isinstance(task['activationDate'], datetime):
                 task['activationDate'] = task['activationDate'].isoformat()
                 
-            # if task.get("isScheduled"):
-            #     active_jobs = task.get("activeJobs", [])
-            #     for job in active_jobs:
-            #         job["startTime"] = job["startTime"].isoformat()
-            #         job["endTime"] = job["endTime"].isoformat()
             
             bot_id = task.get("bot")
             if bot_id:

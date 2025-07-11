@@ -1,7 +1,6 @@
-from pydantic import BaseModel, Field, HttpUrl, UUID4
+from pydantic import BaseModel, Field, UUID4
 from typing import Optional, List, Dict, Any
 from config.database import db
-from bson import ObjectId
 from datetime import datetime
 
 
