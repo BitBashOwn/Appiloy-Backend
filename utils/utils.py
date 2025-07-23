@@ -13,6 +13,8 @@ import uuid
 import pytz
 from models.users import user_collection
 from models.tasks import tasks_collection
+import random
+from Bot.discord_bot import bot_instance
 
 load_dotenv()
 
@@ -484,3 +486,148 @@ def split_message(message, max_length=1000):
         chunks.append(current_chunk)  # Append the last chunk
     
     return chunks
+
+
+
+def get_random_start_times(
+    start_time: datetime, end_time: datetime, durations: List[int], min_gap: float = 1.5
+) -> List[datetime]:
+    """
+    Generate random start times for each duration, ensuring minimum gap between sessions.
+    If end_time is less than or equal to start_time, end_time is considered the next day.
+    Returns list of start times in chronological order.
+    """
+
+    # If end_time is less than or equal to start_time, treat it as next day's time
+    if end_time <= start_time:
+        end_time += timedelta(days=1)
+
+    total_time_needed = sum(durations) + (len(durations) - 1) * min_gap
+    available_time = (end_time - start_time).total_seconds() / 60  # Convert to minutes
+
+    # Check if there is enough time in the window
+    if total_time_needed > available_time:
+        raise ValueError(
+            "Not enough time in the window for all sessions with minimum gaps"
+        )
+
+    start_times = []
+    current_time = start_time
+
+    # Calculate maximum gap possible
+    remaining_gaps = len(durations) - 1
+    for i, duration in enumerate(durations):
+        start_times.append(current_time)
+
+        if remaining_gaps > 0:
+            # Calculate the remaining time and the maximum possible gap
+            time_left = (end_time - current_time).total_seconds() / 60
+            time_needed = sum(durations[i + 1 :]) + remaining_gaps * min_gap
+            max_gap = (time_left - time_needed) / remaining_gaps
+
+            # Add a random gap after the session, but ensure it's at least min_gap
+            gap = random.uniform(min_gap, max_gap) if max_gap > min_gap else min_gap
+            current_time += timedelta(minutes=duration + gap)
+            remaining_gaps -= 1
+        else:
+            # No more gaps to add, just adjust the current time
+            current_time += timedelta(minutes=duration)
+
+    return start_times
+
+
+
+def generate_random_durations(total_duration: int, min_duration: int = 30) -> List[int]:
+    """
+    Generate 2 to 4 random durations that sum up to the total duration.
+    Each duration will be at least min_duration minutes.
+    """
+    num_durations = random.randint(2, 4)  # Limit the number of partitions to 2, 3, or 4
+
+    if total_duration <= min_duration:
+        return [total_duration]
+
+    durations = []
+    remaining = total_duration
+
+    for _ in range(num_durations - 1):
+        max_possible = min(
+            remaining - min_duration, remaining // (num_durations - len(durations))
+        )
+        if max_possible <= min_duration:
+            break
+        duration = random.randint(min_duration, max_possible)
+        durations.append(duration)
+        remaining -= duration
+
+    durations.append(remaining)  # Add the remaining time to the last partition
+
+    return durations
+
+
+async def send_split_schedule_notification(
+    task, device_names, start_times, durations, time_zone
+):
+    """Send a notification to Discord about split scheduled tasks."""
+    if not task or not task.get("serverId") or not task.get("channelId"):
+        print("Skipping notification. Missing serverId/channelId for task")
+        return
+
+    try:
+        task_name = task.get("taskName", "Unknown Task")
+        device_list = ", ".join(device_names) if device_names else "No devices"
+
+        # Create summary of split sessions
+        total_duration = sum(durations)
+        session_count = len(start_times)
+        timespan_start = min(start_times).strftime("%Y-%m-%d %H:%M")
+        timespan_end = (max(start_times) + timedelta(minutes=durations[-1])).strftime(
+            "%Y-%m-%d %H:%M"
+        )
+
+        message = (
+            f"📅 **Split Task Scheduled**: {task_name}\n"
+            f"⏰ **Timespan**: {timespan_start} to {timespan_end} ({time_zone})\n"
+            f"🔢 **Sessions**: {session_count} sessions (total {total_duration} minutes)\n"
+            f"🔌 **Devices**: {device_list}"
+        )
+
+        server_id = (
+            int(task["serverId"])
+            if isinstance(task["serverId"], str) and task["serverId"].isdigit()
+            else task["serverId"]
+        )
+        channel_id = (
+            int(task["channelId"])
+            if isinstance(task["channelId"], str) and task["channelId"].isdigit()
+            else task["channelId"]
+        )
+
+        # Send message to Discord
+        await bot_instance.send_message(
+            {
+                "message": message,
+                "task_id": task.get("id"),
+                "job_id": f"split_{uuid.uuid4()}",  # Generate a unique ID for this notification
+                "server_id": server_id,
+                "channel_id": channel_id,
+                "type": "info",
+            }
+        )
+    except Exception as e:
+        print(f"Error sending split schedule notification: {str(e)}")
+
+
+def generate_random_durations_and_start_times(
+    duration: int, start_time: datetime, end_time: datetime
+) -> tuple:
+    """Generate random durations and start times for split jobs."""
+    random_durations = generate_random_durations(duration)
+    start_times = get_random_start_times(start_time, end_time, random_durations)
+    return random_durations, start_times
+
+
+def parse_time(time_str: str) -> tuple:
+    """Parse time string in 'HH:MM' format to a tuple of integers (hour, minute)."""
+    hour, minute = map(int, time_str.split(":"))
+    return hour, minute

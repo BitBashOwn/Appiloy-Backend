@@ -6,7 +6,14 @@ from pydantic import BaseModel
 from typing import List
 import random
 from datetime import datetime, timedelta
-from utils.utils import get_current_user, check_for_Job_clashes, split_message
+from utils.utils import (
+    get_current_user,
+    check_for_Job_clashes,
+    split_message,
+    send_split_schedule_notification,
+    generate_random_durations_and_start_times,
+    parse_time,
+)
 from models.tasks import tasks_collection
 from apscheduler.triggers.date import DateTrigger
 import pytz
@@ -28,7 +35,6 @@ from routes.command_router import (
     start_command_listener,
     send_commands_to_devices,
 )
-# from Bot.discord_bot import get_bot_instance
 
 from redis_client import get_redis_client
 from logger import logger
@@ -699,10 +705,10 @@ def wrapper_for_send_command(device_ids, command):
 async def send_command_to_devices(device_ids, command):
     """Send command to devices with improved async handling"""
     logger.info(f"Executing command for devices: {device_ids}")
-    
+
     # Import here to avoid circular imports
     from Bot.discord_bot import get_bot_instance
-    
+
     task_id = command.get("task_id")
     job_id = command.get("job_id")
     is_recurring = command.get("isRecurring", False)
@@ -719,18 +725,14 @@ async def send_command_to_devices(device_ids, command):
         if not task:
             logger.warning(f"Task {task_id} not found")
             return
-        
-        activeJobs = task["activeJobs"]
-        jobFound = False
-        for job in activeJobs:
-            if job["job_id"] == job_id:
-                jobFound = True
-                break
-            
-        if not jobFound:
-            logger.warning(f"Job {job_id} in task {task_id} not found")
+
+        # Check if job_id exists in activeJobs
+        active_jobs = task.get("activeJobs", [])
+        job_exists = any(job.get("job_id") == job_id for job in active_jobs)
+        if not job_exists:
+            logger.warning(f"Job {job_id} not found in activeJobs for task {task_id}")
             return
-        
+
         logger.info(f"Task {task_id} found. Extracting server and channel IDs.")
         server_id = (
             int(task["serverId"])
@@ -789,17 +791,19 @@ async def send_command_to_devices(device_ids, command):
 
             try:
                 logger.info("Creating a new task to send error message")
-                
+
                 # Get the bot instance and use the thread-safe method
                 bot = get_bot_instance()
-                bot.send_message_sync({
-                    "message": error_message,
-                    "task_id": task_id,
-                    "job_id": job_id,
-                    "server_id": server_id,
-                    "channel_id": channel_id,
-                    "type": "error",
-                })
+                bot.send_message_sync(
+                    {
+                        "message": error_message,
+                        "task_id": task_id,
+                        "job_id": job_id,
+                        "server_id": server_id,
+                        "channel_id": channel_id,
+                        "type": "error",
+                    }
+                )
                 logger.info("Error message queued successfully")
 
             except Exception as e:
@@ -816,7 +820,7 @@ async def send_command_to_devices(device_ids, command):
                 logger.info("Active jobs updated successfully.")
             else:
                 logger.warning("No active jobs were updated.")
-        
+
         if len(results["failed"]) == len(device_ids):
             logger.info("All devices failed. Removing job from active jobs.")
             # Remove job from active jobs
@@ -828,28 +832,31 @@ async def send_command_to_devices(device_ids, command):
 
             if result.modified_count > 0:
                 logger.info(f"Job {job_id} successfully removed from active jobs.")
-                
+
                 # Get the updated task to check remaining active jobs
                 task_data = await asyncio.to_thread(
-                    tasks_collection.find_one,
-                    {"id": task_id},
-                    {"activeJobs": 1}
+                    tasks_collection.find_one, {"id": task_id}, {"activeJobs": 1}
                 )
-                
+
                 # Update status based on remaining active jobs
-                status = "awaiting" if not task_data.get("activeJobs") or len(task_data["activeJobs"]) == 0 else "scheduled"
-                
+                status = (
+                    "awaiting"
+                    if not task_data.get("activeJobs")
+                    or len(task_data["activeJobs"]) == 0
+                    else "scheduled"
+                )
+
                 # Update the task status
                 await asyncio.to_thread(
                     tasks_collection.update_one,
                     {"id": task_id},
                     {"$set": {"status": status}},
                 )
-                
+
                 logger.info(f"Task status updated to: {status}")
             else:
                 logger.warning(f"Job {job_id} removal failed.")
-                
+
             # Send all devices disconnected message
             error_message_all_devices_not_connected = (
                 "Task cannot be executed. All target devices are disconnected."
@@ -858,14 +865,16 @@ async def send_command_to_devices(device_ids, command):
             try:
                 # Get the bot instance and use the thread-safe method
                 bot = get_bot_instance()
-                bot.send_message_sync({
-                    "message": error_message_all_devices_not_connected,
-                    "task_id": task_id,
-                    "job_id": job_id,
-                    "server_id": server_id,
-                    "channel_id": channel_id,
-                    "type": "error",
-                })
+                bot.send_message_sync(
+                    {
+                        "message": error_message_all_devices_not_connected,
+                        "task_id": task_id,
+                        "job_id": job_id,
+                        "server_id": server_id,
+                        "channel_id": channel_id,
+                        "type": "error",
+                    }
+                )
                 logger.info("All devices disconnected message queued successfully")
 
             except Exception as e:
@@ -894,19 +903,10 @@ async def send_command_to_devices(device_ids, command):
         return None
 
 
-def parse_time(time_str: str) -> tuple:
-    """Parse time string in 'HH:MM' format to a tuple of integers (hour, minute)."""
-    hour, minute = map(int, time_str.split(":"))
-    return hour, minute
 
 
-def generate_random_durations_and_start_times(
-    duration: int, start_time: datetime, end_time: datetime
-) -> tuple:
-    """Generate random durations and start times for split jobs."""
-    random_durations = generate_random_durations(duration)
-    start_times = get_random_start_times(start_time, end_time, random_durations)
-    return random_durations, start_times
+
+
 
 
 def schedule_split_jobs(
@@ -1007,7 +1007,7 @@ def schedule_notification(task, device_names, start_time, end_time, time_zone, j
     try:
         # Import here to avoid circular imports
         from Bot.discord_bot import get_bot_instance
-        
+
         user_tz = pytz.timezone(time_zone)
         local_start_time = start_time.astimezone(user_tz)
         # Format times in user's timezone
@@ -1053,12 +1053,16 @@ def schedule_notification(task, device_names, start_time, end_time, time_zone, j
         print(f"Error sending schedule notification: {str(e)}")
 
 
-async def send_schedule_notification(task, device_names, start_time, end_time, time_zone, job_id):
+async def send_schedule_notification(
+    task, device_names, start_time, end_time, time_zone, job_id
+):
     """Async version that now uses the thread-safe notification sender"""
     schedule_notification(task, device_names, start_time, end_time, time_zone, job_id)
 
 
-def schedule_recurring_job(command: dict, device_ids: List[str], main_loop=None) -> None:
+def schedule_recurring_job(
+    command: dict, device_ids: List[str], main_loop=None
+) -> None:
     """Schedule the next day's task within the specified time window"""
     task_id = command.get("task_id")
     time_zone = command.get("timeZone", "UTC")
@@ -1148,9 +1152,15 @@ def schedule_recurring_job(command: dict, device_ids: List[str], main_loop=None)
         # Get updated task details for notification
         task = tasks_collection.find_one({"id": task_id})
         # asyncio.create_task(
-        schedule_notification(task, device_names, random_start_time, random_end_time, time_zone, new_job_id)
+        schedule_notification(
+            task,
+            device_names,
+            random_start_time,
+            random_end_time,
+            time_zone,
+            new_job_id,
+        )
         # )
-            
 
         print(f"Scheduled next day's task for {random_start_time} ({time_zone})")
 
@@ -1186,7 +1196,6 @@ def schedule_single_job(
             id=job_id,
             name=f"Single session command for devices {device_ids}",
         )
-        
 
         # tasks_collection.update_one(
         #     {"id": task_id},
@@ -1224,7 +1233,7 @@ def schedule_single_job(
                 task, device_names, start_time, end_time, time_zone, job_id
             )
         )
-        
+
         # schedule_notification(
         #         task, device_names, start_time, end_time, time_zone, job_id
         #     )
@@ -1232,131 +1241,3 @@ def schedule_single_job(
     except Exception as e:
         print(f"Failed to schedule single job: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to schedule job: {str(e)}")
-
-
-def generate_random_durations(total_duration: int, min_duration: int = 30) -> List[int]:
-    """
-    Generate 2 to 4 random durations that sum up to the total duration.
-    Each duration will be at least min_duration minutes.
-    """
-    num_durations = random.randint(2, 4)  # Limit the number of partitions to 2, 3, or 4
-
-    if total_duration <= min_duration:
-        return [total_duration]
-
-    durations = []
-    remaining = total_duration
-
-    for _ in range(num_durations - 1):
-        max_possible = min(
-            remaining - min_duration, remaining // (num_durations - len(durations))
-        )
-        if max_possible <= min_duration:
-            break
-        duration = random.randint(min_duration, max_possible)
-        durations.append(duration)
-        remaining -= duration
-
-    durations.append(remaining)  # Add the remaining time to the last partition
-
-    return durations
-
-
-def get_random_start_times(
-    start_time: datetime, end_time: datetime, durations: List[int], min_gap: float = 1.5
-) -> List[datetime]:
-    """
-    Generate random start times for each duration, ensuring minimum gap between sessions.
-    If end_time is less than or equal to start_time, end_time is considered the next day.
-    Returns list of start times in chronological order.
-    """
-
-    # If end_time is less than or equal to start_time, treat it as next day's time
-    if end_time <= start_time:
-        end_time += timedelta(days=1)
-
-    total_time_needed = sum(durations) + (len(durations) - 1) * min_gap
-    available_time = (end_time - start_time).total_seconds() / 60  # Convert to minutes
-
-    # Check if there is enough time in the window
-    if total_time_needed > available_time:
-        raise ValueError(
-            "Not enough time in the window for all sessions with minimum gaps"
-        )
-
-    start_times = []
-    current_time = start_time
-
-    # Calculate maximum gap possible
-    remaining_gaps = len(durations) - 1
-    for i, duration in enumerate(durations):
-        start_times.append(current_time)
-
-        if remaining_gaps > 0:
-            # Calculate the remaining time and the maximum possible gap
-            time_left = (end_time - current_time).total_seconds() / 60
-            time_needed = sum(durations[i + 1 :]) + remaining_gaps * min_gap
-            max_gap = (time_left - time_needed) / remaining_gaps
-
-            # Add a random gap after the session, but ensure it's at least min_gap
-            gap = random.uniform(min_gap, max_gap) if max_gap > min_gap else min_gap
-            current_time += timedelta(minutes=duration + gap)
-            remaining_gaps -= 1
-        else:
-            # No more gaps to add, just adjust the current time
-            current_time += timedelta(minutes=duration)
-
-    return start_times
-
-
-async def send_split_schedule_notification(
-    task, device_names, start_times, durations, time_zone
-):
-    """Send a notification to Discord about split scheduled tasks."""
-    if not task or not task.get("serverId") or not task.get("channelId"):
-        print("Skipping notification. Missing serverId/channelId for task")
-        return
-
-    try:
-        task_name = task.get("taskName", "Unknown Task")
-        device_list = ", ".join(device_names) if device_names else "No devices"
-
-        # Create summary of split sessions
-        total_duration = sum(durations)
-        session_count = len(start_times)
-        timespan_start = min(start_times).strftime("%Y-%m-%d %H:%M")
-        timespan_end = (max(start_times) + timedelta(minutes=durations[-1])).strftime(
-            "%Y-%m-%d %H:%M"
-        )
-
-        message = (
-            f"📅 **Split Task Scheduled**: {task_name}\n"
-            f"⏰ **Timespan**: {timespan_start} to {timespan_end} ({time_zone})\n"
-            f"🔢 **Sessions**: {session_count} sessions (total {total_duration} minutes)\n"
-            f"🔌 **Devices**: {device_list}"
-        )
-
-        server_id = (
-            int(task["serverId"])
-            if isinstance(task["serverId"], str) and task["serverId"].isdigit()
-            else task["serverId"]
-        )
-        channel_id = (
-            int(task["channelId"])
-            if isinstance(task["channelId"], str) and task["channelId"].isdigit()
-            else task["channelId"]
-        )
-
-        # Send message to Discord
-        await bot_instance.send_message(
-            {
-                "message": message,
-                "task_id": task.get("id"),
-                "job_id": f"split_{uuid.uuid4()}",  # Generate a unique ID for this notification
-                "server_id": server_id,
-                "channel_id": channel_id,
-                "type": "info",
-            }
-        )
-    except Exception as e:
-        print(f"Error sending split schedule notification: {str(e)}")
