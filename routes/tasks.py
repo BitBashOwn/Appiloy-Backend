@@ -10,11 +10,126 @@ from pydantic import BaseModel
 from typing import List, Optional
 import traceback
 import pytz
+from copy import deepcopy
+
+
+def updateTaskInputs(tasksInputs, botInputs):
+    """
+    Merge task inputs with bot inputs while preserving user data and adding new fields.
+    
+    Args:
+        tasksInputs: Current task inputs with user data
+        botInputs: Updated bot inputs with new structure
+    
+    Returns:
+        Updated inputs that include all task inputs with values and new inputs from bot
+    """
+    try:
+        print("tasksInputs:", tasksInputs)
+        print("botInputs:", botInputs)
+        if not botInputs or not isinstance(botInputs, dict):
+            return tasksInputs
+            
+        # Create a deep copy of bot inputs as the base
+        updated_inputs = deepcopy(botInputs)
+        
+        # If task inputs don't exist, return bot inputs
+        if not tasksInputs or not isinstance(tasksInputs, dict):
+            return updated_inputs
+            
+        def merge_inputs_recursive(task_input, bot_input):
+            """Recursively merge inputs while preserving user data"""
+            if not isinstance(task_input, dict) or not isinstance(bot_input, dict):
+                return bot_input
+                
+            merged = deepcopy(bot_input)
+            
+            # Handle different input types
+            if 'inputs' in bot_input and isinstance(bot_input['inputs'], list):
+                if 'inputs' in task_input and isinstance(task_input['inputs'], list):
+                    # Merge inputs arrays
+                    for bot_item in merged['inputs']:
+                        # Find corresponding item in task inputs by name or type
+                        task_item = None
+                        for t_item in task_input['inputs']:
+                            if (isinstance(t_item, dict) and isinstance(bot_item, dict) and
+                                ((t_item.get('name') == bot_item.get('name')) or
+                                 (t_item.get('type') == bot_item.get('type')))):
+                                task_item = t_item
+                                break
+                        
+                        if task_item:
+                            # Recursively merge the found item
+                            bot_item.update(merge_inputs_recursive(task_item, bot_item))
+                            
+                            # Special handling for account-wise inputs
+                            if (bot_item.get('type') == 'instagrmFollowerBotAcountWise' and 
+                                'Accounts' in task_item and isinstance(task_item['Accounts'], list)):
+                                
+                                # Preserve user's accounts but update their inputs
+                                user_accounts = deepcopy(task_item['Accounts'])
+                                bot_actual_inputs = bot_item.get('ActualInputs', [])
+                                
+                                # Update each account's inputs with new bot inputs
+                                for account in user_accounts:
+                                    if 'inputs' in account and isinstance(account['inputs'], list):
+                                        # Create a map of existing account inputs by name
+                                        account_inputs_map = {inp.get('name'): inp for inp in account['inputs'] if isinstance(inp, dict)}
+                                        
+                                        # Update account inputs with bot's ActualInputs
+                                        updated_account_inputs = []
+                                        for bot_actual_input in bot_actual_inputs:
+                                            if isinstance(bot_actual_input, dict):
+                                                input_name = bot_actual_input.get('name')
+                                                if input_name in account_inputs_map:
+                                                    # Merge existing account input with bot input
+                                                    merged_input = deepcopy(bot_actual_input)
+                                                    existing_input = account_inputs_map[input_name]
+                                                    
+                                                    # Preserve user values from existing input
+                                                    for key, value in existing_input.items():
+                                                        if key in merged_input:
+                                                            merged_input[key] = value
+                                                    
+                                                    updated_account_inputs.append(merged_input)
+                                                else:
+                                                    # Add new input from bot
+                                                    updated_account_inputs.append(deepcopy(bot_actual_input))
+                                        
+                                        account['inputs'] = updated_account_inputs
+                                
+                                bot_item['Accounts'] = user_accounts
+            
+            # Handle direct properties (non-nested inputs)
+            for key, value in task_input.items():
+                if key in merged and key not in ['inputs', 'type', 'name', 'description']:
+                    # Preserve user data for non-structural fields
+                    merged[key] = value
+                elif key == 'Accounts' and isinstance(value, list):
+                    # This is handled above in the special case
+                    continue
+                    
+            return merged
+        
+        # Start the recursive merge
+        result = merge_inputs_recursive(tasksInputs, updated_inputs)
+        
+        return result
+        
+    except Exception as e:
+        print(f"[ERROR] Error in updateTaskInputs: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        # Return original task inputs if merge fails
+        return tasksInputs
+
 
 
 class deleteRequest(BaseModel):
     tasks: list
-    
+
+class updateTasksInputRequest(BaseModel):
+    tasks: list
     
     
 class clearOldJobsRequest(BaseModel):
@@ -478,3 +593,86 @@ async def unschedule_jobs(tasks: deleteRequest, current_user: dict = Depends(get
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+    
+
+@tasks_router.patch("/update-tasks-inputs")
+async def update_tasks_inputs(tasks: updateTasksInputRequest, current_user: dict = Depends(get_current_user)):
+    print(f"[LOG] updating Inputs for tasks: {tasks.tasks}")
+    if not tasks.tasks:
+        return JSONResponse(content={"message": "No tasks provided"}, status_code=400)
+    
+    try:
+        # Fetch all tasks that need to be processed
+        tasks_cursor = tasks_collection.find(
+            {"id": {"$in": tasks.tasks}, "email": current_user.get("email")},
+            {"id": 1, "inputs": 1, "bot": 1, "_id": 0}
+        )
+        
+        tasks_list = list(tasks_cursor)
+        if not tasks_list:
+            print("[LOG] No tasks found for the provided IDs and user")
+            return JSONResponse(content={"message": "No tasks found"}, status_code=404)
+        
+        updated_count = 0
+        
+        for task in tasks_list:
+            task_id = task.get("id")
+            task_inputs = task.get("inputs", {})
+            bot_id = task.get("bot")
+            
+            if not bot_id:
+                print(f"[LOG] No bot ID found for task {task_id}")
+                continue
+
+            # Fetch bot inputs
+            bot_result = bots_collection.find_one(
+                {"id": bot_id},
+                {"inputs": 1, "_id": 0}
+            )
+            
+            if not bot_result:
+                print(f"[LOG] No bot found for task {task_id} with bot ID {bot_id}")
+                continue
+
+            bot_inputs = bot_result.get("inputs", {})
+            if not bot_inputs:
+                print(f"[LOG] No inputs found for bot {bot_id}")
+                continue
+
+            # Update task inputs using the merge function
+            try:
+                updated_inputs = updateTaskInputs(tasksInputs=task_inputs, botInputs=bot_inputs)
+                print("updated_inputs:", updated_inputs)
+                
+                # Update the task in database
+                update_result = tasks_collection.update_one(
+                    {"id": task_id, "email": current_user.get("email")},
+                    {"$set": {"inputs": updated_inputs}}
+                )
+                
+                if update_result.modified_count > 0:
+                    updated_count += 1
+                    print(f"[LOG] Successfully updated inputs for task {task_id}")
+                else:
+                    print(f"[LOG] No changes made to task {task_id}")
+                    
+            except Exception as merge_error:
+                print(f"[ERROR] Failed to merge inputs for task {task_id}: {str(merge_error)}")
+                continue
+        
+        return JSONResponse(
+            content={
+                "message": f"Successfully updated {updated_count} out of {len(tasks_list)} tasks.",
+                "updated_count": updated_count,
+                "total_tasks": len(tasks_list)
+            }, 
+            status_code=200
+        )
+
+    except Exception as e:
+        print(f"[ERROR] Error in update_tasks_inputs: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+
+
