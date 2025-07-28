@@ -405,6 +405,10 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                     }
                     await websocket.send_text(json.dumps(pong_response))
                     print(f"Sent pong response to ({device_id})")
+                    device_collection.update_one(
+                        {"deviceId": device_id}, {"$set": {"status": True}}
+                    )
+                    print(f"Updated status of device ({device_id})")
                     continue
 
                 taskData = tasks_collection.find_one(
