@@ -11,6 +11,7 @@ from typing import List, Optional
 import traceback
 import pytz
 from copy import deepcopy
+import math
 
 
 def updateTaskInputs(tasksInputs, botInputs):
@@ -273,34 +274,84 @@ async def get_Task(id: str, current_user: dict = Depends(get_current_user)):
         raise HTTPException(
             status_code=400, detail="Error fetching task or bot data")
 
+
 @tasks_router.get("/get-all-task")
-async def get_all_Task(current_user: dict = Depends(get_current_user)):
+async def get_all_Task(
+    page: int = Query(1, ge=1, description="Page number"),
+    limit: int = Query(10, ge=1, le=200, description="Items per page"),
+    search: str = Query(None, description="Search query for task name"),
+    current_user: dict = Depends(get_current_user)
+):
     print("entered /get-all-task")
+    import time
+    total_start = time.time()
     try:
-        tasks = list(tasks_collection.find(
-            {"email": current_user.get("email")}, {"_id": 0, "activeJobs": 0}))
+        # Build the match stage
+        match_stage = {"email": current_user.get("email")}
+        
+        if search and search.strip():
+            match_stage["taskName"] = {"$regex": search.strip(), "$options": "i"}
+        
+        # Use aggregation pipeline for better performance
+        pipeline = [
+            {"$match": match_stage},
+            {
+                "$lookup": {
+                    "from": "bots",  # Your bots collection name
+                    "localField": "bot",
+                    "foreignField": "id",
+                    "as": "botDetails",
+                    "pipeline": [
+                        {"$project": {"_id": 0, "platform": 1, "botName": 1, "imagePath": 1, "id": 1}}
+                    ]
+                }
+            },
+            {"$unwind": "$botDetails"},
+            {"$project": {"_id": 0, "activeJobs": 0, "inputs":0, "deviceIds":0, "schedules":0 }},
+            {"$sort": {"activationDate": -1}}  # Sort by latest first
+        ]
+        
+        # Get total count
+        count_pipeline = pipeline[:-2] + [{"$count": "total"}]
+        total_result = list(tasks_collection.aggregate(count_pipeline))
+        total_count = total_result[0]["total"] if total_result else 0
+        
+        # Add pagination to main pipeline
+        pipeline.extend([
+            {"$skip": (page - 1) * limit},
+            {"$limit": limit}
+        ])
+        
+        # Execute main query
+        tasks = list(tasks_collection.aggregate(pipeline))
+
+        print(f"Total tasks found: {total_count}")
+        
+        # Process datetime fields
         for task in tasks:
             if 'activationDate' in task and isinstance(task['activationDate'], datetime):
                 task['activationDate'] = task['activationDate'].isoformat()
-
-            if task.get("isScheduled"):
-                active_jobs = task.get("activeJobs", [])
-                for job in active_jobs:
-                    job["startTime"] = job["startTime"].isoformat()
-                    job["endTime"] = job["endTime"].isoformat()
-
-            bot_id = task.get("bot")
-            if bot_id:
-                bot = bots_collection.find_one(
-                    {"id": bot_id},
-                    {"_id": 0, "platform": 1, "botName": 1, "imagePath": 1, "id": 1}
-                )
-                task.update({"botDetails": bot})
-        return JSONResponse(content={"message": "Task fetched successfully!", "tasks": tasks}, status_code=200)
+        
+        # Calculate pagination metadata
+        total_pages = math.ceil(total_count / limit) if limit > 0 else 1
+        
+        response_data = {
+            "tasks": tasks,
+            "total": total_count,
+            "totalPages": total_pages,
+            "hasNext": page < total_pages,
+            "hasPrev": page > 1,
+            "currentPage": page,
+        }
+        total_time = time.time() - total_start
+        print(f"TOTAL QUERY TIME: {total_time:.2f}s")
+        return response_data
     except Exception as e:
-        print(f"Exception occurred: {str(e)}")
-        traceback.print_exc()
-        return JSONResponse(content={"message": "Error fetching task", "error": str(e)}, status_code=400)
+        return {"error": str(e)}
+    
+
+    
+
 
 @tasks_router.get("/get-scheduled-tasks")
 async def get_scheduled_tasks(current_user: dict = Depends(get_current_user)):

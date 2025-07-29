@@ -32,7 +32,7 @@ class AppilotBot:
             
             # Define server and channel IDs
             server_id = 1328759015261601894
-            channel_id = 1354001745251926117
+            channel_id = 1399692601803800668
 
             # Send a welcome message when the bot connects
             message_data = {
