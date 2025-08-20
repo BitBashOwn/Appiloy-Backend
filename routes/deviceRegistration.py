@@ -405,10 +405,6 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                     }
                     await websocket.send_text(json.dumps(pong_response))
                     print(f"Sent pong response to ({device_id})")
-                    device_collection.update_one(
-                        {"deviceId": device_id}, {"$set": {"status": True}}
-                    )
-                    print(f"Updated status of device ({device_id})")
                     continue
 
                 taskData = tasks_collection.find_one(
@@ -652,6 +648,65 @@ async def send_command(
 
         elif durationType == "EveryDayAutomaticRun":
             schedule_recurring_job(command, device_ids)
+
+        # Schedule persistence logic for schedule_task commands
+        command_type = request.command.get("type", "")
+        if command_type in ["schedule_task"]:
+            # Extract schedule details from the command
+            schedule_data = command.get("schedule", {})
+            exact_start_time = schedule_data.get("exactStartTime") or request.command.get("exactStartTime")
+            time_zone_for_schedule = schedule_data.get("timeZone", time_zone)
+            
+            if exact_start_time:
+                try:
+                    # Convert scheduled time to UTC for consistent storage
+                    local_tz = pytz.timezone(time_zone_for_schedule)
+                    utc_tz = pytz.UTC
+                    
+                    # Parse the local time and convert to UTC
+                    local_dt = datetime.fromisoformat(exact_start_time.replace('Z', ''))
+                    if local_dt.tzinfo is None:
+                        local_dt = local_tz.localize(local_dt)
+                    utc_dt = local_dt.astimezone(utc_tz)
+                    
+                    # Update the task with schedule information
+                    task_name = command.get("taskName")
+                    if task_name:
+                        update_result = tasks_collection.update_one(
+                            {"taskName": task_name, "email": current_user.get("email")},
+                            {
+                                "$set": {
+                                    "scheduledTime": utc_dt.isoformat(),
+                                    "lastScheduleUpdate": datetime.utcnow().isoformat(),
+                                    "scheduleTimeZone": time_zone_for_schedule,
+                                    "exactStartTime": exact_start_time
+                                }
+                            }
+                        )
+                        
+                        if update_result.modified_count > 0:
+                            print(f"[DEBUG] Successfully updated schedule for task {task_name}")
+                        else:
+                            # Try updating by task_id if taskName didn't work
+                            if task_id:
+                                update_result = tasks_collection.update_one(
+                                    {"id": task_id, "email": current_user.get("email")},
+                                    {
+                                        "$set": {
+                                            "scheduledTime": utc_dt.isoformat(),
+                                            "lastScheduleUpdate": datetime.utcnow().isoformat(),
+                                            "scheduleTimeZone": time_zone_for_schedule,
+                                            "exactStartTime": exact_start_time
+                                        }
+                                    }
+                                )
+                                if update_result.modified_count > 0:
+                                    print(f"[DEBUG] Successfully updated schedule for task ID {task_id}")
+                                else:
+                                    print(f"[WARNING] Could not find task to update schedule: {task_name or task_id}")
+                    
+                except Exception as e:
+                    print(f"[ERROR] Failed to persist schedule update: {str(e)}")
 
         return {"message": "Command scheduled successfully"}
 

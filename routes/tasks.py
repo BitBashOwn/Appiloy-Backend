@@ -10,127 +10,11 @@ from pydantic import BaseModel
 from typing import List, Optional
 import traceback
 import pytz
-from copy import deepcopy
-import math
-
-
-def updateTaskInputs(tasksInputs, botInputs):
-    """
-    Merge task inputs with bot inputs while preserving user data and adding new fields.
-    
-    Args:
-        tasksInputs: Current task inputs with user data
-        botInputs: Updated bot inputs with new structure
-    
-    Returns:
-        Updated inputs that include all task inputs with values and new inputs from bot
-    """
-    try:
-        print("tasksInputs:", tasksInputs)
-        print("botInputs:", botInputs)
-        if not botInputs or not isinstance(botInputs, dict):
-            return tasksInputs
-            
-        # Create a deep copy of bot inputs as the base
-        updated_inputs = deepcopy(botInputs)
-        
-        # If task inputs don't exist, return bot inputs
-        if not tasksInputs or not isinstance(tasksInputs, dict):
-            return updated_inputs
-            
-        def merge_inputs_recursive(task_input, bot_input):
-            """Recursively merge inputs while preserving user data"""
-            if not isinstance(task_input, dict) or not isinstance(bot_input, dict):
-                return bot_input
-                
-            merged = deepcopy(bot_input)
-            
-            # Handle different input types
-            if 'inputs' in bot_input and isinstance(bot_input['inputs'], list):
-                if 'inputs' in task_input and isinstance(task_input['inputs'], list):
-                    # Merge inputs arrays
-                    for bot_item in merged['inputs']:
-                        # Find corresponding item in task inputs by name or type
-                        task_item = None
-                        for t_item in task_input['inputs']:
-                            if (isinstance(t_item, dict) and isinstance(bot_item, dict) and
-                                ((t_item.get('name') == bot_item.get('name')) or
-                                 (t_item.get('type') == bot_item.get('type')))):
-                                task_item = t_item
-                                break
-                        
-                        if task_item:
-                            # Recursively merge the found item
-                            bot_item.update(merge_inputs_recursive(task_item, bot_item))
-                            
-                            # Special handling for account-wise inputs
-                            if (bot_item.get('type') == 'instagrmFollowerBotAcountWise' and 
-                                'Accounts' in task_item and isinstance(task_item['Accounts'], list)):
-                                
-                                # Preserve user's accounts but update their inputs
-                                user_accounts = deepcopy(task_item['Accounts'])
-                                bot_actual_inputs = bot_item.get('ActualInputs', [])
-                                
-                                # Update each account's inputs with new bot inputs
-                                for account in user_accounts:
-                                    if 'inputs' in account and isinstance(account['inputs'], list):
-                                        # Create a map of existing account inputs by name
-                                        account_inputs_map = {inp.get('name'): inp for inp in account['inputs'] if isinstance(inp, dict)}
-                                        
-                                        # Update account inputs with bot's ActualInputs
-                                        updated_account_inputs = []
-                                        for bot_actual_input in bot_actual_inputs:
-                                            if isinstance(bot_actual_input, dict):
-                                                input_name = bot_actual_input.get('name')
-                                                if input_name in account_inputs_map:
-                                                    # Merge existing account input with bot input
-                                                    merged_input = deepcopy(bot_actual_input)
-                                                    existing_input = account_inputs_map[input_name]
-                                                    
-                                                    # Preserve user values from existing input
-                                                    for key, value in existing_input.items():
-                                                        if key in merged_input:
-                                                            merged_input[key] = value
-                                                    
-                                                    updated_account_inputs.append(merged_input)
-                                                else:
-                                                    # Add new input from bot
-                                                    updated_account_inputs.append(deepcopy(bot_actual_input))
-                                        
-                                        account['inputs'] = updated_account_inputs
-                                
-                                bot_item['Accounts'] = user_accounts
-            
-            # Handle direct properties (non-nested inputs)
-            for key, value in task_input.items():
-                if key in merged and key not in ['inputs', 'type', 'name', 'description']:
-                    # Preserve user data for non-structural fields
-                    merged[key] = value
-                elif key == 'Accounts' and isinstance(value, list):
-                    # This is handled above in the special case
-                    continue
-                    
-            return merged
-        
-        # Start the recursive merge
-        result = merge_inputs_recursive(tasksInputs, updated_inputs)
-        
-        return result
-        
-    except Exception as e:
-        print(f"[ERROR] Error in updateTaskInputs: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        # Return original task inputs if merge fails
-        return tasksInputs
-
 
 
 class deleteRequest(BaseModel):
     tasks: list
-
-class updateTasksInputRequest(BaseModel):
-    tasks: list
+    
     
     
 class clearOldJobsRequest(BaseModel):
@@ -274,96 +158,228 @@ async def get_Task(id: str, current_user: dict = Depends(get_current_user)):
         raise HTTPException(
             status_code=400, detail="Error fetching task or bot data")
 
-
 @tasks_router.get("/get-all-task")
-async def get_all_Task(
-    page: int = Query(1, ge=1, description="Page number"),
-    limit: int = Query(10, ge=1, le=200, description="Items per page"),
-    search: str = Query(None, description="Search query for task name"),
-    current_user: dict = Depends(get_current_user)
-):
+async def get_all_Task(current_user: dict = Depends(get_current_user)):
     print("entered /get-all-task")
-    import time
-    total_start = time.time()
     try:
-        # Build the match stage
-        match_stage = {"email": current_user.get("email")}
-        
-        if search and search.strip():
-            match_stage["taskName"] = {"$regex": search.strip(), "$options": "i"}
-        
-        # Use aggregation pipeline for better performance
-        pipeline = [
-            {"$match": match_stage},
-            {
-                "$lookup": {
-                    "from": "bots",  # Your bots collection name
-                    "localField": "bot",
-                    "foreignField": "id",
-                    "as": "botDetails",
-                    "pipeline": [
-                        {"$project": {"_id": 0, "platform": 1, "botName": 1, "imagePath": 1, "id": 1}}
-                    ]
-                }
-            },
-            {"$unwind": "$botDetails"},
-            {"$project": {"_id": 0, "activeJobs": 0, "inputs":0, "deviceIds":0, "schedules":0 }},
-            {"$sort": {"activationDate": -1}}  # Sort by latest first
-        ]
-        
-        # Get total count
-        count_pipeline = pipeline[:-2] + [{"$count": "total"}]
-        total_result = list(tasks_collection.aggregate(count_pipeline))
-        total_count = total_result[0]["total"] if total_result else 0
-        
-        # Add pagination to main pipeline
-        pipeline.extend([
-            {"$skip": (page - 1) * limit},
-            {"$limit": limit}
-        ])
-        
-        # Execute main query
-        tasks = list(tasks_collection.aggregate(pipeline))
-
-        print(f"Total tasks found: {total_count}")
-        
-        # Process datetime fields
+        tasks = list(tasks_collection.find(
+            {"email": current_user.get("email")}, {"_id": 0}))
         for task in tasks:
             if 'activationDate' in task and isinstance(task['activationDate'], datetime):
                 task['activationDate'] = task['activationDate'].isoformat()
-        
-        # Calculate pagination metadata
-        total_pages = math.ceil(total_count / limit) if limit > 0 else 1
-        
-        response_data = {
-            "tasks": tasks,
-            "total": total_count,
-            "totalPages": total_pages,
-            "hasNext": page < total_pages,
-            "hasPrev": page > 1,
-            "currentPage": page,
-        }
-        total_time = time.time() - total_start
-        print(f"TOTAL QUERY TIME: {total_time:.2f}s")
-        return response_data
+
+            # Enhanced schedule field extraction and priority-based selection
+            schedule_sources = []
+            earliest_future = None
+            
+            # Extract schedule information from multiple sources
+            try:
+                # Source 1: Direct task fields
+                exact_start_time = task.get('exactStartTime')
+                task_timezone = task.get('timeZone', task.get('scheduleTimeZone', 'UTC'))
+                duration_type = task.get('durationType')
+                
+                if exact_start_time:
+                    schedule_sources.append('exactStartTime')
+                    try:
+                        user_tz = pytz.timezone(task_timezone)
+                        # Parse the time string
+                        if isinstance(exact_start_time, str):
+                            # Handle various datetime formats
+                            clean_time = exact_start_time.replace('Z', '+00:00')
+                            local_dt = datetime.fromisoformat(clean_time)
+                            if local_dt.tzinfo is None:
+                                local_dt = user_tz.localize(local_dt)
+                            earliest_future = local_dt.astimezone(pytz.UTC)
+                    except Exception as e:
+                        print(f"[ERROR] Error parsing exactStartTime for task {task.get('taskName', 'unknown')}: {e}")
+                
+                # Source 2: newSchecdules structure
+                new_schedules = task.get('newSchecdules')
+                if new_schedules and isinstance(new_schedules, list) and len(new_schedules) > 0:
+                    schedule_sources.append('newSchecdules')
+                    for schedule in new_schedules:
+                        if isinstance(schedule, dict):
+                            sched_exact_time = schedule.get('exactStartTime')
+                            sched_timezone = schedule.get('timeZone', 'UTC')
+                            if sched_exact_time:
+                                try:
+                                    sched_tz = pytz.timezone(sched_timezone)
+                                    clean_time = sched_exact_time.replace('Z', '+00:00')
+                                    local_dt = datetime.fromisoformat(clean_time)
+                                    if local_dt.tzinfo is None:
+                                        local_dt = sched_tz.localize(local_dt)
+                                    utc_dt = local_dt.astimezone(pytz.UTC)
+                                    if earliest_future is None or utc_dt < earliest_future:
+                                        earliest_future = utc_dt
+                                except Exception as e:
+                                    print(f"[ERROR] Error parsing newSchecdules time: {e}")
+                
+                # Source 3: scheduledTime field (from persistence)
+                scheduled_time = task.get('scheduledTime')
+                if scheduled_time:
+                    schedule_sources.append('scheduledTime')
+                    try:
+                        if isinstance(scheduled_time, str):
+                            utc_dt = datetime.fromisoformat(scheduled_time.replace('Z', '+00:00'))
+                            if utc_dt.tzinfo is None:
+                                utc_dt = pytz.UTC.localize(utc_dt)
+                            if earliest_future is None or utc_dt < earliest_future:
+                                earliest_future = utc_dt
+                    except Exception as e:
+                        print(f"[ERROR] Error parsing scheduledTime: {e}")
+                
+                # Source 4: activeJobs calculation (fallback)
+                if task.get("isScheduled"):
+                    schedule_sources.append('activeJobs')
+                    active_jobs = task.get("activeJobs", [])
+                    for job in active_jobs:
+                        start_time = job.get("startTime")
+                        if start_time:
+                            try:
+                                if isinstance(start_time, dict) and "$date" in start_time:
+                                    start_time_str = start_time["$date"]
+                                    job_start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
+                                elif isinstance(start_time, datetime):
+                                    job_start_time = start_time
+                                else:
+                                    continue
+                                
+                                if job_start_time.tzinfo is None:
+                                    job_start_time = pytz.UTC.localize(job_start_time)
+                                
+                                current_utc = datetime.now(pytz.UTC)
+                                if job_start_time > current_utc:
+                                    if earliest_future is None or job_start_time < earliest_future:
+                                        earliest_future = job_start_time
+                                        
+                                job["startTime"] = job_start_time.isoformat()
+                                end_time = job.get("endTime")
+                                if end_time and isinstance(end_time, datetime):
+                                    job["endTime"] = end_time.isoformat()
+                            except Exception as e:
+                                print(f"[ERROR] Error processing activeJobs time: {e}")
+                
+                # Priority-based schedule selection
+                if task.get('scheduledTime'):
+                    # scheduledTime takes priority (from schedule updates)
+                    task['nextRunTime'] = task['scheduledTime']
+                    print(f"[DEBUG] Using scheduledTime for task {task.get('taskName', 'unknown')}: {task['scheduledTime']}")
+                elif earliest_future:
+                    # Fallback to calculated earliest future time
+                    task['nextRunTime'] = earliest_future.isoformat()
+                    print(f"[DEBUG] Using calculated nextRun for task {task.get('taskName', 'unknown')}: {earliest_future.isoformat()}")
+                
+                # Add schedule summary for debugging
+                task['scheduleSummary'] = '|'.join(schedule_sources) if schedule_sources else 'no_schedule_data'
+                
+            except Exception as e:
+                print(f"[ERROR] Error processing schedule for task {task.get('taskName', 'unknown')}: {e}")
+                task['scheduleSummary'] = 'error_processing_schedule'
+
+            # Remove activeJobs from response to match original behavior
+            task.pop('activeJobs', None)
+
+            bot_id = task.get("bot")
+            if bot_id:
+                bot = bots_collection.find_one(
+                    {"id": bot_id},
+                    {"_id": 0, "platform": 1, "botName": 1, "imagePath": 1, "id": 1}
+                )
+                task.update({"botDetails": bot})
+        return JSONResponse(content={"message": "Task fetched successfully!", "tasks": tasks}, status_code=200)
     except Exception as e:
-        return {"error": str(e)}
-    
-
-    
-
+        print(f"Exception occurred: {str(e)}")
+        traceback.print_exc()
+        return JSONResponse(content={"message": "Error fetching task", "error": str(e)}, status_code=400)
 
 @tasks_router.get("/get-scheduled-tasks")
 async def get_scheduled_tasks(current_user: dict = Depends(get_current_user)):
     try:
-        # Get scheduled tasks, excluding activeJobs and _id
+        # Get scheduled tasks, excluding _id only (keep activeJobs for processing)
         result = list(tasks_collection.find(
-            {"email": current_user.get("email"), "status": "scheduled"}, {"_id": 0, "activeJobs": 0}))
+            {"email": current_user.get("email"), "status": "scheduled"}, {"_id": 0}))
 
         for task in result:
             # Convert activationDate to ISO format if it's a datetime object
             if 'activationDate' in task and isinstance(task['activationDate'], datetime):
                 task['activationDate'] = task['activationDate'].isoformat()
+
+            # Apply the same priority-based schedule selection logic
+            schedule_sources = []
+            earliest_future = None
+            
+            try:
+                # Source 1: Direct task fields
+                exact_start_time = task.get('exactStartTime')
+                task_timezone = task.get('timeZone', task.get('scheduleTimeZone', 'UTC'))
+                
+                if exact_start_time:
+                    schedule_sources.append('exactStartTime')
+                    try:
+                        user_tz = pytz.timezone(task_timezone)
+                        clean_time = exact_start_time.replace('Z', '+00:00')
+                        local_dt = datetime.fromisoformat(clean_time)
+                        if local_dt.tzinfo is None:
+                            local_dt = user_tz.localize(local_dt)
+                        earliest_future = local_dt.astimezone(pytz.UTC)
+                    except Exception as e:
+                        print(f"[ERROR] Error parsing exactStartTime for scheduled task {task.get('taskName', 'unknown')}: {e}")
+                
+                # Source 2: scheduledTime field (from persistence) - PRIORITY
+                scheduled_time = task.get('scheduledTime')
+                if scheduled_time:
+                    schedule_sources.append('scheduledTime')
+                    try:
+                        if isinstance(scheduled_time, str):
+                            utc_dt = datetime.fromisoformat(scheduled_time.replace('Z', '+00:00'))
+                            if utc_dt.tzinfo is None:
+                                utc_dt = pytz.UTC.localize(utc_dt)
+                            earliest_future = utc_dt  # Override with scheduledTime
+                    except Exception as e:
+                        print(f"[ERROR] Error parsing scheduledTime: {e}")
+
+                # Source 3: activeJobs calculation (fallback)
+                active_jobs = task.get("activeJobs", [])
+                if active_jobs and not earliest_future:
+                    schedule_sources.append('activeJobs')
+                    try:
+                        current_utc = datetime.now(pytz.UTC)
+                        for job in active_jobs:
+                            start_time = job.get("startTime")
+                            if start_time:
+                                if isinstance(start_time, dict) and "$date" in start_time:
+                                    start_time_str = start_time["$date"]
+                                    job_start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
+                                elif isinstance(start_time, datetime):
+                                    job_start_time = start_time
+                                else:
+                                    continue
+                                
+                                if job_start_time.tzinfo is None:
+                                    job_start_time = pytz.UTC.localize(job_start_time)
+                                
+                                if job_start_time > current_utc:
+                                    if earliest_future is None or job_start_time < earliest_future:
+                                        earliest_future = job_start_time
+                    except Exception as e:
+                        print(f"[ERROR] Error processing activeJobs for scheduled task: {e}")
+
+                # Priority-based schedule selection
+                if task.get('scheduledTime'):
+                    task['nextRunTime'] = task['scheduledTime']
+                    print(f"[DEBUG] Using scheduledTime for scheduled task {task.get('taskName', 'unknown')}: {task['scheduledTime']}")
+                elif earliest_future:
+                    task['nextRunTime'] = earliest_future.isoformat()
+                    print(f"[DEBUG] Using calculated nextRun for scheduled task {task.get('taskName', 'unknown')}: {earliest_future.isoformat()}")
+                
+                task['scheduleSummary'] = '|'.join(schedule_sources) if schedule_sources else 'no_schedule_data'
+                
+            except Exception as e:
+                print(f"[ERROR] Error processing schedule for scheduled task {task.get('taskName', 'unknown')}: {e}")
+
+            # Remove activeJobs from response to match original behavior
+            task.pop('activeJobs', None)
 
             # Fetch and update bot details
             bot_id = task.get("bot")
@@ -385,15 +401,89 @@ async def get_scheduled_tasks(current_user: dict = Depends(get_current_user)):
 @tasks_router.get("/get-running-tasks")
 async def get_running_tasks(current_user: dict = Depends(get_current_user)):
     try:
-        # Get scheduled tasks, excluding activeJobs and _id
+        # Get running tasks, excluding _id only (keep activeJobs for processing)
         result = list(tasks_collection.find(
-            {"email": current_user.get("email"), "status": "running"}, {"_id": 0, "activeJobs":0}))
+            {"email": current_user.get("email"), "status": "running"}, {"_id": 0}))
         
         for task in result:
-            
             if 'activationDate' in task and isinstance(task['activationDate'], datetime):
                 task['activationDate'] = task['activationDate'].isoformat()
+            
+            # Apply the same priority-based schedule selection logic for running tasks
+            schedule_sources = []
+            earliest_future = None
+            
+            try:
+                # Source 1: scheduledTime field (from persistence) - PRIORITY
+                scheduled_time = task.get('scheduledTime')
+                if scheduled_time:
+                    schedule_sources.append('scheduledTime')
+                    try:
+                        if isinstance(scheduled_time, str):
+                            utc_dt = datetime.fromisoformat(scheduled_time.replace('Z', '+00:00'))
+                            if utc_dt.tzinfo is None:
+                                utc_dt = pytz.UTC.localize(utc_dt)
+                            earliest_future = utc_dt
+                    except Exception as e:
+                        print(f"[ERROR] Error parsing scheduledTime for running task: {e}")
                 
+                # Source 2: Direct task fields
+                exact_start_time = task.get('exactStartTime')
+                task_timezone = task.get('timeZone', task.get('scheduleTimeZone', 'UTC'))
+                
+                if exact_start_time and not earliest_future:
+                    schedule_sources.append('exactStartTime')
+                    try:
+                        user_tz = pytz.timezone(task_timezone)
+                        clean_time = exact_start_time.replace('Z', '+00:00')
+                        local_dt = datetime.fromisoformat(clean_time)
+                        if local_dt.tzinfo is None:
+                            local_dt = user_tz.localize(local_dt)
+                        earliest_future = local_dt.astimezone(pytz.UTC)
+                    except Exception as e:
+                        print(f"[ERROR] Error parsing exactStartTime for running task {task.get('taskName', 'unknown')}: {e}")
+
+                # Source 3: activeJobs calculation (fallback)
+                active_jobs = task.get("activeJobs", [])
+                if active_jobs and not earliest_future:
+                    schedule_sources.append('activeJobs')
+                    try:
+                        current_utc = datetime.now(pytz.UTC)
+                        for job in active_jobs:
+                            start_time = job.get("startTime")
+                            if start_time:
+                                if isinstance(start_time, dict) and "$date" in start_time:
+                                    start_time_str = start_time["$date"]
+                                    job_start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
+                                elif isinstance(start_time, datetime):
+                                    job_start_time = start_time
+                                else:
+                                    continue
+                                
+                                if job_start_time.tzinfo is None:
+                                    job_start_time = pytz.UTC.localize(job_start_time)
+                                
+                                if job_start_time > current_utc:
+                                    if earliest_future is None or job_start_time < earliest_future:
+                                        earliest_future = job_start_time
+                    except Exception as e:
+                        print(f"[ERROR] Error processing activeJobs for running task: {e}")
+
+                # Priority-based schedule selection
+                if task.get('scheduledTime'):
+                    task['nextRunTime'] = task['scheduledTime']
+                    print(f"[DEBUG] Using scheduledTime for running task {task.get('taskName', 'unknown')}: {task['scheduledTime']}")
+                elif earliest_future:
+                    task['nextRunTime'] = earliest_future.isoformat()
+                    print(f"[DEBUG] Using calculated nextRun for running task {task.get('taskName', 'unknown')}: {earliest_future.isoformat()}")
+                
+                task['scheduleSummary'] = '|'.join(schedule_sources) if schedule_sources else 'no_schedule_data'
+                
+            except Exception as e:
+                print(f"[ERROR] Error processing schedule for running task {task.get('taskName', 'unknown')}: {e}")
+
+            # Remove activeJobs from response to match original behavior
+            task.pop('activeJobs', None)
             
             bot_id = task.get("bot")
             if bot_id:
@@ -644,86 +734,3 @@ async def unschedule_jobs(tasks: deleteRequest, current_user: dict = Depends(get
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
-    
-
-@tasks_router.patch("/update-tasks-inputs")
-async def update_tasks_inputs(tasks: updateTasksInputRequest, current_user: dict = Depends(get_current_user)):
-    print(f"[LOG] updating Inputs for tasks: {tasks.tasks}")
-    if not tasks.tasks:
-        return JSONResponse(content={"message": "No tasks provided"}, status_code=400)
-    
-    try:
-        # Fetch all tasks that need to be processed
-        tasks_cursor = tasks_collection.find(
-            {"id": {"$in": tasks.tasks}, "email": current_user.get("email")},
-            {"id": 1, "inputs": 1, "bot": 1, "_id": 0}
-        )
-        
-        tasks_list = list(tasks_cursor)
-        if not tasks_list:
-            print("[LOG] No tasks found for the provided IDs and user")
-            return JSONResponse(content={"message": "No tasks found"}, status_code=404)
-        
-        updated_count = 0
-        
-        for task in tasks_list:
-            task_id = task.get("id")
-            task_inputs = task.get("inputs", {})
-            bot_id = task.get("bot")
-            
-            if not bot_id:
-                print(f"[LOG] No bot ID found for task {task_id}")
-                continue
-
-            # Fetch bot inputs
-            bot_result = bots_collection.find_one(
-                {"id": bot_id},
-                {"inputs": 1, "_id": 0}
-            )
-            
-            if not bot_result:
-                print(f"[LOG] No bot found for task {task_id} with bot ID {bot_id}")
-                continue
-
-            bot_inputs = bot_result.get("inputs", {})
-            if not bot_inputs:
-                print(f"[LOG] No inputs found for bot {bot_id}")
-                continue
-
-            # Update task inputs using the merge function
-            try:
-                updated_inputs = updateTaskInputs(tasksInputs=task_inputs, botInputs=bot_inputs)
-                print("updated_inputs:", updated_inputs)
-                
-                # Update the task in database
-                update_result = tasks_collection.update_one(
-                    {"id": task_id, "email": current_user.get("email")},
-                    {"$set": {"inputs": updated_inputs}}
-                )
-                
-                if update_result.modified_count > 0:
-                    updated_count += 1
-                    print(f"[LOG] Successfully updated inputs for task {task_id}")
-                else:
-                    print(f"[LOG] No changes made to task {task_id}")
-                    
-            except Exception as merge_error:
-                print(f"[ERROR] Failed to merge inputs for task {task_id}: {str(merge_error)}")
-                continue
-        
-        return JSONResponse(
-            content={
-                "message": f"Successfully updated {updated_count} out of {len(tasks_list)} tasks.",
-                "updated_count": updated_count,
-                "total_tasks": len(tasks_list)
-            }, 
-            status_code=200
-        )
-
-    except Exception as e:
-        print(f"[ERROR] Error in update_tasks_inputs: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
-
-
