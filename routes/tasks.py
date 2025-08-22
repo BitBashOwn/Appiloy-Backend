@@ -10,6 +10,9 @@ from pydantic import BaseModel
 from typing import List, Optional
 import traceback
 import pytz
+import json
+import hashlib
+from redis_client import get_redis_client
 
 
 class deleteRequest(BaseModel):
@@ -40,6 +43,160 @@ class taskCopyRequest(BaseModel):
 
 tasks_router = APIRouter()
 
+# Initialize Redis client for caching
+redis_client = get_redis_client()
+
+def cache_get_json(key):
+    """Get JSON data from Redis cache"""
+    try:
+        value = redis_client.get(key)
+        return json.loads(value) if value else None
+    except Exception as e:
+        print(f"[CACHE ERROR] Failed to get cache key {key}: {e}")
+        return None
+
+def cache_set_json(key, obj, ttl_seconds):
+    """Set JSON data in Redis cache with TTL"""
+    try:
+        redis_client.setex(key, ttl_seconds, json.dumps(obj))
+        return True
+    except Exception as e:
+        print(f"[CACHE ERROR] Failed to set cache key {key}: {e}")
+        return False
+
+def cache_delete_pattern(pattern):
+    """Delete cache keys matching a pattern"""
+    try:
+        keys = redis_client.keys(pattern)
+        if keys:
+            redis_client.delete(*keys)
+            print(f"[CACHE] Deleted {len(keys)} keys matching pattern: {pattern}")
+        return True
+    except Exception as e:
+        print(f"[CACHE ERROR] Failed to delete cache pattern {pattern}: {e}")
+        return False
+
+def get_bots_cache_key(bot_ids):
+    """Generate cache key for bot details"""
+    if not bot_ids:
+        return None
+    # Sort IDs for consistent key generation
+    sorted_ids = sorted(bot_ids)
+    ids_string = ','.join(sorted_ids)
+    return f"bots:ids:{hashlib.sha1(ids_string.encode()).hexdigest()}"
+
+def get_tasks_cache_key(email, page=1, limit=50, search=None):
+    """Generate cache key for task list responses"""
+    search_part = f":{search}" if search else ""
+    return f"tasks:list:{email}:{page}:{limit}{search_part}"
+
+def invalidate_user_tasks_cache(email):
+    """Invalidate all task cache entries for a specific user"""
+    pattern = f"tasks:list:{email}:*"
+    return cache_delete_pattern(pattern)
+
+
+def process_task_schedule(task):
+    """
+    Optimized schedule processing for a single task.
+    Consolidates all schedule logic into one efficient function.
+    """
+    try:
+        # Use cached scheduledTime if available (highest priority)
+        if task.get('scheduledTime'):
+            task['nextRunTime'] = task['scheduledTime']
+            task['scheduleSummary'] = 'scheduledTime'
+            return
+        
+        schedule_sources = []
+        earliest_future = None
+        
+        # Source 1: Direct task fields
+        exact_start_time = task.get('exactStartTime')
+        task_timezone = task.get('timeZone', task.get('scheduleTimeZone', 'UTC'))
+        
+        if exact_start_time:
+            schedule_sources.append('exactStartTime')
+            try:
+                user_tz = pytz.timezone(task_timezone)
+                if isinstance(exact_start_time, str):
+                    clean_time = exact_start_time.replace('Z', '+00:00')
+                    local_dt = datetime.fromisoformat(clean_time)
+                    if local_dt.tzinfo is None:
+                        local_dt = user_tz.localize(local_dt)
+                    earliest_future = local_dt.astimezone(pytz.UTC)
+            except Exception as e:
+                print(f"[ERROR] Error parsing exactStartTime for task {task.get('taskName', 'unknown')}: {e}")
+        
+        # Source 2: newSchedules structure (only if no direct time found)
+        if not earliest_future:
+            new_schedules = task.get('newSchecdules')
+            if new_schedules and isinstance(new_schedules, list) and len(new_schedules) > 0:
+                schedule_sources.append('newSchecdules')
+                for schedule in new_schedules:
+                    if isinstance(schedule, dict):
+                        sched_exact_time = schedule.get('exactStartTime')
+                        sched_timezone = schedule.get('timeZone', 'UTC')
+                        if sched_exact_time:
+                            try:
+                                sched_tz = pytz.timezone(sched_timezone)
+                                clean_time = sched_exact_time.replace('Z', '+00:00')
+                                local_dt = datetime.fromisoformat(clean_time)
+                                if local_dt.tzinfo is None:
+                                    local_dt = sched_tz.localize(local_dt)
+                                utc_dt = local_dt.astimezone(pytz.UTC)
+                                if earliest_future is None or utc_dt < earliest_future:
+                                    earliest_future = utc_dt
+                            except Exception as e:
+                                print(f"[ERROR] Error parsing newSchedules time: {e}")
+        
+        # Source 3: activeJobs calculation (fallback only if needed)
+        if not earliest_future and task.get("isScheduled"):
+            schedule_sources.append('activeJobs')
+            active_jobs = task.get("activeJobs", [])
+            for job in active_jobs:
+                start_time = job.get("startTime")
+                if start_time:
+                    try:
+                        if isinstance(start_time, dict) and "$date" in start_time:
+                            start_time_str = start_time["$date"]
+                            job_start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
+                        elif isinstance(start_time, datetime):
+                            job_start_time = start_time
+                        else:
+                            continue
+                        
+                        if job_start_time.tzinfo is None:
+                            job_start_time = pytz.UTC.localize(job_start_time)
+                        
+                        current_utc = datetime.now(pytz.UTC)
+                        if job_start_time > current_utc:
+                            if earliest_future is None or job_start_time < earliest_future:
+                                earliest_future = job_start_time
+                                
+                        # Convert to ISO format for response
+                        job["startTime"] = job_start_time.isoformat()
+                        end_time = job.get("endTime")
+                        if end_time and isinstance(end_time, datetime):
+                            job["endTime"] = end_time.isoformat()
+                    except Exception as e:
+                        print(f"[ERROR] Error processing activeJobs time: {e}")
+        
+        # Set nextRunTime based on priority
+        if earliest_future:
+            task['nextRunTime'] = earliest_future.isoformat()
+            print(f"[DEBUG] Using calculated nextRun for task {task.get('taskName', 'unknown')}: {earliest_future.isoformat()}")
+        else:
+            task['nextRunTime'] = None
+        
+        # Set schedule summary
+        task['scheduleSummary'] = '|'.join(schedule_sources) if schedule_sources else 'no_schedule_data'
+        
+    except Exception as e:
+        print(f"[ERROR] Error processing schedule for task {task.get('taskName', 'unknown')}: {e}")
+        task['scheduleSummary'] = 'error_processing_schedule'
+        task['nextRunTime'] = None
+
 
 @tasks_router.post("/create-task")
 async def create_Task(task: taskModel, current_user: dict = Depends(get_current_user)):
@@ -57,6 +214,12 @@ async def create_Task(task: taskModel, current_user: dict = Depends(get_current_
             "schedules": bot.get("schedules")
         })
         result = tasks_collection.insert_one(task_dict)
+        
+        # Invalidate cache for the user after creating new task
+        user_email = current_user.get("email")
+        invalidate_user_tasks_cache(user_email)
+        print(f"[CACHE] Invalidated task cache for user {user_email} after creating new task {task_id}")
+        
         return JSONResponse(content={"message": "Task created successfully!", "id": task_id}, status_code=200)
 
     except JWTError:
@@ -117,6 +280,11 @@ async def create_Task_copy(task: taskCopyRequest, current_user: dict = Depends(g
         # Insert the new task
         result = tasks_collection.insert_one(task_dict)
         
+        # Invalidate cache for the user after creating task copy
+        user_email = current_user.get("email")
+        invalidate_user_tasks_cache(user_email)
+        print(f"[CACHE] Invalidated task cache for user {user_email} after creating task copy {task_id}")
+        
         return JSONResponse(
             content={"message": "Task created successfully!", "id": task_id}, 
             status_code=200
@@ -159,135 +327,85 @@ async def get_Task(id: str, current_user: dict = Depends(get_current_user)):
             status_code=400, detail="Error fetching task or bot data")
 
 @tasks_router.get("/get-all-task")
-async def get_all_Task(current_user: dict = Depends(get_current_user)):
+async def get_all_Task(
+    page: int = Query(1, ge=1, description="Page number"),
+    limit: int = Query(50, ge=1, le=200, description="Items per page"),
+    search: str = Query(None, description="Search query for task name"),
+    current_user: dict = Depends(get_current_user)
+):
     print("entered /get-all-task")
     try:
-        tasks = list(tasks_collection.find(
-            {"email": current_user.get("email")}, {"_id": 0}))
+        user_email = current_user.get("email")
+        
+        # 1. Check cache first
+        cache_key = get_tasks_cache_key(user_email, page, limit, search)
+        cached_response = cache_get_json(cache_key)
+        if cached_response:
+            print(f"[CACHE HIT] Returning cached response for {cache_key}")
+            return JSONResponse(content=cached_response, status_code=200)
+        
+        print(f"[CACHE MISS] Fetching fresh data for {cache_key}")
+        
+        # 2. Build query filter
+        query_filter = {"email": user_email}
+        if search and search.strip():
+            query_filter["taskName"] = {"$regex": search.strip(), "$options": "i"}
+        
+        # 3. Fetch tasks with pagination
+        skip = (page - 1) * limit
+        tasks = list(tasks_collection.find(query_filter, {"_id": 0}).skip(skip).limit(limit))
+        
+        # 4. Collect all unique bot IDs to avoid N+1 query problem
+        bot_ids = list(set(task.get("bot") for task in tasks if task.get("bot")))
+        
+        # 5. Check bot cache first
+        bots_map = {}
+        if bot_ids:
+            bot_cache_key = get_bots_cache_key(bot_ids)
+            cached_bots = cache_get_json(bot_cache_key)
+            
+            if cached_bots:
+                print(f"[CACHE HIT] Using cached bot data for {len(bot_ids)} bots")
+                bots_map = cached_bots
+            else:
+                print(f"[CACHE MISS] Fetching bot data for {len(bot_ids)} bots")
+                # Fetch all bots in ONE query instead of individual queries
+                bots = list(bots_collection.find(
+                    {"id": {"$in": bot_ids}},
+                    {"_id": 0, "platform": 1, "botName": 1, "imagePath": 1, "id": 1}
+                ))
+                bots_map = {bot["id"]: bot for bot in bots}
+                
+                # Cache bot data for 30 minutes (bots don't change frequently)
+                if bot_cache_key:
+                    cache_set_json(bot_cache_key, bots_map, 1800)
+                    print(f"[CACHE] Stored bot data for {len(bot_ids)} bots")
+        
+        # 6. Process tasks with pre-fetched bot data
         for task in tasks:
             if 'activationDate' in task and isinstance(task['activationDate'], datetime):
                 task['activationDate'] = task['activationDate'].isoformat()
 
-            # Enhanced schedule field extraction and priority-based selection
-            schedule_sources = []
-            earliest_future = None
-            
-            # Extract schedule information from multiple sources
-            try:
-                # Source 1: Direct task fields
-                exact_start_time = task.get('exactStartTime')
-                task_timezone = task.get('timeZone', task.get('scheduleTimeZone', 'UTC'))
-                duration_type = task.get('durationType')
-                
-                if exact_start_time:
-                    schedule_sources.append('exactStartTime')
-                    try:
-                        user_tz = pytz.timezone(task_timezone)
-                        # Parse the time string
-                        if isinstance(exact_start_time, str):
-                            # Handle various datetime formats
-                            clean_time = exact_start_time.replace('Z', '+00:00')
-                            local_dt = datetime.fromisoformat(clean_time)
-                            if local_dt.tzinfo is None:
-                                local_dt = user_tz.localize(local_dt)
-                            earliest_future = local_dt.astimezone(pytz.UTC)
-                    except Exception as e:
-                        print(f"[ERROR] Error parsing exactStartTime for task {task.get('taskName', 'unknown')}: {e}")
-                
-                # Source 2: newSchecdules structure
-                new_schedules = task.get('newSchecdules')
-                if new_schedules and isinstance(new_schedules, list) and len(new_schedules) > 0:
-                    schedule_sources.append('newSchecdules')
-                    for schedule in new_schedules:
-                        if isinstance(schedule, dict):
-                            sched_exact_time = schedule.get('exactStartTime')
-                            sched_timezone = schedule.get('timeZone', 'UTC')
-                            if sched_exact_time:
-                                try:
-                                    sched_tz = pytz.timezone(sched_timezone)
-                                    clean_time = sched_exact_time.replace('Z', '+00:00')
-                                    local_dt = datetime.fromisoformat(clean_time)
-                                    if local_dt.tzinfo is None:
-                                        local_dt = sched_tz.localize(local_dt)
-                                    utc_dt = local_dt.astimezone(pytz.UTC)
-                                    if earliest_future is None or utc_dt < earliest_future:
-                                        earliest_future = utc_dt
-                                except Exception as e:
-                                    print(f"[ERROR] Error parsing newSchecdules time: {e}")
-                
-                # Source 3: scheduledTime field (from persistence)
-                scheduled_time = task.get('scheduledTime')
-                if scheduled_time:
-                    schedule_sources.append('scheduledTime')
-                    try:
-                        if isinstance(scheduled_time, str):
-                            utc_dt = datetime.fromisoformat(scheduled_time.replace('Z', '+00:00'))
-                            if utc_dt.tzinfo is None:
-                                utc_dt = pytz.UTC.localize(utc_dt)
-                            if earliest_future is None or utc_dt < earliest_future:
-                                earliest_future = utc_dt
-                    except Exception as e:
-                        print(f"[ERROR] Error parsing scheduledTime: {e}")
-                
-                # Source 4: activeJobs calculation (fallback)
-                if task.get("isScheduled"):
-                    schedule_sources.append('activeJobs')
-                    active_jobs = task.get("activeJobs", [])
-                    for job in active_jobs:
-                        start_time = job.get("startTime")
-                        if start_time:
-                            try:
-                                if isinstance(start_time, dict) and "$date" in start_time:
-                                    start_time_str = start_time["$date"]
-                                    job_start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
-                                elif isinstance(start_time, datetime):
-                                    job_start_time = start_time
-                                else:
-                                    continue
-                                
-                                if job_start_time.tzinfo is None:
-                                    job_start_time = pytz.UTC.localize(job_start_time)
-                                
-                                current_utc = datetime.now(pytz.UTC)
-                                if job_start_time > current_utc:
-                                    if earliest_future is None or job_start_time < earliest_future:
-                                        earliest_future = job_start_time
-                                        
-                                job["startTime"] = job_start_time.isoformat()
-                                end_time = job.get("endTime")
-                                if end_time and isinstance(end_time, datetime):
-                                    job["endTime"] = end_time.isoformat()
-                            except Exception as e:
-                                print(f"[ERROR] Error processing activeJobs time: {e}")
-                
-                # Priority-based schedule selection
-                if task.get('scheduledTime'):
-                    # scheduledTime takes priority (from schedule updates)
-                    task['nextRunTime'] = task['scheduledTime']
-                    print(f"[DEBUG] Using scheduledTime for task {task.get('taskName', 'unknown')}: {task['scheduledTime']}")
-                elif earliest_future:
-                    # Fallback to calculated earliest future time
-                    task['nextRunTime'] = earliest_future.isoformat()
-                    print(f"[DEBUG] Using calculated nextRun for task {task.get('taskName', 'unknown')}: {earliest_future.isoformat()}")
-                
-                # Add schedule summary for debugging
-                task['scheduleSummary'] = '|'.join(schedule_sources) if schedule_sources else 'no_schedule_data'
-                
-            except Exception as e:
-                print(f"[ERROR] Error processing schedule for task {task.get('taskName', 'unknown')}: {e}")
-                task['scheduleSummary'] = 'error_processing_schedule'
+            # Use optimized schedule processing function
+            process_task_schedule(task)
 
             # Remove activeJobs from response to match original behavior
             task.pop('activeJobs', None)
 
+            # Use pre-fetched bot data instead of individual database queries
             bot_id = task.get("bot")
-            if bot_id:
-                bot = bots_collection.find_one(
-                    {"id": bot_id},
-                    {"_id": 0, "platform": 1, "botName": 1, "imagePath": 1, "id": 1}
-                )
-                task.update({"botDetails": bot})
-        return JSONResponse(content={"message": "Task fetched successfully!", "tasks": tasks}, status_code=200)
+            if bot_id and bot_id in bots_map:
+                task.update({"botDetails": bots_map[bot_id]})
+        
+        # 7. Prepare response
+        response_data = {"message": "Task fetched successfully!", "tasks": tasks}
+        
+        # 8. Cache the response for 30 seconds (short TTL for freshness)
+        if cache_key:
+            cache_set_json(cache_key, response_data, 30)
+            print(f"[CACHE] Stored task response for {cache_key}")
+        
+        return JSONResponse(content=response_data, status_code=200)
     except Exception as e:
         print(f"Exception occurred: {str(e)}")
         traceback.print_exc()
@@ -296,102 +414,70 @@ async def get_all_Task(current_user: dict = Depends(get_current_user)):
 @tasks_router.get("/get-scheduled-tasks")
 async def get_scheduled_tasks(current_user: dict = Depends(get_current_user)):
     try:
-        # Get scheduled tasks, excluding _id only (keep activeJobs for processing)
+        user_email = current_user.get("email")
+        
+        # 1. Check cache first
+        cache_key = f"tasks:scheduled:{user_email}"
+        cached_response = cache_get_json(cache_key)
+        if cached_response:
+            print(f"[CACHE HIT] Returning cached scheduled tasks for {user_email}")
+            return JSONResponse(content=cached_response, status_code=200)
+        
+        print(f"[CACHE MISS] Fetching fresh scheduled tasks for {user_email}")
+        
+        # 2. Get scheduled tasks, excluding _id only (keep activeJobs for processing)
         result = list(tasks_collection.find(
-            {"email": current_user.get("email"), "status": "scheduled"}, {"_id": 0}))
+            {"email": user_email, "status": "scheduled"}, {"_id": 0}))
 
+        # 3. Collect all unique bot IDs to avoid N+1 query problem
+        bot_ids = list(set(task.get("bot") for task in result if task.get("bot")))
+        
+        # 4. Check bot cache first
+        bots_map = {}
+        if bot_ids:
+            bot_cache_key = get_bots_cache_key(bot_ids)
+            cached_bots = cache_get_json(bot_cache_key)
+            
+            if cached_bots:
+                print(f"[CACHE HIT] Using cached bot data for {len(bot_ids)} bots")
+                bots_map = cached_bots
+            else:
+                print(f"[CACHE MISS] Fetching bot data for {len(bot_ids)} bots")
+                # Fetch all bots in ONE query instead of individual queries
+                bots = list(bots_collection.find(
+                    {"id": {"$in": bot_ids}},
+                    {"_id": 0, "platform": 1, "botName": 1, "imagePath": 1, "id": 1}
+                ))
+                bots_map = {bot["id"]: bot for bot in bots}
+                
+                # Cache bot data for 30 minutes (bots don't change frequently)
+                if bot_cache_key:
+                    cache_set_json(bot_cache_key, bots_map, 1800)
+                    print(f"[CACHE] Stored bot data for {len(bot_ids)} bots")
+
+        # 5. Process tasks
         for task in result:
             # Convert activationDate to ISO format if it's a datetime object
             if 'activationDate' in task and isinstance(task['activationDate'], datetime):
                 task['activationDate'] = task['activationDate'].isoformat()
 
-            # Apply the same priority-based schedule selection logic
-            schedule_sources = []
-            earliest_future = None
-            
-            try:
-                # Source 1: Direct task fields
-                exact_start_time = task.get('exactStartTime')
-                task_timezone = task.get('timeZone', task.get('scheduleTimeZone', 'UTC'))
-                
-                if exact_start_time:
-                    schedule_sources.append('exactStartTime')
-                    try:
-                        user_tz = pytz.timezone(task_timezone)
-                        clean_time = exact_start_time.replace('Z', '+00:00')
-                        local_dt = datetime.fromisoformat(clean_time)
-                        if local_dt.tzinfo is None:
-                            local_dt = user_tz.localize(local_dt)
-                        earliest_future = local_dt.astimezone(pytz.UTC)
-                    except Exception as e:
-                        print(f"[ERROR] Error parsing exactStartTime for scheduled task {task.get('taskName', 'unknown')}: {e}")
-                
-                # Source 2: scheduledTime field (from persistence) - PRIORITY
-                scheduled_time = task.get('scheduledTime')
-                if scheduled_time:
-                    schedule_sources.append('scheduledTime')
-                    try:
-                        if isinstance(scheduled_time, str):
-                            utc_dt = datetime.fromisoformat(scheduled_time.replace('Z', '+00:00'))
-                            if utc_dt.tzinfo is None:
-                                utc_dt = pytz.UTC.localize(utc_dt)
-                            earliest_future = utc_dt  # Override with scheduledTime
-                    except Exception as e:
-                        print(f"[ERROR] Error parsing scheduledTime: {e}")
-
-                # Source 3: activeJobs calculation (fallback)
-                active_jobs = task.get("activeJobs", [])
-                if active_jobs and not earliest_future:
-                    schedule_sources.append('activeJobs')
-                    try:
-                        current_utc = datetime.now(pytz.UTC)
-                        for job in active_jobs:
-                            start_time = job.get("startTime")
-                            if start_time:
-                                if isinstance(start_time, dict) and "$date" in start_time:
-                                    start_time_str = start_time["$date"]
-                                    job_start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
-                                elif isinstance(start_time, datetime):
-                                    job_start_time = start_time
-                                else:
-                                    continue
-                                
-                                if job_start_time.tzinfo is None:
-                                    job_start_time = pytz.UTC.localize(job_start_time)
-                                
-                                if job_start_time > current_utc:
-                                    if earliest_future is None or job_start_time < earliest_future:
-                                        earliest_future = job_start_time
-                    except Exception as e:
-                        print(f"[ERROR] Error processing activeJobs for scheduled task: {e}")
-
-                # Priority-based schedule selection
-                if task.get('scheduledTime'):
-                    task['nextRunTime'] = task['scheduledTime']
-                    print(f"[DEBUG] Using scheduledTime for scheduled task {task.get('taskName', 'unknown')}: {task['scheduledTime']}")
-                elif earliest_future:
-                    task['nextRunTime'] = earliest_future.isoformat()
-                    print(f"[DEBUG] Using calculated nextRun for scheduled task {task.get('taskName', 'unknown')}: {earliest_future.isoformat()}")
-                
-                task['scheduleSummary'] = '|'.join(schedule_sources) if schedule_sources else 'no_schedule_data'
-                
-            except Exception as e:
-                print(f"[ERROR] Error processing schedule for scheduled task {task.get('taskName', 'unknown')}: {e}")
+            # Use optimized schedule processing function
+            process_task_schedule(task)
 
             # Remove activeJobs from response to match original behavior
             task.pop('activeJobs', None)
 
-            # Fetch and update bot details
+            # Use pre-fetched bot data instead of individual database queries
             bot_id = task.get("bot")
-            if bot_id:
-                bot = bots_collection.find_one(
-                    {"id": bot_id},
-                    {"_id": 0, "platform": 1, "botName": 1, "imagePath": 1, "id": 1}
-                )
-                if bot:  # Make sure bot is not None
-                    task.update({"botDetails": bot})
+            if bot_id and bot_id in bots_map:
+                task.update({"botDetails": bots_map[bot_id]})
 
-        return JSONResponse(content={"message": "Scheduled tasks fetched successfully!", "tasks": result}, status_code=200)
+        # 6. Prepare response and cache it
+        response_data = {"message": "Scheduled tasks fetched successfully!", "tasks": result}
+        cache_set_json(cache_key, response_data, 45)  # 45 seconds TTL for scheduled tasks
+        print(f"[CACHE] Stored scheduled tasks response for {user_email}")
+
+        return JSONResponse(content=response_data, status_code=200)
 
     except Exception as e:
         print(f"Exception occurred: {str(e)}")
@@ -401,99 +487,69 @@ async def get_scheduled_tasks(current_user: dict = Depends(get_current_user)):
 @tasks_router.get("/get-running-tasks")
 async def get_running_tasks(current_user: dict = Depends(get_current_user)):
     try:
-        # Get running tasks, excluding _id only (keep activeJobs for processing)
-        result = list(tasks_collection.find(
-            {"email": current_user.get("email"), "status": "running"}, {"_id": 0}))
+        user_email = current_user.get("email")
         
+        # 1. Check cache first
+        cache_key = f"tasks:running:{user_email}"
+        cached_response = cache_get_json(cache_key)
+        if cached_response:
+            print(f"[CACHE HIT] Returning cached running tasks for {user_email}")
+            return JSONResponse(content=cached_response, status_code=200)
+        
+        print(f"[CACHE MISS] Fetching fresh running tasks for {user_email}")
+        
+        # 2. Get running tasks, excluding _id only (keep activeJobs for processing)
+        result = list(tasks_collection.find(
+            {"email": user_email, "status": "running"}, {"_id": 0}))
+        
+        # 3. Collect all unique bot IDs to avoid N+1 query problem
+        bot_ids = list(set(task.get("bot") for task in result if task.get("bot")))
+        
+        # 4. Check bot cache first
+        bots_map = {}
+        if bot_ids:
+            bot_cache_key = get_bots_cache_key(bot_ids)
+            cached_bots = cache_get_json(bot_cache_key)
+            
+            if cached_bots:
+                print(f"[CACHE HIT] Using cached bot data for {len(bot_ids)} bots")
+                bots_map = cached_bots
+            else:
+                print(f"[CACHE MISS] Fetching bot data for {len(bot_ids)} bots")
+                # Fetch all bots in ONE query instead of individual queries
+                bots = list(bots_collection.find(
+                    {"id": {"$in": bot_ids}},
+                    {"_id": 0, "platform": 1, "botName": 1, "imagePath": 1, "id": 1}
+                ))
+                bots_map = {bot["id"]: bot for bot in bots}
+                
+                # Cache bot data for 30 minutes (bots don't change frequently)
+                if bot_cache_key:
+                    cache_set_json(bot_cache_key, bots_map, 1800)
+                    print(f"[CACHE] Stored bot data for {len(bot_ids)} bots")
+        
+        # 5. Process tasks
         for task in result:
             if 'activationDate' in task and isinstance(task['activationDate'], datetime):
                 task['activationDate'] = task['activationDate'].isoformat()
             
-            # Apply the same priority-based schedule selection logic for running tasks
-            schedule_sources = []
-            earliest_future = None
-            
-            try:
-                # Source 1: scheduledTime field (from persistence) - PRIORITY
-                scheduled_time = task.get('scheduledTime')
-                if scheduled_time:
-                    schedule_sources.append('scheduledTime')
-                    try:
-                        if isinstance(scheduled_time, str):
-                            utc_dt = datetime.fromisoformat(scheduled_time.replace('Z', '+00:00'))
-                            if utc_dt.tzinfo is None:
-                                utc_dt = pytz.UTC.localize(utc_dt)
-                            earliest_future = utc_dt
-                    except Exception as e:
-                        print(f"[ERROR] Error parsing scheduledTime for running task: {e}")
-                
-                # Source 2: Direct task fields
-                exact_start_time = task.get('exactStartTime')
-                task_timezone = task.get('timeZone', task.get('scheduleTimeZone', 'UTC'))
-                
-                if exact_start_time and not earliest_future:
-                    schedule_sources.append('exactStartTime')
-                    try:
-                        user_tz = pytz.timezone(task_timezone)
-                        clean_time = exact_start_time.replace('Z', '+00:00')
-                        local_dt = datetime.fromisoformat(clean_time)
-                        if local_dt.tzinfo is None:
-                            local_dt = user_tz.localize(local_dt)
-                        earliest_future = local_dt.astimezone(pytz.UTC)
-                    except Exception as e:
-                        print(f"[ERROR] Error parsing exactStartTime for running task {task.get('taskName', 'unknown')}: {e}")
-
-                # Source 3: activeJobs calculation (fallback)
-                active_jobs = task.get("activeJobs", [])
-                if active_jobs and not earliest_future:
-                    schedule_sources.append('activeJobs')
-                    try:
-                        current_utc = datetime.now(pytz.UTC)
-                        for job in active_jobs:
-                            start_time = job.get("startTime")
-                            if start_time:
-                                if isinstance(start_time, dict) and "$date" in start_time:
-                                    start_time_str = start_time["$date"]
-                                    job_start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
-                                elif isinstance(start_time, datetime):
-                                    job_start_time = start_time
-                                else:
-                                    continue
-                                
-                                if job_start_time.tzinfo is None:
-                                    job_start_time = pytz.UTC.localize(job_start_time)
-                                
-                                if job_start_time > current_utc:
-                                    if earliest_future is None or job_start_time < earliest_future:
-                                        earliest_future = job_start_time
-                    except Exception as e:
-                        print(f"[ERROR] Error processing activeJobs for running task: {e}")
-
-                # Priority-based schedule selection
-                if task.get('scheduledTime'):
-                    task['nextRunTime'] = task['scheduledTime']
-                    print(f"[DEBUG] Using scheduledTime for running task {task.get('taskName', 'unknown')}: {task['scheduledTime']}")
-                elif earliest_future:
-                    task['nextRunTime'] = earliest_future.isoformat()
-                    print(f"[DEBUG] Using calculated nextRun for running task {task.get('taskName', 'unknown')}: {earliest_future.isoformat()}")
-                
-                task['scheduleSummary'] = '|'.join(schedule_sources) if schedule_sources else 'no_schedule_data'
-                
-            except Exception as e:
-                print(f"[ERROR] Error processing schedule for running task {task.get('taskName', 'unknown')}: {e}")
+            # Use optimized schedule processing function
+            process_task_schedule(task)
 
             # Remove activeJobs from response to match original behavior
             task.pop('activeJobs', None)
             
+            # Use pre-fetched bot data instead of individual database queries
             bot_id = task.get("bot")
-            if bot_id:
-                bot = bots_collection.find_one(
-                    {"id": bot_id},
-                    {"_id": 0, "platform": 1, "botName": 1, "imagePath": 1, "id": 1}
-                )
-                if bot:  
-                    task.update({"botDetails": bot})
-        return JSONResponse(content={"message": "Running tasks fetched successfully!", "tasks": result}, status_code=200)
+            if bot_id and bot_id in bots_map:
+                task.update({"botDetails": bots_map[bot_id]})
+        
+        # 6. Prepare response and cache it
+        response_data = {"message": "Running tasks fetched successfully!", "tasks": result}
+        cache_set_json(cache_key, response_data, 30)  # 30 seconds TTL for running tasks (more dynamic)
+        print(f"[CACHE] Stored running tasks response for {user_email}")
+        
+        return JSONResponse(content=response_data, status_code=200)
 
     except Exception as e:
         print(f"Exception occurred: {str(e)}")
@@ -504,9 +560,14 @@ async def get_running_tasks(current_user: dict = Depends(get_current_user)):
 async def delete_tasks(tasks: deleteRequest, current_user: dict = Depends(get_current_user)):
     # print("Devices to delete:", tasks.tasks)
     # object_ids = [ObjectId(device_id) for device_id in devices.devices]
-    # result = devices_collection.delete_many({"_id": {"$in": object_ids}})
+    # result = devices_collection.delete_many({"_id": {"$in": tasks.tasks}})
     result = tasks_collection.delete_many(
         {"id": {"$in": tasks.tasks}, "email": current_user.get("email")})
+    
+    # Invalidate cache for the user after deleting tasks
+    user_email = current_user.get("email")
+    invalidate_user_tasks_cache(user_email)
+    print(f"[CACHE] Invalidated task cache for user {user_email} after deleting {len(tasks.tasks)} tasks")
 
     return JSONResponse(content={"message": "Devices deleted successfully"}, status_code=200)
 
@@ -527,6 +588,11 @@ def get_task_fields(id: str, fields: List[str] = Query(...), current_user: dict 
 async def save_task_inputs(inputs: inputsSaveRequest, current_user: dict = Depends(get_current_user)):
     result = tasks_collection.update_one({"id": inputs.id, "email": current_user.get(
         "email")}, {"$set": {"inputs": inputs.inputs}})
+    
+    # Invalidate cache for the user after updating task inputs
+    user_email = current_user.get("email")
+    invalidate_user_tasks_cache(user_email)
+    print(f"[CACHE] Invalidated task cache for user {user_email} after updating inputs for task {inputs.id}")
 
     return JSONResponse(content={"message": "Inputs updated successfully"}, status_code=200)
 
@@ -534,6 +600,11 @@ async def save_task_inputs(inputs: inputsSaveRequest, current_user: dict = Depen
 async def save_task_devices(data: devicesSaveRequest, current_user: dict = Depends(get_current_user)):
     result = tasks_collection.update_one({"id": data.id, "email": current_user.get(
         "email")}, {"$set": {"deviceIds": data.devices}})
+    
+    # Invalidate cache for the user after updating task devices
+    user_email = current_user.get("email")
+    invalidate_user_tasks_cache(user_email)
+    print(f"[CACHE] Invalidated task cache for user {user_email} after updating devices for task {data.id}")
 
     return JSONResponse(content={"message": "devices updated successfully"}, status_code=200)
 
@@ -542,6 +613,11 @@ async def update_task(data: dict, current_user: dict = Depends(get_current_user)
     print(data)
     result = tasks_collection.update_one({"id": data["id"], "email": current_user.get(
         "email")}, {"$set": data["data"]})
+    
+    # Invalidate cache for the user after updating task
+    user_email = current_user.get("email")
+    invalidate_user_tasks_cache(user_email)
+    print(f"[CACHE] Invalidated task cache for user {user_email} after updating task {data['id']}")
 
     return JSONResponse(content={"message": "Updated successfully"}, status_code=200)
 
@@ -676,6 +752,12 @@ async def clear_old_jobs(tasks: clearOldJobsRequest, current_user: dict = Depend
         if bulk_operations:
             result = tasks_collection.bulk_write(bulk_operations)
             print(f"[LOG] Updated {result.modified_count} tasks")
+            
+            # Invalidate cache for the user after clearing old jobs
+            user_email = current_user.get("email")
+            invalidate_user_tasks_cache(user_email)
+            print(f"[CACHE] Invalidated task cache for user {user_email} after clearing old jobs")
+            
             return JSONResponse(
                 content={
                     "message": "Clear Old Jobs successfully",
@@ -729,6 +811,11 @@ async def unschedule_jobs(tasks: deleteRequest, current_user: dict = Depends(get
         if result.matched_count == 0:
             print("[LOG] No tasks found for the provided IDs and user")
             return JSONResponse(content={"message": "No tasks found"}, status_code=404)
+        
+        # Invalidate cache for the user after unscheduling jobs
+        user_email = current_user.get("email")
+        invalidate_user_tasks_cache(user_email)
+        print(f"[CACHE] Invalidated task cache for user {user_email} after unscheduling {result.modified_count} tasks")
         
         return JSONResponse(content={"message": f"Successfully unscheduled {result.modified_count} tasks."}, status_code=200)
 
