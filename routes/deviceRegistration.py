@@ -504,7 +504,7 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                         {"id": task_id}, {"$pull": {"activeJobs": {"job_id": job_id}}}
                     )
 
-                    # Check if task is still active and update status (only for non-update messages)
+                    # Check if task is still active and update status
                     task = tasks_collection.find_one({"id": task_id})
                     if task:
                         status = (
@@ -512,9 +512,74 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                             if len(task.get("activeJobs", [])) == 0
                             else "scheduled"
                         )
-                        tasks_collection.update_one(
-                            {"id": task_id}, {"$set": {"status": status}}
-                        )
+                        
+                        # If daily task completed, restore schedule for next day
+                        if status == "awaiting" and task.get("durationType") == "EveryDayAutomaticRun":
+                            try:
+                                # Get the original schedule time from the task
+                                original_time = task.get("scheduledTime") or task.get("exactStartTime")
+                                if original_time:
+                                    # Parse the original time
+                                    if isinstance(original_time, str):
+                                        original_dt = datetime.fromisoformat(original_time.replace('Z', '+00:00'))
+                                        if original_dt.tzinfo is None:
+                                            original_dt = pytz.UTC.localize(original_dt)
+                                    else:
+                                        original_dt = original_time
+                                    
+                                    # Calculate tomorrow at the same time
+                                    tomorrow = datetime.now(pytz.UTC) + timedelta(days=1)
+                                    next_schedule = tomorrow.replace(
+                                        hour=original_dt.hour,
+                                        minute=original_dt.minute,
+                                        second=0,
+                                        microsecond=0
+                                    )
+                                    
+                                    # Restore scheduledTime for next day
+                                    tasks_collection.update_one(
+                                        {"id": task_id},
+                                        {
+                                            "$set": {
+                                                "status": "scheduled",
+                                                "scheduledTime": next_schedule.isoformat()
+                                            }
+                                        }
+                                    )
+                                    print(f"[SCHEDULE] Restored daily schedule for task {task_id} to {next_schedule}")
+                                    
+                                    # Force immediate cache refresh after schedule restoration
+                                    try:
+                                        from routes.tasks import invalidate_user_tasks_cache
+                                        # Get user email from the task
+                                        task_user_info = tasks_collection.find_one(
+                                            {"id": task_id},
+                                            {"email": 1}
+                                        )
+                                        if task_user_info and task_user_info.get("email"):
+                                            user_email = task_user_info["email"]
+                                            # Clear all related caches immediately
+                                            invalidate_user_tasks_cache(user_email)
+                                            
+                                            # Also clear specific endpoint caches for immediate refresh
+                                            redis_client.delete(f"tasks:list:{user_email}:*")
+                                            redis_client.delete(f"tasks:scheduled:{user_email}")
+                                            redis_client.delete(f"tasks:running:{user_email}")
+                                            
+                                            print(f"[CACHE] All caches cleared after daily schedule restoration for task {task_id}")
+                                    except Exception as cache_error:
+                                        print(f"[WARNING] Cache clearing failed after schedule restoration: {cache_error}")
+                            except Exception as e:
+                                print(f"[ERROR] Failed to restore daily schedule: {e}")
+                                # Fallback to normal status update
+                                tasks_collection.update_one(
+                                    {"id": task_id}, {"$set": {"status": status}}
+                                )
+                        else:
+                            # Normal status update
+                            tasks_collection.update_one(
+                                {"id": task_id}, {"$set": {"status": status}}
+                            )
 
                 else:
                     print(
@@ -686,6 +751,21 @@ async def send_command(
                         
                         if update_result.modified_count > 0:
                             print(f"[DEBUG] Successfully updated schedule for task {task_name}")
+                            # Force immediate cache refresh for all related endpoints
+                            try:
+                                from routes.tasks import invalidate_user_tasks_cache
+                                user_email = current_user.get("email")
+                                # Clear all related caches immediately
+                                invalidate_user_tasks_cache(user_email)
+                                
+                                # Also clear specific endpoint caches for immediate refresh
+                                redis_client.delete(f"tasks:list:{user_email}:*")
+                                redis_client.delete(f"tasks:scheduled:{user_email}")
+                                redis_client.delete(f"tasks:running:{user_email}")
+                                
+                                print(f"[CACHE] All caches cleared after schedule update for {task_name}")
+                            except Exception as cache_error:
+                                print(f"[WARNING] Cache clearing failed: {cache_error}")
                         else:
                             # Try updating by task_id if taskName didn't work
                             if task_id:
@@ -702,6 +782,21 @@ async def send_command(
                                 )
                                 if update_result.modified_count > 0:
                                     print(f"[DEBUG] Successfully updated schedule for task ID {task_id}")
+                                    # Force immediate cache refresh for all related endpoints
+                                    try:
+                                        from routes.tasks import invalidate_user_tasks_cache
+                                        user_email = current_user.get("email")
+                                        # Clear all related caches immediately
+                                        invalidate_user_tasks_cache(user_email)
+                                        
+                                        # Also clear specific endpoint caches for immediate refresh
+                                        redis_client.delete(f"tasks:list:{user_email}:*")
+                                        redis_client.delete(f"tasks:scheduled:{user_email}")
+                                        redis_client.delete(f"tasks:running:{user_email}")
+                                        
+                                        print(f"[CACHE] All caches cleared after schedule update for task ID {task_id}")
+                                    except Exception as cache_error:
+                                        print(f"[WARNING] Cache clearing failed: {cache_error}")
                                 else:
                                     print(f"[WARNING] Could not find task to update schedule: {task_name or task_id}")
                     
@@ -828,14 +923,56 @@ async def send_command_to_devices(device_ids, command):
 
         if results["success"]:
             logger.info("Command successfully executed. Updating task status.")
-            # Update task status
-            result = await asyncio.to_thread(
-                tasks_collection.update_one,
+            
+            # Check if this is a daily recurring task before clearing scheduledTime
+            task_info = await asyncio.to_thread(
+                tasks_collection.find_one,
                 {"id": task_id},
-                {"$set": {"status": "running"}},
+                {"durationType": 1, "scheduledTime": 1}
             )
+            
+            if task_info and task_info.get("durationType") == "EveryDayAutomaticRun":
+                # For daily tasks, DON'T clear scheduledTime
+                result = await asyncio.to_thread(
+                    tasks_collection.update_one,
+                    {"id": task_id},
+                    {"$set": {"status": "running"}}
+                )
+            else:
+                # For non-daily tasks, clear scheduledTime
+                result = await asyncio.to_thread(
+                    tasks_collection.update_one,
+                    {"id": task_id},
+                    {
+                        "$set": {"status": "running"},
+                        "$unset": {"scheduledTime": ""}
+                    }
+                )
+            
             if result.modified_count > 0:
                 logger.info("Task status updated successfully.")
+                # Force immediate cache refresh for all related endpoints
+                try:
+                    from routes.tasks import invalidate_user_tasks_cache
+                    # Get user email from the task
+                    task_info = await asyncio.to_thread(
+                        tasks_collection.find_one,
+                        {"id": task_id},
+                        {"email": 1}
+                    )
+                    if task_info and task_info.get("email"):
+                        user_email = task_info["email"]
+                        # Clear all related caches immediately
+                        invalidate_user_tasks_cache(user_email)
+                        
+                        # Also clear specific endpoint caches for immediate refresh
+                        redis_client.delete(f"tasks:list:{user_email}:*")
+                        redis_client.delete(f"tasks:scheduled:{user_email}")
+                        redis_client.delete(f"tasks:running:{user_email}")
+                        
+                        logger.info(f"All caches cleared for user {user_email}")
+                except Exception as cache_error:
+                    logger.warning(f"Cache clearing failed: {cache_error}")
             else:
                 logger.warning("Task status update failed.")
 
@@ -1022,8 +1159,33 @@ def schedule_split_jobs(
         # Update status only if it's not 'running'
         tasks_collection.update_one(
             {"id": task_id, "status": {"$ne": "running"}},
-            {"$set": {"status": "scheduled"}},
+            {
+                "$set": {"status": "scheduled"},
+                "$unset": {"scheduledTime": ""}  # Clear old scheduledTime
+            },
         )
+        
+        # Invalidate cache to ensure consistency
+        try:
+            from routes.tasks import invalidate_user_tasks_cache
+            # Get user email from the task
+            task_info = tasks_collection.find_one(
+                {"id": task_id},
+                {"email": 1}
+            )
+            if task_info and task_info.get("email"):
+                user_email = task_info["email"]
+                # Clear all related caches immediately
+                invalidate_user_tasks_cache(user_email)
+                
+                # Also clear specific endpoint caches for immediate refresh
+                redis_client.delete(f"tasks:list:{user_email}:*")
+                redis_client.delete(f"tasks:scheduled:{user_email}")
+                redis_client.delete(f"tasks:running:{user_email}")
+                
+                print(f"[CACHE] All caches cleared after split schedule update for task ID {task_id}")
+        except Exception as cache_error:
+            print(f"[WARNING] Cache invalidation failed: {cache_error}")
 
         # Always update activeJobs
         tasks_collection.update_one(
@@ -1190,14 +1352,40 @@ def schedule_recurring_job(
             # Update both status and activeJobs if status is "awaiting"
             update_operation = {
                 "$set": {"status": "scheduled"},
-                "$push": {"activeJobs": jobInstance},
+                "$push": {"activeJobs": jobInstance}
+                # Remove the "$unset": {"scheduledTime": ""} line for daily tasks
             }
         else:
             # Only update activeJobs if status is not "awaiting"
-            update_operation = {"$push": {"activeJobs": jobInstance}}
+            update_operation = {
+                "$push": {"activeJobs": jobInstance}
+                # Remove the "$unset": {"scheduledTime": ""} line for daily tasks
+            }
 
         # Update the task in the database
         tasks_collection.update_one({"id": task_id}, update_operation)
+        
+        # Invalidate cache to ensure consistency
+        try:
+            from routes.tasks import invalidate_user_tasks_cache
+            # Get user email from the task
+            task_info = tasks_collection.find_one(
+                {"id": task_id},
+                {"email": 1}
+            )
+            if task_info and task_info.get("email"):
+                user_email = task_info["email"]
+                # Clear all related caches immediately
+                invalidate_user_tasks_cache(user_email)
+                
+                # Also clear specific endpoint caches for immediate refresh
+                redis_client.delete(f"tasks:list:{user_email}:*")
+                redis_client.delete(f"tasks:scheduled:{user_email}")
+                redis_client.delete(f"tasks:running:{user_email}")
+                
+                print(f"[CACHE] All caches cleared after recurring schedule update for task ID {task_id}")
+        except Exception as cache_error:
+            print(f"[WARNING] Cache invalidation failed: {cache_error}")
 
         # Get device names for notification
         device_docs = list(
@@ -1256,17 +1444,36 @@ def schedule_single_job(
             name=f"Single session command for devices {device_ids}",
         )
 
-        # tasks_collection.update_one(
-        #     {"id": task_id},
-        #     {"$set": {"status": "scheduled"},
-        #      "$push": {"activeJobs": jobInstance}}
-        # )
-
-        # Update status only if it's not 'running'
+        # Update status only if it's not 'running' AND clear scheduledTime
         tasks_collection.update_one(
             {"id": task_id, "status": {"$ne": "running"}},
-            {"$set": {"status": "scheduled"}},
+            {
+                "$set": {"status": "scheduled"},
+                "$unset": {"scheduledTime": ""}  # Clear old scheduledTime
+            },
         )
+        
+        # Invalidate cache to ensure consistency
+        try:
+            from routes.tasks import invalidate_user_tasks_cache
+            # Get user email from the task
+            task_info = tasks_collection.find_one(
+                {"id": task_id},
+                {"email": 1}
+            )
+            if task_info and task_info.get("email"):
+                user_email = task_info["email"]
+                # Clear all related caches immediately
+                invalidate_user_tasks_cache(user_email)
+                
+                # Also clear specific endpoint caches for immediate refresh
+                redis_client.delete(f"tasks:list:{user_email}:*")
+                redis_client.delete(f"tasks:scheduled:{user_email}")
+                redis_client.delete(f"tasks:running:{user_email}")
+                
+                print(f"[CACHE] All caches cleared after schedule update for task ID {task_id}")
+        except Exception as cache_error:
+            print(f"[WARNING] Cache clearing failed: {cache_error}")
 
         # Always update activeJobs
         tasks_collection.update_one(

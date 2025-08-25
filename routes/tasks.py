@@ -102,8 +102,16 @@ def process_task_schedule(task):
     Consolidates all schedule logic into one efficient function.
     """
     try:
-        # Use cached scheduledTime if available (highest priority)
-        if task.get('scheduledTime'):
+        task_status = task.get('status', 'unknown')
+        
+        # For running tasks, don't use scheduledTime (it should be cleared)
+        if task_status == 'running':
+            # scheduledTime should be cleared for running tasks, but if it exists, ignore it
+            if task.get('scheduledTime'):
+                print(f"[DEBUG] Ignoring scheduledTime for running task {task.get('taskName', 'unknown')}")
+        
+        # Use scheduledTime only for non-running tasks
+        if task.get('scheduledTime') and task_status != 'running':
             task['nextRunTime'] = task['scheduledTime']
             task['scheduleSummary'] = 'scheduledTime'
             return
@@ -400,9 +408,9 @@ async def get_all_Task(
         # 7. Prepare response
         response_data = {"message": "Task fetched successfully!", "tasks": tasks}
         
-        # 8. Cache the response for 30 seconds (short TTL for freshness)
+        # 8. Cache the response for 10 seconds (short TTL for freshness)
         if cache_key:
-            cache_set_json(cache_key, response_data, 30)
+            cache_set_json(cache_key, response_data, 10)  # Reduced from 30 to 10 seconds
             print(f"[CACHE] Stored task response for {cache_key}")
         
         return JSONResponse(content=response_data, status_code=200)
@@ -474,7 +482,7 @@ async def get_scheduled_tasks(current_user: dict = Depends(get_current_user)):
 
         # 6. Prepare response and cache it
         response_data = {"message": "Scheduled tasks fetched successfully!", "tasks": result}
-        cache_set_json(cache_key, response_data, 45)  # 45 seconds TTL for scheduled tasks
+        cache_set_json(cache_key, response_data, 15)  # Reduced from 45 to 15 seconds
         print(f"[CACHE] Stored scheduled tasks response for {user_email}")
 
         return JSONResponse(content=response_data, status_code=200)
@@ -546,7 +554,7 @@ async def get_running_tasks(current_user: dict = Depends(get_current_user)):
         
         # 6. Prepare response and cache it
         response_data = {"message": "Running tasks fetched successfully!", "tasks": result}
-        cache_set_json(cache_key, response_data, 30)  # 30 seconds TTL for running tasks (more dynamic)
+        cache_set_json(cache_key, response_data, 10)  # Reduced from 30 to 10 seconds (more dynamic)
         print(f"[CACHE] Stored running tasks response for {user_email}")
         
         return JSONResponse(content=response_data, status_code=200)
