@@ -718,7 +718,7 @@ async def clear_old_jobs(tasks: clearOldJobsRequest, current_user: dict = Depend
                             print(f"[LOG] Job {job_id} is within 24 hours, keeping it")
                             future_jobs.append(job)
                     else:
-                        # For non-running tasks, check against current time
+
                         if job_start_time > current_time:
                             print(f"[LOG] Job {job_id} is in the future, keeping it")
                             future_jobs.append(job)
