@@ -8,5 +8,6 @@ class User(BaseModel):
     DiscordUsername: str
     email: EmailStr
     password: str
+    subscription_tier: Optional[str] = Field("free")  # Add tier field with default 'free'
     
 user_collection = db['Users']

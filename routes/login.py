@@ -46,7 +46,8 @@ async def login(request: LoginRequest):
             "email": existing_user["email"],
             "id": user_id,
             "access_token": access_token,
-            "token_type": "bearer"
+            "token_type": "bearer",
+            "subscription_tier": existing_user.get("subscription_tier", "free")  # Include tier
         }, status_code=200)
 
     return JSONResponse(content={"message": "Invalid Email or Password"}, status_code=401)
