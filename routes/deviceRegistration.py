@@ -273,6 +273,16 @@ async def stop_task(
                 }
             )
 
+        # If no running/old jobs were detected, force-stop by targeting the task's deviceIds
+        if not all_device_ids:
+            print("[LOG] No old/running jobs detected. Entering force-stop mode using task deviceIds.")
+            fallback_device_ids = set()
+            for t in tasks:
+                fallback_device_ids.update(t.get("deviceIds", []))
+            all_device_ids.update(fallback_device_ids)
+            if not all_device_ids:
+                print("[LOG] No devices found on tasks to force-stop.")
+
         # Get device info for all devices in a single query
         devices = list(device_collection.find({"id": {"$in": list(all_device_ids)}}))
         device_names = {
@@ -298,7 +308,7 @@ async def stop_task(
 
         # If no devices are connected
         if not connected_devices:
-            print("[LOG] No connected devices found for the old jobs.")
+            print("[LOG] No connected devices found for targeted devices.")
         else:
             # Send stop command only to devices with old jobs
             print("[LOG] Sending stop command to connected devices with old jobs.")

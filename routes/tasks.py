@@ -359,9 +359,15 @@ async def get_all_Task(
         if search and search.strip():
             query_filter["taskName"] = {"$regex": search.strip(), "$options": "i"}
         
-        # 3. Fetch tasks with pagination
+        # 3. Fetch tasks with pagination (add stable, indexed sort)
         skip = (page - 1) * limit
-        tasks = list(tasks_collection.find(query_filter, {"_id": 0}).skip(skip).limit(limit))
+        tasks = list(
+            tasks_collection
+                .find(query_filter, {"_id": 0})
+                .sort([("LastModifiedDate", -1), ("id", 1)])
+                .skip(skip)
+                .limit(limit)
+        )
         
         # 4. Collect all unique bot IDs to avoid N+1 query problem
         bot_ids = list(set(task.get("bot") for task in tasks if task.get("bot")))
@@ -813,8 +819,40 @@ async def unschedule_jobs(tasks: deleteRequest, current_user: dict = Depends(get
         # Fetch all tasks that need to be processed
         result = tasks_collection.update_many(
             {"id": {"$in": tasks.tasks}, "email": current_user.get("email")},
-            {"$set": {"activeJobs": [], "status": "awaiting"}}
+            {
+                "$set": {
+                    "activeJobs": [], 
+                    "status": "awaiting"
+                },
+                "$unset": {
+                    "scheduledTime": "",
+                    "exactStartTime": ""
+                }
+            }
         )
+        
+        # Also clear the specific time fields in schedules.inputs for EveryDayAutomaticRun
+        for task_id in tasks.tasks:
+            task = tasks_collection.find_one({"id": task_id, "email": current_user.get("email")})
+            if task and task.get("schedules") and task.get("schedules", {}).get("inputs"):
+                schedules_inputs = task["schedules"]["inputs"]
+                updated_inputs = []
+                
+                for input_item in schedules_inputs:
+                    if input_item.get("type") == "EveryDayAutomaticRun":
+                        # Clear only the time fields, keep the rest
+                        updated_input_item = input_item.copy()
+                        updated_input_item["startinput"] = ""
+                        updated_input_item["endinput"] = ""
+                        updated_inputs.append(updated_input_item)
+                    else:
+                        updated_inputs.append(input_item)
+                
+                # Update the task with cleared time fields
+                tasks_collection.update_one(
+                    {"id": task_id, "email": current_user.get("email")},
+                    {"$set": {"schedules.inputs": updated_inputs}}
+                )
         
         if result.matched_count == 0:
             print("[LOG] No tasks found for the provided IDs and user")
