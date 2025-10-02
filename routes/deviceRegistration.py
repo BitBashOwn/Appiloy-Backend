@@ -645,6 +645,27 @@ async def send_command(
         print(f"Current time in {time_zone}: {now}")
 
         if durationType in ["DurationWithExactStartTime", "ExactStartTime"]:
+            # Clear old scheduled jobs before scheduling new fixed start time
+            print(f"[LOG] Clearing old fixed start time jobs for task {task_id}")
+            task = tasks_collection.find_one({"id": task_id}, {"activeJobs": 1})
+            if task and task.get("activeJobs"):
+                for old_job in task["activeJobs"]:
+                    job_id_to_remove = old_job.get("job_id")
+                    if job_id_to_remove:
+                        try:
+                            scheduler.remove_job(job_id_to_remove)
+                            print(f"[LOG] Removed old job {job_id_to_remove} from scheduler")
+                        except Exception as e:
+                            # Job might not exist in scheduler or already completed
+                            print(f"[LOG] Could not remove job {job_id_to_remove} from scheduler: {str(e)}")
+            
+            # Clear activeJobs array before scheduling new job
+            tasks_collection.update_one(
+                {"id": task_id},
+                {"$set": {"activeJobs": []}}
+            )
+            print(f"[LOG] Cleared activeJobs array for task {task_id}")
+            
             time_str = request.command.get("exactStartTime")
             hour, minute = parse_time(time_str)
 
@@ -659,14 +680,6 @@ async def send_command(
             target_time_utc = target_time.astimezone(pytz.UTC)
             target_end_time_utc = target_end_time.astimezone(pytz.UTC)
 
-            if check_for_Job_clashes(
-                target_time_utc, target_end_time_utc, task_id, device_ids
-            ):
-                return JSONResponse(
-                    content={"message": "Task already Scheduled on this time"},
-                    status_code=400,
-                )
-
             job_id = f"cmd_{uuid.uuid4()}"
             command["job_id"] = job_id
             schedule_single_job(
@@ -679,6 +692,27 @@ async def send_command(
             )
 
         elif durationType == "DurationWithTimeWindow":
+            # Clear old scheduled jobs before scheduling new time window
+            print(f"[LOG] Clearing old time window jobs for task {task_id}")
+            task = tasks_collection.find_one({"id": task_id}, {"activeJobs": 1})
+            if task and task.get("activeJobs"):
+                for old_job in task["activeJobs"]:
+                    job_id_to_remove = old_job.get("job_id")
+                    if job_id_to_remove:
+                        try:
+                            scheduler.remove_job(job_id_to_remove)
+                            print(f"[LOG] Removed old job {job_id_to_remove} from scheduler")
+                        except Exception as e:
+                            # Job might not exist in scheduler or already completed
+                            print(f"[LOG] Could not remove job {job_id_to_remove} from scheduler: {str(e)}")
+            
+            # Clear activeJobs array before scheduling new job
+            tasks_collection.update_one(
+                {"id": task_id},
+                {"$set": {"activeJobs": []}}
+            )
+            print(f"[LOG] Cleared activeJobs array for task {task_id}")
+            
             start_time_str = command.get("startInput")
             end_time_str = command.get("endInput")
 
@@ -698,12 +732,6 @@ async def send_command(
                 start_time += timedelta(days=1)
                 end_time += timedelta(days=1)
 
-            if check_for_Job_clashes(start_time, end_time, task_id, device_ids):
-                return JSONResponse(
-                    content={"message": "Task already Scheduled on this time"},
-                    status_code=400,
-                )
-
             time_window = (end_time - start_time).total_seconds() / 60
             if abs(time_window - duration) <= 10:
                 job_id = f"cmd_{uuid.uuid4()}"
@@ -722,6 +750,28 @@ async def send_command(
                 )
 
         elif durationType == "EveryDayAutomaticRun":
+            # Clear old scheduled jobs before scheduling new daily run
+            print(f"[LOG] Clearing old daily run jobs for task {task_id}")
+            task = tasks_collection.find_one({"id": task_id}, {"activeJobs": 1})
+            if task and task.get("activeJobs"):
+                for old_job in task["activeJobs"]:
+                    job_id = old_job.get("job_id")
+                    if job_id:
+                        try:
+                            scheduler.remove_job(job_id)
+                            print(f"[LOG] Removed old job {job_id} from scheduler")
+                        except Exception as e:
+                            # Job might not exist in scheduler or already completed
+                            print(f"[LOG] Could not remove job {job_id} from scheduler: {str(e)}")
+            
+            # Clear activeJobs array before scheduling new job
+            tasks_collection.update_one(
+                {"id": task_id},
+                {"$set": {"activeJobs": []}}
+            )
+            print(f"[LOG] Cleared activeJobs array for task {task_id}")
+            
+            # Now schedule the new daily recurring job
             schedule_recurring_job(command, device_ids)
 
         # Schedule persistence logic for schedule_task commands
