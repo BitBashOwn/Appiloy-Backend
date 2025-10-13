@@ -1729,7 +1729,9 @@ async def send_command(
                             4: "Unfollow Non-Followers",
                             9: "Warmup"
                         }
-                        lines = []
+                        
+                        # Compute planned start/end times once and reuse for summary and scheduling
+                        planned_schedule = []
                         for d in generated:
                             idx = int(d.get("dayIndex", 0))
                             is_rest = bool(d.get("isRest", False))
@@ -1737,21 +1739,48 @@ async def send_command(
                             day_method = int(d.get("method", 9 if is_rest else 1))
                             method_label = method_names.get(day_method, f"method {day_method}")
                             
-                            # Calculate actual calendar date for this day
-                            actual_date = local_dt + timedelta(days=idx)
-                            actual_day_name = day_names[actual_date.weekday()]
-                            date_str = actual_date.strftime("%b %d")  # e.g., "Oct 14"
-                            
-                            if is_rest:
-                                # Show likes, comments, and duration for rest days
-                                max_likes = d.get("maxLikes", 10)
-                                max_comments = d.get("maxComments", 5)
-                                warmup_duration = d.get("warmupDuration", 60)
-                                label = f"{actual_day_name} {date_str}: Warmup day ({method_label}) - {max_likes} likes, {max_comments} comments, {warmup_duration}min"
+                            if test_mode:
+                                start_time_local = local_dt + timedelta(minutes=idx * 10)
+                                end_time_local = start_time_local + timedelta(hours=11)
                             else:
-                                label = f"{actual_day_name} {date_str}: {target} follows ({method_label})"
+                                day_local = local_dt + timedelta(days=idx)
+                                start_window_start = day_local.replace(hour=11, minute=0, second=0, microsecond=0)
+                                start_window_end = day_local.replace(hour=22, minute=0, second=0, microsecond=0)
+                                window_minutes = int((start_window_end - start_window_start).total_seconds() // 60)
+                                if window_minutes <= 0:
+                                    # Skip invalid window day
+                                    continue
+                                random_offset = random.randint(0, window_minutes - 1)
+                                start_time_local = start_window_start + timedelta(minutes=random_offset)
+                                end_time_local = start_window_end
+                            
+                            entry = {
+                                "dayIndex": idx,
+                                "isRest": is_rest,
+                                "target": target,
+                                "method": day_method,
+                                "methodLabel": method_label,
+                                "start_local": start_time_local,
+                                "end_local": end_time_local,
+                            }
+                            if is_rest:
+                                entry["maxLikes"] = int(d.get("maxLikes", 10))
+                                entry["maxComments"] = int(d.get("maxComments", 5))
+                                entry["warmupDuration"] = int(d.get("warmupDuration", 60))
+                            planned_schedule.append(entry)
+                        
+                        # Build summary lines with planned start times
+                        lines = []
+                        for p in planned_schedule:
+                            actual_day_name = day_names[p["start_local"].weekday()]
+                            date_str = p["start_local"].strftime("%b %d")
+                            time_str = p["start_local"].strftime("%H:%M")
+                            if p["isRest"]:
+                                label = f"{actual_day_name} {date_str} {time_str}: Warmup day ({p['methodLabel']}) - {p.get('maxLikes', 10)} likes, {p.get('maxComments', 5)} comments, {p.get('warmupDuration', 60)}min"
+                            else:
+                                label = f"{actual_day_name} {date_str} {time_str}: {p['target']} follows ({p['methodLabel']})"
                             lines.append(label)
-
+                        
                         test_mode_indicator = "TEST MODE (10-min gaps)\n" if test_mode else ""
                         summary = (
                             f"Weekly plan scheduled: {task_meta.get('taskName', 'Unknown Task')}\n"
@@ -1855,42 +1884,23 @@ async def send_command(
                 notify_daily = bool(command.get("notifyDaily", False))
                 total_target = 0
                 active_days = 0
-                for day in generated:
-                    day_index = int(day.get("dayIndex", 0))
-                    target_count = int(day.get("target", 0))
-                    is_rest = bool(day.get("isRest", False))
-                    # Get method from the generated schedule (randomly assigned per day)
-                    day_method = int(day.get("method", 9 if is_rest else 1))
+                for p in planned_schedule:
+                    day_index = int(p.get("dayIndex", 0))
+                    target_count = int(p.get("target", 0))
+                    is_rest = bool(p.get("isRest", False))
+                    day_method = int(p.get("method", 9 if is_rest else 1))
                     total_target += target_count
                     if not is_rest:
                         active_days += 1
 
-                    # Test mode: fixed intervals starting NOW (no randomization)
-                    # Normal mode: schedule with 1-day gaps and random time window
-                    if test_mode:
-                        # Schedule at exact 10-minute intervals starting from now
-                        start_time_local = local_dt + timedelta(minutes=day_index * 10)
-                        end_time_local = start_time_local + timedelta(hours=11)  # 11-hour window for consistency
-                    else:
-                        # Normal mode: schedule with 1-day gaps
-                        day_local = local_dt + timedelta(days=day_index)
-
-                        # Start window 11:00–22:00 local
-                        start_window_start = day_local.replace(hour=11, minute=0, second=0, microsecond=0)
-                        start_window_end = day_local.replace(hour=22, minute=0, second=0, microsecond=0)
-                        window_minutes = int((start_window_end - start_window_start).total_seconds() // 60)
-                        if window_minutes <= 0:
-                            # Skip scheduling if invalid window
-                            continue
-                        random_offset = random.randint(0, window_minutes - 1)
-                        start_time_local = start_window_start + timedelta(minutes=random_offset)
-                        end_time_local = start_window_end
+                    # Reuse planned times
+                    start_time_local = p["start_local"]
+                    end_time_local = p["end_local"]
 
                     start_time_utc = start_time_local.astimezone(pytz.UTC)
                     end_time_utc = end_time_local.astimezone(pytz.UTC)
 
                     job_id = f"cmd_{uuid.uuid4()}"
-                    # day_method already extracted from schedule above (randomly 1 or 4 for active, 9 for rest)
                     
                     # Deep copy command to prevent shared object references between jobs
                     job_command = copy.deepcopy(command)
@@ -1904,9 +1914,9 @@ async def send_command(
                     
                     # Add likes, comments, and duration for rest days (method 9)
                     if day_method == 9 and is_rest:
-                        max_likes = day.get("maxLikes", 10)
-                        max_comments = day.get("maxComments", 5)
-                        warmup_duration = day.get("warmupDuration", 60)
+                        max_likes = int(p.get("maxLikes", 10))
+                        max_comments = int(p.get("maxComments", 5))
+                        warmup_duration = int(p.get("warmupDuration", 60))
                         job_command.update({
                             "maxLikes": max_likes,
                             "maxComments": max_comments,
@@ -1985,9 +1995,9 @@ async def send_command(
                             method_label_reminder = method_names_reminder.get(day_method, f"method {day_method}")
                             if is_rest:
                                 # Show likes, comments, and duration for rest day reminders
-                                max_likes = day.get("maxLikes", 10)
-                                max_comments = day.get("maxComments", 5)
-                                warmup_duration = day.get("warmupDuration", 60)
+                                max_likes = int(p.get("maxLikes", 10))
+                                max_comments = int(p.get("maxComments", 5))
+                                warmup_duration = int(p.get("warmupDuration", 60))
                                 activity_text = f"Warmup day ({method_label_reminder}) - {max_likes} likes, {max_comments} comments, {warmup_duration}min"
                             else:
                                 activity_text = f"{target_count} follows ({method_label_reminder})"
