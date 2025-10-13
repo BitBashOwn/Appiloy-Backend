@@ -89,6 +89,10 @@ class AppilotBot:
                         embed = discord.Embed(title="Task Update", color=discord.Color.blue())
                     elif message_type == "error":
                         embed = discord.Embed(title="Error", color=discord.Color.red())
+                    elif message_type == "warning":
+                        embed = discord.Embed(
+                            title="⚠️ Task Starting Soon", color=discord.Color.orange()
+                        )
                     elif message_type == "info":
                         embed = discord.Embed(
                             title="Schedule", color=discord.Color.dark_green()

@@ -128,11 +128,23 @@ def process_task_schedule(task):
             try:
                 user_tz = pytz.timezone(task_timezone)
                 if isinstance(exact_start_time, str):
-                    clean_time = exact_start_time.replace('Z', '+00:00')
-                    local_dt = datetime.fromisoformat(clean_time)
-                    if local_dt.tzinfo is None:
-                        local_dt = user_tz.localize(local_dt)
-                    earliest_future = local_dt.astimezone(pytz.UTC)
+                    # Check if it's a time-only string (HH:MM format)
+                    if ':' in exact_start_time and len(exact_start_time.split(':')) == 2:
+                        # Parse time-only string (e.g., "20:12")
+                        hour, minute = map(int, exact_start_time.split(':'))
+                        now = datetime.now(user_tz)
+                        local_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                        # If time has passed today, schedule for tomorrow
+                        if local_dt < now:
+                            local_dt += timedelta(days=1)
+                        earliest_future = local_dt.astimezone(pytz.UTC)
+                    else:
+                        # Parse full datetime string
+                        clean_time = exact_start_time.replace('Z', '+00:00')
+                        local_dt = datetime.fromisoformat(clean_time)
+                        if local_dt.tzinfo is None:
+                            local_dt = user_tz.localize(local_dt)
+                        earliest_future = local_dt.astimezone(pytz.UTC)
             except Exception as e:
                 print(f"[ERROR] Error parsing exactStartTime for task {task.get('taskName', 'unknown')}: {e}")
         
@@ -816,7 +828,35 @@ async def unschedule_jobs(tasks: deleteRequest, current_user: dict = Depends(get
         return JSONResponse(content={"message": "No tasks provided"}, status_code=400)
         
     try:
-        # Fetch all tasks that need to be processed
+        # IMPORTANT: Remove jobs from APScheduler BEFORE clearing database
+        # This applies to all task types: FixedTime, EveryDayAutomaticRun, and WeeklyRandomizedPlan
+        # For weekly tasks, this removes all 7 scheduled jobs from the scheduler
+        from scheduler import scheduler
+        
+        for task_id in tasks.tasks:
+            task = tasks_collection.find_one(
+                {"id": task_id, "email": current_user.get("email")},
+                {"activeJobs": 1}
+            )
+            if task and task.get("activeJobs"):
+                print(f"[LOG] Removing {len(task['activeJobs'])} scheduled jobs from APScheduler for task {task_id}")
+                for job in task["activeJobs"]:
+                    job_id = job.get("job_id")
+                    if job_id:
+                        try:
+                            scheduler.remove_job(job_id)
+                            print(f"[LOG] ✓ Removed job {job_id} from scheduler")
+                        except Exception as e:
+                            print(f"[LOG] Could not remove job {job_id} from scheduler (may have already completed): {str(e)}")
+                        # Also try to remove any reminder job tied to this job_id
+                        try:
+                            reminder_id = f"reminder_{job_id}"
+                            scheduler.remove_job(reminder_id)
+                            print(f"[LOG] ✓ Removed reminder job {reminder_id} from scheduler")
+                        except Exception as e:
+                            print(f"[LOG] Could not remove reminder job {reminder_id}: {str(e)}")
+        
+        # Now update database to clear activeJobs and reset status
         result = tasks_collection.update_many(
             {"id": {"$in": tasks.tasks}, "email": current_user.get("email")},
             {

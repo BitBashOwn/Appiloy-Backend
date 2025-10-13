@@ -75,6 +75,8 @@ async def send_commands_to_devices(device_ids, command):
             "sender": WORKER_ID,
             "timestamp": int(time.time()),
         }
+        # LOG: Verify command fields before sending to Redis
+        print(f"[COMMAND-ROUTER-DEBUG] Sending to {device_id} - method: {command.get('method')}, dailyTarget: {command.get('dailyTarget')}, dayIndex: {command.get('dayIndex')}")
         redis_client.publish(GLOBAL_COMMAND_CHANNEL, json.dumps(message))
 
     # Wait for responses with timeout
