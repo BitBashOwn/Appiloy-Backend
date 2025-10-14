@@ -2653,9 +2653,13 @@ async def send_command_to_devices(device_ids, command):
                                 if target_input_name in block:
                                     block[target_input_name] = True
                                     if method_value == 9:
-                                        # Use randomized warmup duration from command, fallback to 60 minutes
+                                        # Use randomized warmup parameters from command
                                         warmup_duration = command.get("warmupDuration", 60)
+                                        max_likes = command.get("maxLikes", 10)
+                                        max_comments = command.get("maxComments", 5)
                                         block["warmupDuration"] = warmup_duration
+                                        block["maxLikes"] = max_likes
+                                        block["maxComments"] = max_comments
                                     logger.info(f"[METHOD-ENABLE] Enabled '{target_input_name}' in legacy inputs")
         
         # Also modify newInputs format (account-wise structure)
@@ -2685,9 +2689,13 @@ async def send_command_to_devices(device_ids, command):
                                                         if name == target_input_name:
                                                             block["input"] = True
                                                             if method_value == 9:
-                                                                # Use randomized warmup duration from command, fallback to 60 minutes
+                                                                # Use randomized warmup parameters from command
                                                                 warmup_duration = command.get("warmupDuration", 60)
+                                                                max_likes = command.get("maxLikes", 10)
+                                                                max_comments = command.get("maxComments", 5)
                                                                 block["warmupDuration"] = warmup_duration
+                                                                block["maxLikes"] = max_likes
+                                                                block["maxComments"] = max_comments
                                                             logger.info(f"[METHOD-ENABLE] Enabled '{target_input_name}' (account-wise)")
 
 
