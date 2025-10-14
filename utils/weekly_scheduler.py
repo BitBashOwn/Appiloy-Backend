@@ -104,38 +104,58 @@ def generate_weekly_targets(
     rest_days_range: Tuple[int, int],
     no_two_high_rule: Tuple[int, int],
     method: int,
-    rest_day_likes_range: Tuple[int, int] = (5, 15),
-    rest_day_comments_range: Tuple[int, int] = (2, 8),
+    rest_day_likes_range: Tuple[int, int] = (4, 10),
+    rest_day_comments_range: Tuple[int, int] = (1, 3),
     rest_day_duration_range: Tuple[int, int] = (30, 120),
 ) -> List[Dict]:
     """
     Generate a 7-day schedule list of dicts: {dayIndex, target, isRest, method, maxLikes, maxComments, warmupDuration}.
 
     Strategy:
-    - Randomly choose number of rest days within provided range
+    - Always ensure exactly 1 off day (no tasks scheduled)
+    - Randomly choose number of rest days within provided range (excluding the off day)
     - Allocate total follows randomly within bounds across active days
     - Apply 'no two high days' rule
     - Keep totals within weekly range
     - For rest days: assign method 9 (Warmup) with randomized likes/comments/duration ranges
     - For active days: assign method 1 (70%) or 4 (30%) randomly
+    - For off days: assign method 0 (No tasks)
     """
     min_week, max_week = follow_weekly_range
     min_rest, max_rest = rest_days_range
     high_day_threshold, follow_threshold = no_two_high_rule
 
-    # Choose rest days
-    rest_days_count = random.randint(max(0, min_rest), max(0, max_rest))
-    rest_indices = set(_pick_rest_days(rest_days_count))
+    # Always ensure exactly 1 off day (no tasks)
+    off_day = random.randint(0, 6)
+    
+    # Choose rest days (excluding the off day) respecting provided range
+    available_for_rest = [d for d in range(7) if d != off_day]
+    max_possible_rest = len(available_for_rest)
+    rest_min = max(0, min_rest)
+    rest_max = min(max(0, max_rest), max_possible_rest)
+    if rest_min > rest_max:
+        rest_min = rest_max
+    rest_days_count = random.randint(rest_min, rest_max) if rest_max >= 0 else 0
+    rest_indices = set(random.sample(available_for_rest, min(rest_days_count, max_possible_rest)))
 
     # Determine active days and bounds
     bounds = calculate_daily_bounds(follow_weekly_range, rest_days_range, no_two_high_rule)
     daily_min = bounds["daily_min"]
     daily_max = bounds["daily_max"]
-    active_days = 7 - len(rest_indices)
+    # Effective active days exclude rest days and the mandatory off day
+    active_days = 7 - len(rest_indices) - 1
     active_days = max(1, active_days)
 
-    # Pick weekly total inside range with slight bias to middle
-    target_week_total = random.randint(min_week, max_week)
+    # Pick weekly total inside achievable range
+    max_total = active_days * max(1, daily_max)
+    min_total = active_days * max(0, daily_min)
+    achievable_min = max(min_week, min_total)
+    achievable_max = min(max_week, max_total)
+    if achievable_min > achievable_max:
+        # If requested min cannot be met with current constraints, clamp to achievable_max
+        target_week_total = achievable_max
+    else:
+        target_week_total = random.randint(achievable_min, achievable_max)
 
     # Seed active day targets at daily_min; remaining to distribute
     active_targets = [daily_min for _ in range(active_days)]
@@ -159,7 +179,16 @@ def generate_weekly_targets(
     schedule = []
     active_iter = iter(active_targets)
     for d in range(7):
-        if d in rest_indices:
+        if d == off_day:
+            # Off day: no tasks scheduled
+            schedule.append({
+                "dayIndex": d, 
+                "target": 0, 
+                "isRest": False, 
+                "isOff": True,
+                "method": 0
+            })
+        elif d in rest_indices:
             # Rest day: method 9 (Warmup) with randomized likes, comments, and duration
             max_likes = random.randint(rest_day_likes_range[0], rest_day_likes_range[1])
             max_comments = random.randint(rest_day_comments_range[0], rest_day_comments_range[1])
@@ -168,6 +197,7 @@ def generate_weekly_targets(
                 "dayIndex": d, 
                 "target": 0, 
                 "isRest": True, 
+                "isOff": False,
                 "method": 9,
                 "maxLikes": max_likes,
                 "maxComments": max_comments,
@@ -180,6 +210,7 @@ def generate_weekly_targets(
                 "dayIndex": d, 
                 "target": next(active_iter), 
                 "isRest": False,
+                "isOff": False,
                 "method": random_method
             })
 
@@ -200,6 +231,11 @@ def validate_weekly_plan(
     if len(generated_schedule) != 7:
         raise ValueError("Generated schedule must have exactly 7 days")
 
+    # Check that there's exactly one off day
+    off_count = sum(1 for day in generated_schedule if day.get("isOff"))
+    if off_count != 1:
+        raise ValueError(f"Expected exactly 1 off day, found {off_count}")
+
     total = sum(day.get("target", 0) for day in generated_schedule)
     if not (min_week <= total <= max_week):
         raise ValueError(f"Weekly total {total} out of range [{min_week}, {max_week}]")
@@ -218,3 +254,64 @@ def validate_weekly_plan(
         prev_high = is_high
 
 
+
+
+def generate_per_account_plans(
+    schedule: List[Dict],
+    accounts: List[str],
+    follow_weekly_range: Tuple[int, int],
+    no_two_high_rule: Tuple[int, int],
+) -> Dict[str, List[int]]:
+    """
+    For each account, generate a 7-length list of daily follow targets aligned with the provided schedule.
+
+    - Off and rest days receive 0
+    - Active days receive a randomized distribution of a per-account weekly total
+    - Applies the no-two-high-days rule per account
+    """
+    if not accounts:
+        return {}
+
+    min_week, max_week = follow_weekly_range
+    high_day_threshold, follow_threshold = no_two_high_rule
+
+    # Identify active day indices from the schedule
+    active_indices = [d.get("dayIndex") for d in schedule if not d.get("isRest") and not d.get("isOff")]
+    active_indices = [i for i in active_indices if isinstance(i, int)]
+    min_active_days = max(1, len(active_indices))
+
+    # Compute a reasonable base per-day cap similar to calculate_daily_bounds
+    # Then introduce per-account variability to avoid identical caps
+    per_day_cap_base = max(1, min(30, max_week // min_active_days))
+
+    per_account: Dict[str, List[int]] = {}
+
+    for username in accounts:
+        # Pick a random weekly total per account (independent to diversify)
+        account_week_total = random.randint(min_week, max_week)
+        # Initialize all days to 0
+        daily_targets = [0 for _ in range(7)]
+
+        # Per-account cap: add +/- 20-30% noise to base
+        per_account_cap = int(per_day_cap_base * random.uniform(0.8, 1.3))
+        per_account_cap = max(1, min(30, per_account_cap))
+
+        # Distribute across active days with per-account caps
+        remaining = account_week_total
+        # Prime with zeros across active days
+        while remaining > 0 and active_indices:
+            idx = random.choice(active_indices)
+            if daily_targets[idx] < per_account_cap:
+                daily_targets[idx] += 1
+                remaining -= 1
+            else:
+                # If all active days are at cap, break to avoid infinite loop
+                if all(daily_targets[i] >= per_account_cap for i in active_indices):
+                    break
+
+        # Apply no-two-high rule per account
+        # Build ordered list of targets by day 0..6
+        adjusted = _apply_no_two_high_rule(daily_targets, high_day_threshold, follow_threshold)
+        per_account[username] = adjusted
+
+    return per_account

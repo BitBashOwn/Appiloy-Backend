@@ -1689,8 +1689,8 @@ async def send_command(
 
                 # Generate and validate schedule
                 # Default ranges for rest day likes, comments, and duration (can be made configurable later)
-                rest_day_likes_range = (5, 15)  # 5-15 likes per rest day
-                rest_day_comments_range = (2, 8)  # 2-8 comments per rest day
+                rest_day_likes_range = (4, 10)  # 4-10 likes per rest day
+                rest_day_comments_range = (1, 3)  # 1-3 comments per rest day
                 rest_day_duration_range = (30, 120)  # 30-120 minutes per rest day
                 
                 generated = generate_weekly_targets(
@@ -1725,6 +1725,7 @@ async def send_command(
                         # Build readable schedule table with actual calendar dates
                         day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
                         method_names = {
+                            0: "Off Day",
                             1: "Follow Suggestions",
                             4: "Unfollow Non-Followers",
                             9: "Warmup"
@@ -1735,8 +1736,9 @@ async def send_command(
                         for d in generated:
                             idx = int(d.get("dayIndex", 0))
                             is_rest = bool(d.get("isRest", False))
+                            is_off = bool(d.get("isOff", False))
                             target = int(d.get("target", 0))
-                            day_method = int(d.get("method", 9 if is_rest else 1))
+                            day_method = int(d.get("method", 0 if is_off else (9 if is_rest else 1)))
                             method_label = method_names.get(day_method, f"method {day_method}")
                             
                             if test_mode:
@@ -1757,6 +1759,7 @@ async def send_command(
                             entry = {
                                 "dayIndex": idx,
                                 "isRest": is_rest,
+                                "isOff": is_off,
                                 "target": target,
                                 "method": day_method,
                                 "methodLabel": method_label,
@@ -1769,16 +1772,58 @@ async def send_command(
                                 entry["warmupDuration"] = int(d.get("warmupDuration", 60))
                             planned_schedule.append(entry)
                         
-                        # Build summary lines with planned start times
+                        # --- Per-account weekly plans (randomized per account) ---
+                        per_account_plans = {}
+                        account_usernames = []
+                        try:
+                            new_inputs_obj = command.get("newInputs")
+                            if isinstance(new_inputs_obj, dict):
+                                wrapper_inputs = new_inputs_obj.get("inputs", [])
+                                for wrapper_entry in (wrapper_inputs or []):
+                                    inner_inputs = wrapper_entry.get("inputs", [])
+                                    for node in (inner_inputs or []):
+                                        if isinstance(node, dict) and node.get("type") == "instagrmFollowerBotAcountWise":
+                                            for acc in (node.get("Accounts") or []):
+                                                uname = acc.get("username")
+                                                if isinstance(uname, str):
+                                                    account_usernames.append(uname)
+                        except Exception:
+                            account_usernames = []
+
+                        if account_usernames:
+                            try:
+                                from utils.weekly_scheduler import generate_per_account_plans
+                                per_account_plans = generate_per_account_plans(
+                                    generated,
+                                    account_usernames,
+                                    (int(follow_weekly_range[0]), int(follow_weekly_range[1])),
+                                    (int(no_two_high_rule[0]), int(no_two_high_rule[1])),
+                                )
+                            except Exception as e:
+                                logger.warning(f"[WEEKLY] Failed to build per-account plans: {e}")
+                                per_account_plans = {}
+
+                        # Build summary lines with planned start times (show per-account caps on active days; no global headline)
                         lines = []
                         for p in planned_schedule:
                             actual_day_name = day_names[p["start_local"].weekday()]
                             date_str = p["start_local"].strftime("%b %d")
                             time_str = p["start_local"].strftime("%H:%M")
-                            if p["isRest"]:
+                            if p["isOff"]:
+                                label = f"{actual_day_name} {date_str}: Off day - No tasks scheduled"
+                            elif p["isRest"]:
                                 label = f"{actual_day_name} {date_str} {time_str}: Warmup day ({p['methodLabel']}) - {p.get('maxLikes', 10)} likes, {p.get('maxComments', 5)} comments, {p.get('warmupDuration', 60)}min"
                             else:
-                                label = f"{actual_day_name} {date_str} {time_str}: {p['target']} follows ({p['methodLabel']})"
+                                # Per-account breakdown
+                                per_account_str = ""
+                                if per_account_plans and account_usernames:
+                                    di = int(p.get("dayIndex", 0))
+                                    parts = []
+                                    for uname in account_usernames:
+                                        v = (per_account_plans.get(uname) or [0]*7)[di]
+                                        parts.append(f"{uname}: {v}")
+                                    per_account_str = f" | Accounts: " + ", ".join(parts)
+                                label = f"{actual_day_name} {date_str} {time_str}: {p['methodLabel']}{per_account_str}"
                             lines.append(label)
                         
                         test_mode_indicator = "TEST MODE (10-min gaps)\n" if test_mode else ""
@@ -1884,11 +1929,65 @@ async def send_command(
                 notify_daily = bool(command.get("notifyDaily", False))
                 total_target = 0
                 active_days = 0
+                # Extract account usernames once for per-account plan mutation
+                account_usernames_for_caps = []
+                try:
+                    new_inputs_obj_caps = command.get("newInputs")
+                    if isinstance(new_inputs_obj_caps, dict):
+                        wrapper_inputs_caps = new_inputs_obj_caps.get("inputs", [])
+                        for wrapper_entry_caps in (wrapper_inputs_caps or []):
+                            inner_inputs_caps = wrapper_entry_caps.get("inputs", [])
+                            for node_caps in (inner_inputs_caps or []):
+                                if isinstance(node_caps, dict) and node_caps.get("type") == "instagrmFollowerBotAcountWise":
+                                    for acc_caps in (node_caps.get("Accounts") or []):
+                                        uname_caps = acc_caps.get("username")
+                                        if isinstance(uname_caps, str):
+                                            account_usernames_for_caps.append(uname_caps)
+                except Exception:
+                    account_usernames_for_caps = []
+
+                # Fallback: if no usernames found via newInputs, derive from legacy inputs
+                if not account_usernames_for_caps:
+                    try:
+                        legacy_inputs_arr = command.get("inputs")
+                        if isinstance(legacy_inputs_arr, list):
+                            for acct in legacy_inputs_arr:
+                                uname_legacy = acct.get("username")
+                                if isinstance(uname_legacy, str):
+                                    account_usernames_for_caps.append(uname_legacy)
+                    except Exception:
+                        pass
+
+                # Reuse same per-account plan if available; otherwise compute now
+                if account_usernames_for_caps:
+                    if 'per_account_plans' in locals() and per_account_plans:
+                        per_account_plans_caps = per_account_plans
+                    else:
+                        try:
+                            from utils.weekly_scheduler import generate_per_account_plans
+                            per_account_plans_caps = generate_per_account_plans(
+                                generated,
+                                account_usernames_for_caps,
+                                (int(follow_weekly_range[0]), int(follow_weekly_range[1])),
+                                (int(no_two_high_rule[0]), int(no_two_high_rule[1])),
+                            )
+                        except Exception as e:
+                            logger.warning(f"[WEEKLY] Fallback per-account plan compute failed: {e}")
+                            per_account_plans_caps = {}
+                else:
+                    per_account_plans_caps = {}
+
                 for p in planned_schedule:
                     day_index = int(p.get("dayIndex", 0))
                     target_count = int(p.get("target", 0))
                     is_rest = bool(p.get("isRest", False))
-                    day_method = int(p.get("method", 9 if is_rest else 1))
+                    is_off = bool(p.get("isOff", False))
+                    day_method = int(p.get("method", 0 if is_off else (9 if is_rest else 1)))
+                    
+                    # Skip off days - no tasks scheduled
+                    if is_off or day_method == 0:
+                        continue
+                    
                     total_target += target_count
                     if not is_rest:
                         active_days += 1
@@ -1908,7 +2007,8 @@ async def send_command(
                         "job_id": job_id,
                         # For device execution:
                         "dayIndex": day_index,
-                        "dailyTarget": target_count,  # App uses this to stop (0 for rest days)
+                        # Device should rely on per-account caps only
+                        "dailyTarget": 0,
                         "method": day_method,  # Randomly 1 or 4 for active days, 9 for rest days
                     })
                     
@@ -1923,6 +2023,110 @@ async def send_command(
                             "warmupDuration": warmup_duration
                         })
                     # Note: method 1 = Follow Suggestions, 4 = Unfollow Non-Followers, 9 = Warmup
+
+                    # Apply per-account caps into newInputs and legacy inputs for active days (method != 9)
+                    if day_method != 9 and account_usernames_for_caps and per_account_plans_caps:
+                        try:
+                            logger.info(f"[WEEKLY-CAPS] Applying per-account caps for day {day_index}, method {day_method}")
+                            logger.info(f"[WEEKLY-CAPS] Accounts: {account_usernames_for_caps}")
+                            logger.info(f"[WEEKLY-CAPS] Per-account plans available: {list(per_account_plans_caps.keys())}")
+                            
+                            adjusted_inputs = copy.deepcopy(job_command.get("newInputs"))
+                            def set_follow_daily_for_account(block, uname, v):
+                                if block.get("input") is True:
+                                    if "minFollowsDaily" in block:
+                                        block["minFollowsDaily"] = max(1, int(v) - 1)
+                                    if "maxFollowsDaily" in block:
+                                        block["maxFollowsDaily"] = int(v)
+                                    # Calculate dynamic hourly limits based on daily target
+                                    # Formula: min = daily * 0.2, max = daily * 0.5
+                                    min_hourly = max(1, int(int(v) * 0.2))
+                                    max_hourly = max(min_hourly + 1, int(int(v) * 0.5))
+                                    if "minFollowsPerHour" in block:
+                                        block["minFollowsPerHour"] = min_hourly
+                                    if "maxFollowsPerHour" in block:
+                                        block["maxFollowsPerHour"] = max_hourly
+
+                            if isinstance(adjusted_inputs, dict):
+                                inputs_arr = adjusted_inputs.get("inputs", [])
+                                for wrap in (inputs_arr or []):
+                                    inner = wrap.get("inputs", [])
+                                    for node in (inner or []):
+                                        if isinstance(node, dict) and node.get("type") == "instagrmFollowerBotAcountWise":
+                                            for acc in (node.get("Accounts") or []):
+                                                uname = acc.get("username")
+                                                if uname in account_usernames_for_caps:
+                                                    v = (per_account_plans_caps.get(uname) or [0]*7)[day_index]
+                                                    for blk in (acc.get("inputs") or []):
+                                                        # Only adjust the block matching the day's method
+                                                        name = blk.get("name") or ""
+                                                        if day_method == 1:
+                                                            if name in ("Follow from Notification Suggestions", "Follow from Profile Posts"):
+                                                                set_follow_daily_for_account(blk, uname, v)
+                                                        elif day_method == 4:
+                                                            # Tolerant detection: match by type or name prefix to avoid label drift
+                                                            is_unfollow_block = (
+                                                                (blk.get("type") == "toggleAndUnFollowInputs")
+                                                                or (name.startswith("Unfollow Non-Followers"))
+                                                            )
+                                                            if is_unfollow_block:
+                                                                # Force enable unfollow block for this per-day method
+                                                                blk["input"] = True
+                                                                # ⚠️ CRITICAL: Android expects "minFollowsDaily" NOT "minUnFollowsDaily"
+                                                                # Android reuses follow field names for unfollowing (quirk of the codebase)
+                                                                blk["minFollowsDaily"] = max(1, int(v) - 1)
+                                                                blk["maxFollowsDaily"] = int(v)
+                                                                # Calculate dynamic hourly limits based on daily target
+                                                                # Formula: min = daily * 0.2, max = daily * 0.5
+                                                                min_hourly = max(1, int(int(v) * 0.2))
+                                                                max_hourly = max(min_hourly + 1, int(int(v) * 0.5))
+                                                                blk["minFollowsPerHour"] = min_hourly
+                                                                blk["maxFollowsPerHour"] = max_hourly
+                            job_command["newInputs"] = adjusted_inputs
+
+                            # Also update legacy structure `inputs` so the device (which reads legacy) gets the same per-account caps
+                            adjusted_legacy = copy.deepcopy(job_command.get("inputs"))
+                            if isinstance(adjusted_legacy, list):
+                                for acct in adjusted_legacy:
+                                    uname_legacy = acct.get("username")
+                                    if uname_legacy in account_usernames_for_caps:
+                                        v = (per_account_plans_caps.get(uname_legacy) or [0]*7)[day_index]
+                                        blocks = acct.get("inputs")
+                                        if isinstance(blocks, list):
+                                            for blk in blocks:
+                                                # Legacy blocks have method name as key with boolean true/false and the numeric fields beside
+                                                # For method 1: check if block has the key (regardless of current value)
+                                                if day_method == 1 and "Follow from Notification Suggestions" in blk:
+                                                    # Force enable for this method
+                                                    blk["Follow from Notification Suggestions"] = True
+                                                    # Apply caps
+                                                    blk["minFollowsDaily"] = max(1, int(v) - 1)
+                                                    blk["maxFollowsDaily"] = int(v)
+                                                    # Calculate dynamic hourly limits based on daily target
+                                                    # Formula: min = daily * 0.2, max = daily * 0.5
+                                                    min_hourly = max(1, int(int(v) * 0.2))
+                                                    max_hourly = max(min_hourly + 1, int(int(v) * 0.5))
+                                                    blk["minFollowsPerHour"] = min_hourly
+                                                    blk["maxFollowsPerHour"] = max_hourly
+                                                # For method 4: check if block has the key (regardless of current value)
+                                                elif day_method == 4 and "Unfollow Non-Followers" in blk:
+                                                    # Force enable for this method
+                                                    blk["Unfollow Non-Followers"] = True
+                                                    # ⚠️ CRITICAL: Android expects "minFollowsDaily" NOT "minUnFollowsDaily"
+                                                    # Android reuses follow field names for unfollowing (quirk of the codebase)
+                                                    blk["minFollowsDaily"] = max(1, int(v) - 1)
+                                                    blk["maxFollowsDaily"] = int(v)
+                                                    # Calculate dynamic hourly limits based on daily target
+                                                    # Formula: min = daily * 0.2, max = daily * 0.5
+                                                    min_hourly = max(1, int(int(v) * 0.2))
+                                                    max_hourly = max(min_hourly + 1, int(int(v) * 0.5))
+                                                    blk["minFollowsPerHour"] = min_hourly
+                                                    blk["maxFollowsPerHour"] = max_hourly
+                                                    logger.info(f"[WEEKLY-CAPS] Set unfollow caps for {uname_legacy}: daily={int(v)}, hourly=({min_hourly}-{max_hourly})")
+                                                # Extend here for other methods if needed
+                            job_command["inputs"] = adjusted_legacy
+                        except Exception as e:
+                            logger.warning(f"[WEEKLY] Failed to inject per-account caps: {e}")
 
                     # Add job to scheduler
                     try:
@@ -2515,6 +2719,27 @@ async def send_command_to_devices(device_ids, command):
                                     block["minFollowsDaily"] = max(1, target_cap - 1)  # min = max - 1
                                 if "maxFollowsDaily" in block:
                                     block["maxFollowsDaily"] = target_cap
+                                # Calculate dynamic hourly limits based on daily target
+                                # Formula: min = daily * 0.2, max = daily * 0.5 (allows reaching target in 2-5 hours)
+                                min_hourly = max(1, int(target_cap * 0.2))
+                                max_hourly = max(min_hourly + 1, int(target_cap * 0.5))
+                                if "minFollowsPerHour" in block:
+                                    block["minFollowsPerHour"] = min_hourly
+                                if "maxFollowsPerHour" in block:
+                                    block["maxFollowsPerHour"] = max_hourly
+
+                        def set_unfollow_daily(block):
+                            if isinstance(block, dict):
+                                # ⚠️ CRITICAL: Android expects "minFollowsDaily" NOT "minUnFollowsDaily"
+                                # Android reuses follow field names for unfollowing (quirk of the codebase)
+                                block["minFollowsDaily"] = max(1, target_cap - 1)  # min = max - 1
+                                block["maxFollowsDaily"] = target_cap
+                                # Calculate dynamic hourly limits based on daily target
+                                # Formula: min = daily * 0.2, max = daily * 0.5 (allows reaching target in 2-5 hours)
+                                min_hourly = max(1, int(target_cap * 0.2))
+                                max_hourly = max(min_hourly + 1, int(target_cap * 0.5))
+                                block["minFollowsPerHour"] = min_hourly
+                                block["maxFollowsPerHour"] = max_hourly
 
                         # Handle dict structure (new format from command.newInputs)
                         if isinstance(adjusted, dict) and "inputs" in adjusted:
@@ -2538,14 +2763,18 @@ async def send_command_to_devices(device_ids, command):
                                                     for block in acc_inputs:
                                                         name = block.get("name") or ""
                                                         enabled = block.get("input") is True
-                                                        if enabled and name in (
-                                                            "Follow from Notification Suggestions",
-                                                            "Follow from Profile Followers List",
-                                                            "Follow from Post",
-                                                            "Follow from Profile Posts",
-                                                            "Unfollow Non-Followers",
-                                                        ):
-                                                            set_follow_daily(block)
+                                                        if enabled:
+                                                            # Method 4 = Unfollow Non-Followers
+                                                            if method_local == 4 and name == "Unfollow Non-Followers":
+                                                                set_unfollow_daily(block)
+                                                            # Methods 1, 2, 3, 6 = Follow methods
+                                                            elif method_local in [1, 2, 3, 6] and name in (
+                                                                "Follow from Notification Suggestions",
+                                                                "Follow from Profile Followers List",
+                                                                "Follow from Post",
+                                                                "Follow from Profile Posts",
+                                                            ):
+                                                                set_follow_daily(block)
                                         else:
                                             # Legacy structure: blocks directly in inputs
                                             block = node
@@ -2554,14 +2783,18 @@ async def send_command_to_devices(device_ids, command):
                                                 block.get("input") is True
                                                 or block.get("Follow from Notification Suggestions") is True
                                             )
-                                            if enabled_toggle and name in (
-                                                "Follow from Notification Suggestions",
-                                                "Follow from Profile Followers List",
-                                                "Follow from Post",
-                                                "Follow from Profile Posts",
-                                                "Unfollow Non-Followers",
-                                            ):
-                                                set_follow_daily(block)
+                                            if enabled_toggle:
+                                                # Method 4 = Unfollow Non-Followers
+                                                if method_local == 4 and name == "Unfollow Non-Followers":
+                                                    set_unfollow_daily(block)
+                                                # Methods 1, 2, 3, 6 = Follow methods
+                                                elif method_local in [1, 2, 3, 6] and name in (
+                                                    "Follow from Notification Suggestions",
+                                                    "Follow from Profile Followers List",
+                                                    "Follow from Post",
+                                                    "Follow from Profile Posts",
+                                                ):
+                                                    set_follow_daily(block)
 
                         # Re-wrap if it was originally a dict
                         if is_dict_wrapper_job:
@@ -2734,8 +2967,8 @@ async def send_command_to_devices(device_ids, command):
                                         method = int(weekly_data.get("method", 1))
                                         
                                         # Use same default ranges for auto-renewal
-                                        rest_day_likes_range = (5, 15)  # 5-15 likes per rest day
-                                        rest_day_comments_range = (2, 8)  # 2-8 comments per rest day
+                                        rest_day_likes_range = (4, 10)  # 4-10 likes per rest day
+                                        rest_day_comments_range = (1, 3)  # 1-3 comments per rest day
                                         rest_day_duration_range = (30, 120)  # 30-120 minutes per rest day
                                         
                                         generated = generate_weekly_targets(
@@ -2808,7 +3041,12 @@ async def send_command_to_devices(device_ids, command):
                                             day_index_new = int(day.get("dayIndex", 0))
                                             target_count = int(day.get("target", 0))
                                             is_rest = bool(day.get("isRest", False))
-                                            day_method = int(day.get("method", 9 if is_rest else 1))
+                                            is_off = bool(day.get("isOff", False))
+                                            day_method = int(day.get("method", 0 if is_off else (9 if is_rest else 1)))
+                                            
+                                            # Skip off days - no tasks scheduled
+                                            if is_off or day_method == 0:
+                                                continue
                                             
                                             day_local = next_week_start + timedelta(days=day_index_new)
                                             start_window_start = day_local.replace(hour=11, minute=0, second=0, microsecond=0)
@@ -2828,7 +3066,8 @@ async def send_command_to_devices(device_ids, command):
                                                     "task_id": task_id,
                                                     "job_id": job_id_new,
                                                     "dayIndex": day_index_new,
-                                                    "dailyTarget": target_count,
+                                                    # Device should rely on per-account caps only
+                                                    "dailyTarget": 0,
                                                     "method": day_method,
                                                     "inputs": inputs_for_renewal,
                                                     "newInputs": inputs_for_renewal,
@@ -2908,13 +3147,14 @@ async def send_command_to_devices(device_ids, command):
                                                 
                                                 if server_id_notify and channel_id_notify:
                                                     day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-                                                    method_names = {1: "Follow Suggestions", 4: "Unfollow Non-Followers", 9: "Warmup"}
+                                                    method_names = {0: "Off Day", 1: "Follow Suggestions", 4: "Unfollow Non-Followers", 9: "Warmup"}
                                                     lines = []
                                                     for d in generated:
                                                         idx = int(d.get("dayIndex", 0))
                                                         is_rest_d = bool(d.get("isRest", False))
+                                                        is_off_d = bool(d.get("isOff", False))
                                                         target = int(d.get("target", 0))
-                                                        day_method_d = int(d.get("method", 9 if is_rest_d else 1))
+                                                        day_method_d = int(d.get("method", 0 if is_off_d else (9 if is_rest_d else 1)))
                                                         method_label = method_names.get(day_method_d, f"method {day_method_d}")
                                                         
                                                         # Calculate actual calendar date for this day
@@ -2922,17 +3162,72 @@ async def send_command_to_devices(device_ids, command):
                                                         actual_day_name = day_names[actual_date.weekday()]
                                                         date_str = actual_date.strftime("%b %d")  # e.g., "Oct 14"
                                                         
-                                                        if is_rest_d:
+                                                        if is_off_d:
+                                                            label = f"{actual_day_name} {date_str}: Off day - No tasks scheduled"
+                                                        elif is_rest_d:
                                                             label = f"{actual_day_name} {date_str}: Warmup day ({method_label})"
                                                         else:
-                                                            label = f"{actual_day_name} {date_str}: {target} follows ({method_label})"
+                                                            # Per-account breakdown for renewal summary
+                                                            per_acc_parts = []
+                                                            try:
+                                                                # Build accounts list similar to above (inputs_for_renewal)
+                                                                accounts_notify = []
+                                                                new_inputs_notify = inputs_for_renewal
+                                                                if isinstance(new_inputs_notify, dict):
+                                                                    wrap_notify = new_inputs_notify.get("inputs", [])
+                                                                    for wrap_entry in (wrap_notify or []):
+                                                                        inner_notify = wrap_entry.get("inputs", [])
+                                                                        for node_n in (inner_notify or []):
+                                                                            if isinstance(node_n, dict) and node_n.get("type") == "instagrmFollowerBotAcountWise":
+                                                                                for acc_n in (node_n.get("Accounts") or []):
+                                                                                    uname_n = acc_n.get("username")
+                                                                                    if isinstance(uname_n, str):
+                                                                                        accounts_notify.append(uname_n)
+                                                                if accounts_notify:
+                                                                    from utils.weekly_scheduler import generate_per_account_plans
+                                                                    per_acc_notify = generate_per_account_plans(
+                                                                        generated,
+                                                                        accounts_notify,
+                                                                        (int(follow_weekly_range[0]), int(follow_weekly_range[1])),
+                                                                        (int(no_two_high_rule[0]), int(no_two_high_rule[1])),
+                                                                    )
+                                                                    for uname in accounts_notify:
+                                                                        v = (per_acc_notify.get(uname) or [0]*7)[idx]
+                                                                        per_acc_parts.append(f"{uname}: {v}")
+                                                            except Exception:
+                                                                pass
+                                                            label = f"{actual_day_name} {date_str}: {method_label}"
+                                                            if per_acc_parts:
+                                                                label += f" | Accounts: {', '.join(per_acc_parts)}"
                                                         lines.append(label)
                                                     
+                                                    # Build per-account breakdown for renewal (reuse same computed plan)
+                                                    per_account_lines = []
+                                                    try:
+                                                        # Use the same account list and per-account plan if available
+                                                        accounts_notify = []
+                                                        per_acc_notify = {}
+                                                        try:
+                                                            accounts_notify = account_usernames if account_usernames else accounts_notify
+                                                        except NameError:
+                                                            pass
+                                                        try:
+                                                            per_acc_notify = per_account_plans if per_account_plans else per_acc_notify
+                                                        except NameError:
+                                                            pass
+                                                        if accounts_notify and per_acc_notify:
+                                                            for uname in accounts_notify:
+                                                                plan = per_acc_notify.get(uname) or [0]*7
+                                                                per_account_lines.append(f"{uname}: {sum(plan)} follows/week")
+                                                    except Exception:
+                                                        per_account_lines = []
+
                                                     summary = (
                                                         f"🔄 Weekly plan AUTO-RENEWED: {task_id}\n"
                                                         f"🧩 Task: {task_meta.get('taskName', 'Unknown Task')}\n"
                                                         f"🕰️ Next week start: {next_week_start.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()}\n\n"
                                                         + "\n".join(lines)
+                                                        + ("\n\nAccounts:\n" + "\n".join(per_account_lines) if per_account_lines else "")
                                                     )
                                                     
                                                     from Bot.discord_bot import get_bot_instance
