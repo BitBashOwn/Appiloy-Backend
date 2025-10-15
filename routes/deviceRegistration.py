@@ -168,6 +168,13 @@ class StopTaskCommandRequest(BaseModel):
     Task_ids: List[str]
 
 
+class PauseTaskCommandRequest(BaseModel):
+
+    command: dict
+
+    Task_ids: List[str]
+
+
 
 
 
@@ -729,6 +736,236 @@ async def stop_task(
 
         )
 
+
+@device_router.post("/pause_task")
+
+async def pause_task(
+
+    request: PauseTaskCommandRequest, current_user: dict = Depends(get_current_user)
+
+):
+
+    command = request.command
+
+    task_ids = request.Task_ids
+
+    time_zone = request.command.get("timeZone", "UTC")
+
+    print(f"[LOG] Received pause command: {command}")
+
+    print(f"[LOG] Task IDs: {task_ids}")
+
+
+
+    # Validate request
+
+    if not task_ids:
+
+        return JSONResponse(status_code=400, content={"message": "No tasks provided"})
+
+
+
+    # Validate command is pause automation
+
+    if command.get("appName") != "pause automation":
+
+        return JSONResponse(status_code=400, content={"message": "Invalid command - must be 'pause automation'"})
+
+
+
+    try:
+
+        # Get current time in the specified timezone
+
+        user_tz = pytz.timezone(time_zone)
+
+        current_time = datetime.now(user_tz)
+
+        print(f"[LOG] Current time: {current_time}")
+
+
+
+        # Collect all tasks in a single query
+
+        tasks = list(tasks_collection.find({"id": {"$in": task_ids}}))
+
+
+
+        if not tasks:
+
+            return JSONResponse(status_code=404, content={"message": "No tasks found"})
+
+
+
+        # Filter for only RUNNING tasks (pause only works on running tasks)
+
+        running_tasks = []
+
+        running_task_ids = []
+
+        all_device_ids = set()
+
+
+
+        for task in tasks:
+
+            task_id = task.get("id")
+
+            task_name = task.get("taskName", "Unknown Task")
+
+            task_status = task.get("status", "")
+
+
+
+            print(f"[LOG] Task {task_id} ({task_name}) status: {task_status}")
+
+
+
+            # Only pause tasks that are currently running
+
+            if task_status == "running":
+
+                running_tasks.append(task)
+
+                running_task_ids.append(task_id)
+
+                # Collect device IDs from this running task
+
+                device_ids = task.get("deviceIds", [])
+
+                all_device_ids.update(device_ids)
+
+                print(f"[LOG] Task {task_id} is running, adding devices: {device_ids}")
+
+
+
+        # If no running tasks found
+
+        if not running_tasks:
+
+            return JSONResponse(
+
+                status_code=400, 
+
+                content={"message": "No selected tasks are currently running"}
+
+            )
+
+
+
+        print(f"[LOG] Found {len(running_tasks)} running tasks to pause")
+
+        print(f"[LOG] Devices to target: {list(all_device_ids)}")
+
+
+
+        # Get device info for all devices in a single query
+
+        devices = list(device_collection.find({"id": {"$in": list(all_device_ids)}}))
+
+        device_names = {
+
+            device.get("id"): device.get("deviceName", device.get("id"))
+
+            for device in devices
+
+        }
+
+
+
+        # Check which devices are connected
+
+        connected_devices = []
+
+        not_connected_devices = set()
+
+
+
+        for device_id in all_device_ids:
+
+            check = is_device_connected(device_id)
+
+            device_name = device_names.get(device_id, device_id)
+
+
+
+            if check:
+
+                print(f"[LOG] Device {device_id} ({device_name}) is connected.")
+
+                connected_devices.append(device_id)
+
+            else:
+
+                print(f"[LOG] Device {device_id} ({device_name}) is NOT connected.")
+
+                not_connected_devices.add(device_id)
+
+
+
+        # If no devices are connected
+
+        if not connected_devices:
+
+            print("[LOG] No connected devices found for running tasks.")
+
+            return JSONResponse(
+
+                status_code=400,
+
+                content={"message": "No devices are currently connected for the running tasks"}
+
+            )
+
+        else:
+
+            # Send pause command to connected devices
+
+            print("[LOG] Sending pause command to connected devices.")
+
+            print(f"[LOG] Connected devices: {connected_devices}")
+
+            result = await send_commands_to_devices(connected_devices, command)
+
+            print(f"[LOG] Pause command sent result: {result}")
+
+
+
+        # Return success response
+
+        return {
+
+            "message": "Pause command sent successfully",
+
+            "tasks_paused": len(running_tasks),
+
+            "total_tasks": len(task_ids),
+
+            "running_tasks": len(running_tasks),
+
+            "connected_devices": len(connected_devices),
+
+            "not_connected_devices": len(not_connected_devices)
+
+        }
+
+
+
+    except Exception as e:
+
+        print(f"[ERROR] General error in pause_task: {str(e)}")
+
+        import traceback
+
+
+
+        traceback.print_exc()
+
+        return JSONResponse(
+
+            status_code=500, content={"message": f"An error occurred: {str(e)}"}
+
+        )
 
 
 
@@ -1726,9 +1963,9 @@ async def send_command(
                         day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
                         method_names = {
                             0: "Off Day",
-                            1: "Follow Suggestions",
-                            4: "Unfollow Non-Followers",
-                            9: "Warmup"
+                            1: "Method 1: Follow Suggestions",
+                            4: "Method 4: Unfollow Non-Followers",
+                            9: "Method 9: Warmup"
                         }
                         
                         # Compute planned start/end times once and reuse for summary and scheduling
@@ -1812,7 +2049,7 @@ async def send_command(
                             if p["isOff"]:
                                 label = f"{actual_day_name} {date_str}: Off day - No tasks scheduled"
                             elif p["isRest"]:
-                                label = f"{actual_day_name} {date_str} {time_str}: Warmup day ({p['methodLabel']}) - {p.get('maxLikes', 10)} likes, {p.get('maxComments', 5)} comments, {p.get('warmupDuration', 60)}min"
+                                label = f"{actual_day_name} {date_str} {time_str}: {p['methodLabel']} - {p.get('maxLikes', 10)} likes, {p.get('maxComments', 5)} comments, {p.get('warmupDuration', 60)}min"
                             else:
                                 # Per-account breakdown
                                 per_account_str = ""
@@ -2192,9 +2429,9 @@ async def send_command(
                         if reminder_time_utc > datetime.now(pytz.UTC):
                             reminder_job_id = f"reminder_{job_id}"
                             method_names_reminder = {
-                                1: "Follow Suggestions",
-                                4: "Unfollow Non-Followers",
-                                9: "Warmup"
+                                1: "Method 1: Follow Suggestions",
+                                4: "Method 4: Unfollow Non-Followers",
+                                9: "Method 9: Warmup"
                             }
                             method_label_reminder = method_names_reminder.get(day_method, f"method {day_method}")
                             if is_rest:
@@ -2202,8 +2439,9 @@ async def send_command(
                                 max_likes = int(p.get("maxLikes", 10))
                                 max_comments = int(p.get("maxComments", 5))
                                 warmup_duration = int(p.get("warmupDuration", 60))
-                                activity_text = f"Warmup day ({method_label_reminder}) - {max_likes} likes, {max_comments} comments, {warmup_duration}min"
+                                activity_text = f"{method_label_reminder} - {max_likes} likes, {max_comments} comments, {warmup_duration}min"
                             else:
+                                activity_text = f"{target_count} follows ({method_label_reminder})"
                                 activity_text = f"{target_count} follows ({method_label_reminder})"
                             
                             try:
@@ -3124,9 +3362,9 @@ async def send_command_to_devices(device_ids, command):
                                                 reminder_time_utc_renewal = start_time_utc - timedelta(hours=1)
                                                 if reminder_time_utc_renewal > datetime.now(pytz.UTC):
                                                     reminder_job_id_renewal = f"reminder_{job_id_new}"
-                                                    method_names_renewal = {1: "Follow Suggestions", 4: "Unfollow Non-Followers", 9: "Warmup"}
+                                                    method_names_renewal = {1: "Method 1: Follow Suggestions", 4: "Method 4: Unfollow Non-Followers", 9: "Method 9: Warmup"}
                                                     method_label_renewal = method_names_renewal.get(day_method, f"method {day_method}")
-                                                    activity_text_renewal = f"{target_count} follows ({method_label_renewal})" if not is_rest else f"Warmup day ({method_label_renewal})"
+                                                    activity_text_renewal = f"{target_count} follows ({method_label_renewal})" if not is_rest else f"{method_label_renewal}"
                                                     
                                                     try:
                                                         scheduler.add_job(
@@ -3173,7 +3411,7 @@ async def send_command_to_devices(device_ids, command):
                                                         if is_off_d:
                                                             label = f"{actual_day_name} {date_str}: Off day - No tasks scheduled"
                                                         elif is_rest_d:
-                                                            label = f"{actual_day_name} {date_str}: Warmup day ({method_label})"
+                                                            label = f"{actual_day_name} {date_str}: {method_label}"
                                                         else:
                                                             # Per-account breakdown for renewal summary
                                                             per_acc_parts = []
