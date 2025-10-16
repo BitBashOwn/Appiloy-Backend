@@ -2446,6 +2446,7 @@ async def send_command(
                 notify_daily = bool(command.get("notifyDaily", False))
                 total_target = 0
                 active_days = 0
+                first_job_scheduled = False  # Track if we've set nextRunTime yet
                 # Extract account usernames once for per-account plan mutation
                 account_usernames_for_caps = []
                 try:
@@ -2662,14 +2663,29 @@ async def send_command(
                             "endTime": end_time_utc,
                             "device_ids": device_ids,
                         }
-                        tasks_collection.update_one(
-                            {"id": task_id},
-                            {
-                                "$set": {"status": "scheduled"},
-                                "$unset": {"scheduledTime": ""},
-                                "$push": {"activeJobs": job_instance},
-                            },
-                        )
+                        
+                        # Set nextRunTime only for the first scheduled job
+                        if not first_job_scheduled:
+                            tasks_collection.update_one(
+                                {"id": task_id},
+                                {
+                                    "$set": {
+                                        "status": "scheduled",
+                                        "nextRunTime": start_time_utc.isoformat()  # Set next run time to first job's start time
+                                    },
+                                    "$unset": {"scheduledTime": ""},
+                                    "$push": {"activeJobs": job_instance},
+                                },
+                            )
+                            first_job_scheduled = True
+                        else:
+                            # For subsequent jobs, only push to activeJobs
+                            tasks_collection.update_one(
+                                {"id": task_id},
+                                {
+                                    "$push": {"activeJobs": job_instance},
+                                },
+                            )
                         # Optional per-day notification (disabled by default for weekly plans)
                         if notify_daily:
                             task_for_notify = tasks_collection.find_one({"id": task_id})
@@ -4233,6 +4249,11 @@ def schedule_split_jobs(
 
     if scheduled_jobs:
 
+        # Get the earliest start time for nextRunTime
+
+        earliest_start_time = min(job_instances, key=lambda x: x["startTime"])["startTime"]
+
+        
         # Update status only if it's not 'running'
 
         tasks_collection.update_one(
@@ -4241,7 +4262,10 @@ def schedule_split_jobs(
 
             {
 
-                "$set": {"status": "scheduled"},
+                "$set": {
+                    "status": "scheduled",
+                    "nextRunTime": earliest_start_time.isoformat()  # Add next run time
+                },
 
                 "$unset": {"scheduledTime": ""}  # Clear old scheduledTime
 
@@ -4295,11 +4319,11 @@ def schedule_split_jobs(
 
 
 
-        # Always update activeJobs
+        # Always update activeJobs - push ALL job instances, not just one
 
         tasks_collection.update_one(
 
-            {"id": task_id}, {"$push": {"activeJobs": jobInstance}}
+            {"id": task_id}, {"$push": {"activeJobs": {"$each": job_instances}}}
 
         )
 
@@ -4623,7 +4647,10 @@ def schedule_recurring_job(
 
             update_operation = {
 
-                "$set": {"status": "scheduled"},
+                "$set": {
+                    "status": "scheduled",
+                    "nextRunTime": start_time_utc.isoformat()  # Add next run time
+                },
 
                 "$push": {"activeJobs": jobInstance}
 
@@ -4637,7 +4664,8 @@ def schedule_recurring_job(
 
             update_operation = {
 
-                "$push": {"activeJobs": jobInstance}
+                "$push": {"activeJobs": jobInstance},
+                "$set": {"nextRunTime": start_time_utc.isoformat()}  # Add next run time even if not awaiting
 
                 # Remove the "$unset": {"scheduledTime": ""} line for daily tasks
 
@@ -4817,7 +4845,10 @@ def schedule_single_job(
 
             {
 
-                "$set": {"status": "scheduled"},
+                "$set": {
+                    "status": "scheduled",
+                    "nextRunTime": start_time_utc.isoformat()  # Add next run time
+                },
 
                 "$unset": {"scheduledTime": ""}  # Clear old scheduledTime
 
