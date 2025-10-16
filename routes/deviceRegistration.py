@@ -175,6 +175,13 @@ class PauseTaskCommandRequest(BaseModel):
     Task_ids: List[str]
 
 
+class ResumeTaskCommandRequest(BaseModel):
+
+    command: dict
+
+    Task_ids: List[str]
+
+
 
 
 
@@ -765,11 +772,29 @@ async def pause_task(
 
 
 
-    # Validate command is pause automation
+    # Validate command is one of the pause automation types
 
-    if command.get("appName") != "pause automation":
+    app_name = command.get("appName", "")
 
-        return JSONResponse(status_code=400, content={"message": "Invalid command - must be 'pause automation'"})
+    valid_pause_commands = ["pause automation", "pause automation 30 mins", "pause automation on demand"]
+
+    if app_name not in valid_pause_commands:
+
+        return JSONResponse(
+
+            status_code=400, 
+
+            content={"message": f"Invalid command - must be one of: {', '.join(valid_pause_commands)}"}
+
+        )
+
+
+
+    # Determine pause type for logging
+
+    pause_type = "30-min" if app_name in ["pause automation", "pause automation 30 mins"] else "on-demand"
+
+    print(f"[LOG] Pause type: {pause_type}")
 
 
 
@@ -797,11 +822,13 @@ async def pause_task(
 
 
 
-        # Filter for only RUNNING tasks (pause only works on running tasks)
+        # Filter for RUNNING or AWAITING tasks (pause works on both)
 
-        running_tasks = []
+        # Device might be running automation even if backend shows "awaiting"
 
-        running_task_ids = []
+        pausable_tasks = []
+
+        pausable_task_ids = []
 
         all_device_ids = set()
 
@@ -821,39 +848,41 @@ async def pause_task(
 
 
 
-            # Only pause tasks that are currently running
+            # Allow pause for both "running" and "awaiting" tasks
 
-            if task_status == "running":
+            # Awaiting tasks may have devices actively running automation
 
-                running_tasks.append(task)
+            if task_status in ["running", "awaiting"]:
 
-                running_task_ids.append(task_id)
+                pausable_tasks.append(task)
 
-                # Collect device IDs from this running task
+                pausable_task_ids.append(task_id)
+
+                # Collect device IDs from this task
 
                 device_ids = task.get("deviceIds", [])
 
                 all_device_ids.update(device_ids)
 
-                print(f"[LOG] Task {task_id} is running, adding devices: {device_ids}")
+                print(f"[LOG] Task {task_id} (status: {task_status}) is pausable, adding devices: {device_ids}")
 
 
 
-        # If no running tasks found
+        # If no pausable tasks found
 
-        if not running_tasks:
+        if not pausable_tasks:
 
             return JSONResponse(
 
                 status_code=400, 
 
-                content={"message": "No selected tasks are currently running"}
+                content={"message": "No selected tasks are currently running or awaiting (only 'running' and 'awaiting' tasks can be paused)"}
 
             )
 
 
 
-        print(f"[LOG] Found {len(running_tasks)} running tasks to pause")
+        print(f"[LOG] Found {len(pausable_tasks)} pausable tasks (running or awaiting)")
 
         print(f"[LOG] Devices to target: {list(all_device_ids)}")
 
@@ -907,13 +936,13 @@ async def pause_task(
 
         if not connected_devices:
 
-            print("[LOG] No connected devices found for running tasks.")
+            print("[LOG] No connected devices found for pausable tasks.")
 
             return JSONResponse(
 
                 status_code=400,
 
-                content={"message": "No devices are currently connected for the running tasks"}
+                content={"message": "No devices are currently connected for the tasks"}
 
             )
 
@@ -937,11 +966,13 @@ async def pause_task(
 
             "message": "Pause command sent successfully",
 
-            "tasks_paused": len(running_tasks),
+            "pause_type": pause_type,
+
+            "tasks_paused": len(pausable_tasks),
 
             "total_tasks": len(task_ids),
 
-            "running_tasks": len(running_tasks),
+            "pausable_tasks": len(pausable_tasks),
 
             "connected_devices": len(connected_devices),
 
@@ -954,6 +985,255 @@ async def pause_task(
     except Exception as e:
 
         print(f"[ERROR] General error in pause_task: {str(e)}")
+
+        import traceback
+
+
+
+        traceback.print_exc()
+
+        return JSONResponse(
+
+            status_code=500, content={"message": f"An error occurred: {str(e)}"}
+
+        )
+
+
+
+
+@device_router.post("/resume_task")
+
+async def resume_task(
+
+    request: ResumeTaskCommandRequest, current_user: dict = Depends(get_current_user)
+
+):
+
+    """
+
+    Resume automation from any pause state (30-min or on-demand)
+
+    Cancels scheduled auto-resume if 30-min timer was active
+
+    """
+
+    command = request.command
+
+    task_ids = request.Task_ids
+
+    time_zone = request.command.get("timeZone", "UTC")
+
+    print(f"[LOG] Received resume command: {command}")
+
+    print(f"[LOG] Task IDs: {task_ids}")
+
+
+
+    # Validate request
+
+    if not task_ids:
+
+        return JSONResponse(status_code=400, content={"message": "No tasks provided"})
+
+
+
+    # Validate command is resume automation
+
+    app_name = command.get("appName", "")
+
+    if app_name != "resume automation":
+
+        return JSONResponse(
+
+            status_code=400,
+
+            content={"message": "Invalid command - must be 'resume automation'"}
+
+        )
+
+
+
+    try:
+
+        # Get current time in the specified timezone
+
+        user_tz = pytz.timezone(time_zone)
+
+        current_time = datetime.now(user_tz)
+
+        print(f"[LOG] Current time: {current_time}")
+
+
+
+        # Collect all tasks in a single query
+
+        tasks = list(tasks_collection.find({"id": {"$in": task_ids}}))
+
+
+
+        if not tasks:
+
+            return JSONResponse(status_code=404, content={"message": "No tasks found"})
+
+
+
+        # Collect device IDs from all tasks (regardless of status)
+
+        # Resume can be sent to any task, the app will handle whether it's actually paused
+
+        all_device_ids = set()
+
+        task_device_mapping = {}
+
+
+
+        for task in tasks:
+
+            task_id = task.get("id")
+
+            task_name = task.get("taskName", "Unknown Task")
+
+            task_status = task.get("status", "")
+
+
+
+            print(f"[LOG] Task {task_id} ({task_name}) status: {task_status}")
+
+
+
+            # Collect device IDs from this task
+
+            device_ids = task.get("deviceIds", [])
+
+            all_device_ids.update(device_ids)
+
+            task_device_mapping[task_id] = {
+
+                "name": task_name,
+
+                "devices": device_ids,
+
+                "status": task_status
+
+            }
+
+            print(f"[LOG] Task {task_id} devices: {device_ids}")
+
+
+
+        if not all_device_ids:
+
+            return JSONResponse(
+
+                status_code=400,
+
+                content={"message": "No devices found for the selected tasks"}
+
+            )
+
+
+
+        print(f"[LOG] Total devices to target: {list(all_device_ids)}")
+
+
+
+        # Get device info for all devices in a single query
+
+        devices = list(device_collection.find({"id": {"$in": list(all_device_ids)}}))
+
+        device_names = {
+
+            device.get("id"): device.get("deviceName", device.get("id"))
+
+            for device in devices
+
+        }
+
+
+
+        # Check which devices are connected
+
+        connected_devices = []
+
+        not_connected_devices = set()
+
+
+
+        for device_id in all_device_ids:
+
+            check = is_device_connected(device_id)
+
+            device_name = device_names.get(device_id, device_id)
+
+
+
+            if check:
+
+                print(f"[LOG] Device {device_id} ({device_name}) is connected.")
+
+                connected_devices.append(device_id)
+
+            else:
+
+                print(f"[LOG] Device {device_id} ({device_name}) is NOT connected.")
+
+                not_connected_devices.add(device_id)
+
+
+
+        # If no devices are connected
+
+        if not connected_devices:
+
+            print("[LOG] No connected devices found for tasks.")
+
+            return JSONResponse(
+
+                status_code=400,
+
+                content={"message": "No devices are currently connected for the tasks"}
+
+            )
+
+        else:
+
+            # Send resume command to connected devices
+
+            print("[LOG] Sending resume command to connected devices.")
+
+            print(f"[LOG] Connected devices: {connected_devices}")
+
+            result = await send_commands_to_devices(connected_devices, command)
+
+            print(f"[LOG] Resume command sent result: {result}")
+
+
+
+        # Return success response
+
+        return {
+
+            "message": "Resume command sent successfully",
+
+            "total_tasks": len(task_ids),
+
+            "tasks_targeted": len(tasks),
+
+            "connected_devices": len(connected_devices),
+
+            "not_connected_devices": len(not_connected_devices),
+
+            "command_sent_to": result.get("success", []),
+
+            "command_failed_for": result.get("failed", [])
+
+        }
+
+
+
+    except Exception as e:
+
+        print(f"[ERROR] General error in resume_task: {str(e)}")
 
         import traceback
 
