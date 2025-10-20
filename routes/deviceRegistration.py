@@ -2229,6 +2229,46 @@ async def send_command(
 
                 logger.info(f"[WEEKLY] Generated {len(generated)} days")
 
+                # Compute planned start/end times once and reuse for summary and scheduling
+                # Initialize planned_schedule BEFORE the Discord summary block
+                planned_schedule = []
+                for d in generated:
+                    idx = int(d.get("dayIndex", 0))
+                    is_rest = bool(d.get("isRest", False))
+                    is_off = bool(d.get("isOff", False))
+                    target = int(d.get("target", 0))
+                    day_method = int(d.get("method", 0 if is_off else (9 if is_rest else 1)))
+                    
+                    if test_mode:
+                        start_time_local = local_dt + timedelta(minutes=idx * 10)
+                        end_time_local = start_time_local + timedelta(hours=11)
+                    else:
+                        day_local = local_dt + timedelta(days=idx)
+                        start_window_start = day_local.replace(hour=11, minute=0, second=0, microsecond=0)
+                        start_window_end = day_local.replace(hour=22, minute=0, second=0, microsecond=0)
+                        window_minutes = int((start_window_end - start_window_start).total_seconds() // 60)
+                        if window_minutes <= 0:
+                            # Skip invalid window day
+                            continue
+                        random_offset = random.randint(0, window_minutes - 1)
+                        start_time_local = start_window_start + timedelta(minutes=random_offset)
+                        end_time_local = start_window_end
+                    
+                    entry = {
+                        "dayIndex": idx,
+                        "isRest": is_rest,
+                        "isOff": is_off,
+                        "target": target,
+                        "method": day_method,
+                        "start_local": start_time_local,
+                        "end_local": end_time_local,
+                    }
+                    if is_rest:
+                        entry["maxLikes"] = int(d.get("maxLikes", 10))
+                        entry["maxComments"] = int(d.get("maxComments", 5))
+                        entry["warmupDuration"] = int(d.get("warmupDuration", 60))
+                    planned_schedule.append(entry)
+
                 # --- BEGIN full weekly schedule Discord summary ---
                 try:
                     task_meta = tasks_collection.find_one(
@@ -2248,46 +2288,10 @@ async def send_command(
                             9: "Method 9: Warmup"
                         }
                         
-                        # Compute planned start/end times once and reuse for summary and scheduling
-                        planned_schedule = []
-                        for d in generated:
-                            idx = int(d.get("dayIndex", 0))
-                            is_rest = bool(d.get("isRest", False))
-                            is_off = bool(d.get("isOff", False))
-                            target = int(d.get("target", 0))
-                            day_method = int(d.get("method", 0 if is_off else (9 if is_rest else 1)))
-                            method_label = method_names.get(day_method, f"method {day_method}")
-                            
-                            if test_mode:
-                                start_time_local = local_dt + timedelta(minutes=idx * 10)
-                                end_time_local = start_time_local + timedelta(hours=11)
-                            else:
-                                day_local = local_dt + timedelta(days=idx)
-                                start_window_start = day_local.replace(hour=11, minute=0, second=0, microsecond=0)
-                                start_window_end = day_local.replace(hour=22, minute=0, second=0, microsecond=0)
-                                window_minutes = int((start_window_end - start_window_start).total_seconds() // 60)
-                                if window_minutes <= 0:
-                                    # Skip invalid window day
-                                    continue
-                                random_offset = random.randint(0, window_minutes - 1)
-                                start_time_local = start_window_start + timedelta(minutes=random_offset)
-                                end_time_local = start_window_end
-                            
-                            entry = {
-                                "dayIndex": idx,
-                                "isRest": is_rest,
-                                "isOff": is_off,
-                                "target": target,
-                                "method": day_method,
-                                "methodLabel": method_label,
-                                "start_local": start_time_local,
-                                "end_local": end_time_local,
-                            }
-                            if is_rest:
-                                entry["maxLikes"] = int(d.get("maxLikes", 10))
-                                entry["maxComments"] = int(d.get("maxComments", 5))
-                                entry["warmupDuration"] = int(d.get("warmupDuration", 60))
-                            planned_schedule.append(entry)
+                        # Add methodLabel to planned_schedule entries for Discord summary
+                        for p in planned_schedule:
+                            day_method = int(p.get("method", 0))
+                            p["methodLabel"] = method_names.get(day_method, f"method {day_method}")
                         
                         # --- Per-account weekly plans (randomized per account) ---
                         per_account_plans = {}
