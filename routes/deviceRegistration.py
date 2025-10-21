@@ -2099,6 +2099,13 @@ async def send_command(
                 week_start_raw = command.get("week_start")
                 follow_weekly_range = tuple(command.get("followWeeklyRange", []))
                 rest_days_range = tuple(command.get("restDaysRange", []))
+                off_days_range_raw = command.get("offDaysRange")
+                off_days_range = None
+                if isinstance(off_days_range_raw, (list, tuple)) and len(off_days_range_raw) == 2:
+                    try:
+                        off_days_range = (int(off_days_range_raw[0]), int(off_days_range_raw[1]))
+                    except Exception:
+                        off_days_range = None
                 no_two_high_rule_raw = command.get("noTwoHighRule")
                 test_mode = bool(command.get("testMode", False))  # Test mode: schedule with 10-min gaps
                 # Resolve method (prefer command-level, else schedules index 2, else default 1)
@@ -2143,6 +2150,26 @@ async def send_command(
                     except Exception:
                         return None
                 no_two_high_rule = _coerce_pair(no_two_high_rule_raw) if isinstance(no_two_high_rule_raw, (list, tuple)) else None
+                if not off_days_range:
+                    try:
+                        sched_inputs = None
+                        if isinstance(schedules_payload, dict) and isinstance(schedules_payload.get("inputs"), list):
+                            sched_inputs = schedules_payload.get("inputs")
+                        elif isinstance(schedules_payload, list):
+                            sched_inputs = schedules_payload
+                        if sched_inputs and len(sched_inputs) >= 3 and isinstance(sched_inputs[2], dict):
+                            existing_weekly = sched_inputs[2].get("weeklyData", {})
+                            off_pair = existing_weekly.get("offDaysRange")
+                            if isinstance(off_pair, (list, tuple)) and len(off_pair) == 2:
+                                try:
+                                    off_days_range = (int(off_pair[0]), int(off_pair[1]))
+                                except Exception:
+                                    off_days_range = None
+                    except Exception:
+                        off_days_range = None
+                if not off_days_range:
+                    off_days_range = (1, 1)
+
                 if not no_two_high_rule:
                     # Try fallback from schedules payload index 2 if present
                     try:
@@ -2185,20 +2212,27 @@ async def send_command(
                 except Exception:
                     raise HTTPException(status_code=400, detail="Invalid week_start format")
 
-                # Monday check (warn-only)
-                if local_dt.weekday() != 0:
-                    logger.warning("[WEEKLY] week_start is not Monday; proceeding anyway")
-
-                # Test mode: override week_start to use current time for immediate scheduling
                 if test_mode:
+                    # Test mode: override week_start to use current time for immediate scheduling
                     local_dt = datetime.now(user_tz)
                     logger.warning(f"[WEEKLY] Test mode: Overriding week_start to NOW: {local_dt.isoformat()}")
+                else:
+                    # Normalize to Monday midnight for consistent calendar alignment
+                    days_until_monday = (7 - local_dt.weekday()) % 7
+                    normalized = local_dt + timedelta(days=days_until_monday)
+                    normalized = normalized.replace(hour=0, minute=0, second=0, microsecond=0)
+                    if normalized != local_dt:
+                        logger.info(
+                            f"[WEEKLY] Normalized week_start forward to Monday 00:00: {normalized.isoformat()} (was {local_dt.isoformat()})"
+                        )
+                    local_dt = normalized
 
                 # Calculate and log daily bounds
                 bounds = calculate_daily_bounds(
                     (int(follow_weekly_range[0]), int(follow_weekly_range[1])),
                     (int(rest_days_range[0]), int(rest_days_range[1])),
                     (int(no_two_high_rule[0]), int(no_two_high_rule[1])),
+                    (int(off_days_range[0]), int(off_days_range[1])),
                 )
                 logger.info(
                     f"[WEEKLY] Weekly Constraints: Total range: {follow_weekly_range[0]}-{follow_weekly_range[1]} follows/week | Rest days: {rest_days_range[0]}-{rest_days_range[1]} | NoTwoHighRule: {no_two_high_rule} | Calculated daily bounds: {bounds['daily_min']}-{bounds['daily_max']} follows/day"
@@ -2219,12 +2253,14 @@ async def send_command(
                     rest_day_likes_range,
                     rest_day_comments_range,
                     rest_day_duration_range,
+                    (int(off_days_range[0]), int(off_days_range[1])),
                 )
                 validate_weekly_plan(
                     generated,
                     (int(follow_weekly_range[0]), int(follow_weekly_range[1])),
                     (int(rest_days_range[0]), int(rest_days_range[1])),
                     (int(no_two_high_rule[0]), int(no_two_high_rule[1])),
+                    (int(off_days_range[0]), int(off_days_range[1])),
                 )
 
                 logger.info(f"[WEEKLY] Generated {len(generated)} days")
@@ -2382,6 +2418,7 @@ async def send_command(
                     "followWeeklyRange": [int(follow_weekly_range[0]), int(follow_weekly_range[1])],
                     "restDaysRange": [int(rest_days_range[0]), int(rest_days_range[1])],
                     "noTwoHighRule": [int(no_two_high_rule[0]), int(no_two_high_rule[1])],
+                    "offDaysRange": [int(off_days_range[0]), int(off_days_range[1])],
                     "method": method,
                 }
 
@@ -2499,6 +2536,13 @@ async def send_command(
                 else:
                     per_account_plans_caps = {}
 
+                job_day_indices = sorted(
+                    int(p.get("dayIndex", 0))
+                    for p in planned_schedule
+                    if not p.get("isOff", False)
+                )
+                last_scheduled_day_index = job_day_indices[-1] if job_day_indices else None
+
                 for p in planned_schedule:
                     day_index = int(p.get("dayIndex", 0))
                     target_count = int(p.get("target", 0))
@@ -2529,6 +2573,8 @@ async def send_command(
                         "job_id": job_id,
                         # For device execution:
                         "dayIndex": day_index,
+                        "weeklyLastDayIndex": last_scheduled_day_index,
+                        "weeklyRenewalTrigger": bool(last_scheduled_day_index is not None and day_index == last_scheduled_day_index),
                         # Device should rely on per-account caps only
                         "dailyTarget": 0,
                         "method": day_method,  # Randomly 1 or 4 for active days, 9 for rest days
@@ -3468,9 +3514,28 @@ async def send_command_to_devices(device_ids, command):
             logger.info("Command successfully executed. Updating task status.")
             
             # ========== WEEKLY AUTO-RENEWAL LOGIC ==========
-            # Check if this is the last day of a weekly plan and auto-schedule next week
-            day_index = command.get("dayIndex")
-            if day_index == 6:  # Day 6 = Sunday (last day of week)
+            # Check if this is the last scheduled day of a weekly plan and auto-schedule next week
+            day_index_raw = command.get("dayIndex")
+            try:
+                day_index_int = int(day_index_raw) if day_index_raw is not None else None
+            except (TypeError, ValueError):
+                day_index_int = None
+
+            renewal_trigger = bool(command.get("weeklyRenewalTrigger"))
+            last_day_raw = command.get("weeklyLastDayIndex")
+            try:
+                last_day_int = int(last_day_raw) if last_day_raw is not None else None
+            except (TypeError, ValueError):
+                last_day_int = None
+
+            if not renewal_trigger and day_index_int is not None and last_day_int is not None:
+                renewal_trigger = day_index_int == last_day_int
+
+            # Backward compatibility: fallback to Sunday check if metadata missing
+            if not renewal_trigger and day_index_int == 6:
+                renewal_trigger = True
+
+            if renewal_trigger:
                 # Fetch full task to check if it's a weekly plan
                 weekly_check_task = await asyncio.to_thread(
                     tasks_collection.find_one,
@@ -3479,7 +3544,9 @@ async def send_command_to_devices(device_ids, command):
                 )
                 
                 if weekly_check_task and weekly_check_task.get("durationType") == "WeeklyRandomizedPlan":
-                    logger.info(f"[WEEKLY-RENEWAL] Day 6 completed for task {task_id}. Auto-scheduling next week...")
+                    logger.info(
+                        f"[WEEKLY-RENEWAL] Last scheduled day (index {day_index_int}) completed for task {task_id}. Auto-scheduling next week..."
+                    )
                     
                     try:
                         # Extract weekly parameters from the task's schedules
@@ -3503,13 +3570,24 @@ async def send_command_to_devices(device_ids, command):
                                         else:
                                             current_week_start = current_week_start.astimezone(user_tz)
                                         
-                                        # Next Monday is 7 days later
+                                        # Next Monday is 7 days later (normalize to Monday midnight)
                                         next_week_start = current_week_start + timedelta(days=7)
+                                        days_until_next_monday = (7 - next_week_start.weekday()) % 7
+                                        normalized_next = next_week_start + timedelta(days=days_until_next_monday)
+                                        normalized_next = normalized_next.replace(hour=0, minute=0, second=0, microsecond=0)
+                                        if normalized_next != next_week_start:
+                                            logger.info(
+                                                f"[WEEKLY-RENEWAL] Normalized next week_start to Monday 00:00: {normalized_next.isoformat()}"
+                                            )
+                                        next_week_start = normalized_next
                                         
                                         # Generate new weekly schedule
                                         follow_weekly_range = tuple(weekly_data.get("followWeeklyRange", [50, 100]))
                                         rest_days_range = tuple(weekly_data.get("restDaysRange", [1, 2]))
                                         no_two_high_rule = tuple(weekly_data.get("noTwoHighRule", [27, 23]))
+                                        off_days_range_meta = tuple(weekly_data.get("offDaysRange", [1, 1]))
+                                        if len(off_days_range_meta) != 2:
+                                            off_days_range_meta = (1, 1)
                                         method = int(weekly_data.get("method", 1))
                                         
                                         # Use same default ranges for auto-renewal
@@ -3526,12 +3604,14 @@ async def send_command_to_devices(device_ids, command):
                                             rest_day_likes_range,
                                             rest_day_comments_range,
                                             rest_day_duration_range,
+                                            (int(off_days_range_meta[0]), int(off_days_range_meta[1])),
                                         )
                                         validate_weekly_plan(
                                             generated,
                                             (int(follow_weekly_range[0]), int(follow_weekly_range[1])),
                                             (int(rest_days_range[0]), int(rest_days_range[1])),
                                             (int(no_two_high_rule[0]), int(no_two_high_rule[1])),
+                                            (int(off_days_range_meta[0]), int(off_days_range_meta[1])),
                                         )
                                         
                                         logger.info(f"[WEEKLY-RENEWAL] Generated next week starting {next_week_start.isoformat()}")
@@ -3542,6 +3622,7 @@ async def send_command_to_devices(device_ids, command):
                                             "followWeeklyRange": [int(follow_weekly_range[0]), int(follow_weekly_range[1])],
                                             "restDaysRange": [int(rest_days_range[0]), int(rest_days_range[1])],
                                             "noTwoHighRule": [int(no_two_high_rule[0]), int(no_two_high_rule[1])],
+                                            "offDaysRange": [int(off_days_range_meta[0]), int(off_days_range_meta[1])],
                                             "method": method,
                                         }
                                         new_weekly_entry = {
@@ -3583,6 +3664,13 @@ async def send_command_to_devices(device_ids, command):
                                         device_ids_for_renewal = weekly_check_task.get("deviceIds", [])
                                         inputs_for_renewal = weekly_check_task.get("inputs")
                                         
+                                        scheduled_indices_new = sorted(
+                                            int(day.get("dayIndex", 0))
+                                            for day in generated
+                                            if not day.get("isOff", False)
+                                        )
+                                        last_index_new = scheduled_indices_new[-1] if scheduled_indices_new else None
+
                                         for day in generated:
                                             day_index_new = int(day.get("dayIndex", 0))
                                             target_count = int(day.get("target", 0))
@@ -3612,6 +3700,10 @@ async def send_command_to_devices(device_ids, command):
                                                     "task_id": task_id,
                                                     "job_id": job_id_new,
                                                     "dayIndex": day_index_new,
+                                                    "weeklyLastDayIndex": last_index_new,
+                                                    "weeklyRenewalTrigger": bool(
+                                                        last_index_new is not None and day_index_new == last_index_new
+                                                    ),
                                                     # Device should rely on per-account caps only
                                                     "dailyTarget": 0,
                                                     "method": day_method,

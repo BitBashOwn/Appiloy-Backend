@@ -12,6 +12,7 @@ def calculate_daily_bounds(
     follow_weekly_range: Tuple[int, int],
     rest_days_range: Tuple[int, int],
     no_two_high_rule: Tuple[int, int],
+    off_days_range: Tuple[int, int] = (1, 1),
 ) -> Dict[str, int]:
     """
     Calculate rough per-day lower/upper bounds implied by weekly targets and rest days.
@@ -24,9 +25,14 @@ def calculate_daily_bounds(
     """
     min_week, max_week = follow_weekly_range
     min_rest, max_rest = rest_days_range
+    off_min, off_max = off_days_range
+    if off_min > off_max:
+        off_min, off_max = off_max, off_min
+    off_min = max(0, off_min)
+    off_max = max(off_min, min(6, max(0, off_max)))
 
-    min_active_days = 7 - max(0, max_rest)
-    max_active_days = 7 - max(0, min_rest)
+    min_active_days = 7 - max(0, max_rest) - off_max
+    max_active_days = 7 - max(0, min_rest) - off_min
     min_active_days = max(1, min_active_days)
     max_active_days = max(min_active_days, max_active_days)
 
@@ -107,12 +113,13 @@ def generate_weekly_targets(
     rest_day_likes_range: Tuple[int, int] = (4, 10),
     rest_day_comments_range: Tuple[int, int] = (1, 3),
     rest_day_duration_range: Tuple[int, int] = (30, 120),
+    off_days_range: Tuple[int, int] = (1, 1),
 ) -> List[Dict]:
     """
     Generate a 7-day schedule list of dicts: {dayIndex, target, isRest, method, maxLikes, maxComments, warmupDuration}.
 
     Strategy:
-    - Always ensure exactly 1 off day (no tasks scheduled)
+    - Select number of off days inside off_days_range (defaults to exactly 1)
     - Randomly choose number of rest days within provided range (excluding the off day)
     - Allocate total follows randomly within bounds across active days
     - Apply 'no two high days' rule
@@ -125,26 +132,45 @@ def generate_weekly_targets(
     min_rest, max_rest = rest_days_range
     high_day_threshold, follow_threshold = no_two_high_rule
 
-    # Always ensure exactly 1 off day (no tasks)
-    off_day = random.randint(0, 6)
-    
-    # Choose rest days (excluding the off day) respecting provided range
-    available_for_rest = [d for d in range(7) if d != off_day]
+    off_min, off_max = off_days_range
+    if off_min > off_max:
+        off_min, off_max = off_max, off_min
+    off_min = max(0, off_min)
+    # Keep at least one non-off day available for activity/rest selections
+    off_max = max(off_min, min(6, max(0, off_max)))
+    off_count = random.randint(off_min, off_max) if off_max >= 0 else 0
+    off_indices = set(random.sample(range(7), off_count)) if off_count else set()
+
+    # Choose rest days (excluding the off days) respecting provided range
+    available_for_rest = [d for d in range(7) if d not in off_indices]
     max_possible_rest = len(available_for_rest)
     rest_min = max(0, min_rest)
     rest_max = min(max(0, max_rest), max_possible_rest)
     if rest_min > rest_max:
         rest_min = rest_max
     rest_days_count = random.randint(rest_min, rest_max) if rest_max >= 0 else 0
-    rest_indices = set(random.sample(available_for_rest, min(rest_days_count, max_possible_rest)))
+    rest_indices = set()
+    if rest_days_count and max_possible_rest > 0:
+        rest_indices = set(random.sample(available_for_rest, min(rest_days_count, max_possible_rest)))
 
     # Determine active days and bounds
-    bounds = calculate_daily_bounds(follow_weekly_range, rest_days_range, no_two_high_rule)
+    bounds = calculate_daily_bounds(follow_weekly_range, rest_days_range, no_two_high_rule, off_days_range)
     daily_min = bounds["daily_min"]
     daily_max = bounds["daily_max"]
-    # Effective active days exclude rest days and the mandatory off day
-    active_days = 7 - len(rest_indices) - 1
-    active_days = max(1, active_days)
+    # Effective active days exclude rest days and off days
+    active_days = 7 - len(rest_indices) - len(off_indices)
+
+    # Ensure at least one active day remains
+    if active_days <= 0:
+        # First, try converting rest days back to active days
+        while active_days <= 0 and rest_indices:
+            rest_indices.pop()
+            active_days = 7 - len(rest_indices) - len(off_indices)
+        # If still no active day, reduce off days
+        while active_days <= 0 and off_indices:
+            off_indices.pop()
+            active_days = 7 - len(rest_indices) - len(off_indices)
+        active_days = max(1, active_days)
 
     # Pick weekly total inside achievable range
     max_total = active_days * max(1, daily_max)
@@ -179,7 +205,7 @@ def generate_weekly_targets(
     schedule = []
     active_iter = iter(active_targets)
     for d in range(7):
-        if d == off_day:
+        if d in off_indices:
             # Off day: no tasks scheduled
             schedule.append({
                 "dayIndex": d, 
@@ -222,19 +248,25 @@ def validate_weekly_plan(
     follow_weekly_range: Tuple[int, int],
     rest_days_range: Tuple[int, int],
     no_two_high_rule: Tuple[int, int],
+    off_days_range: Tuple[int, int] = (1, 1),
 ) -> None:
     """Raise ValueError if constraints are violated."""
     min_week, max_week = follow_weekly_range
     min_rest, max_rest = rest_days_range
     high_day_threshold, follow_threshold = no_two_high_rule
+    off_min, off_max = off_days_range
+    if off_min > off_max:
+        off_min, off_max = off_max, off_min
+    off_min = max(0, off_min)
+    off_max = max(off_min, max(0, off_max))
 
     if len(generated_schedule) != 7:
         raise ValueError("Generated schedule must have exactly 7 days")
 
-    # Check that there's exactly one off day
+    # Check off day count is within allowed bounds
     off_count = sum(1 for day in generated_schedule if day.get("isOff"))
-    if off_count != 1:
-        raise ValueError(f"Expected exactly 1 off day, found {off_count}")
+    if not (off_min <= off_count <= off_max):
+        raise ValueError(f"Off days {off_count} out of range [{off_min}, {off_max}]")
 
     total = sum(day.get("target", 0) for day in generated_schedule)
     if not (min_week <= total <= max_week):
