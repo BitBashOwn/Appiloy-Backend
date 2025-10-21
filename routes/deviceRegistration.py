@@ -2212,20 +2212,10 @@ async def send_command(
                 except Exception:
                     raise HTTPException(status_code=400, detail="Invalid week_start format")
 
+                # Test mode: override week_start to use current time for immediate scheduling
                 if test_mode:
-                    # Test mode: override week_start to use current time for immediate scheduling
                     local_dt = datetime.now(user_tz)
                     logger.warning(f"[WEEKLY] Test mode: Overriding week_start to NOW: {local_dt.isoformat()}")
-                else:
-                    # Normalize to Monday midnight for consistent calendar alignment
-                    days_until_monday = (7 - local_dt.weekday()) % 7
-                    normalized = local_dt + timedelta(days=days_until_monday)
-                    normalized = normalized.replace(hour=0, minute=0, second=0, microsecond=0)
-                    if normalized != local_dt:
-                        logger.info(
-                            f"[WEEKLY] Normalized week_start forward to Monday 00:00: {normalized.isoformat()} (was {local_dt.isoformat()})"
-                        )
-                    local_dt = normalized
 
                 # Calculate and log daily bounds
                 bounds = calculate_daily_bounds(
@@ -3570,16 +3560,8 @@ async def send_command_to_devices(device_ids, command):
                                         else:
                                             current_week_start = current_week_start.astimezone(user_tz)
                                         
-                                        # Next Monday is 7 days later (normalize to Monday midnight)
+                                        # Next week is 7 days later
                                         next_week_start = current_week_start + timedelta(days=7)
-                                        days_until_next_monday = (7 - next_week_start.weekday()) % 7
-                                        normalized_next = next_week_start + timedelta(days=days_until_next_monday)
-                                        normalized_next = normalized_next.replace(hour=0, minute=0, second=0, microsecond=0)
-                                        if normalized_next != next_week_start:
-                                            logger.info(
-                                                f"[WEEKLY-RENEWAL] Normalized next week_start to Monday 00:00: {normalized_next.isoformat()}"
-                                            )
-                                        next_week_start = normalized_next
                                         
                                         # Generate new weekly schedule
                                         follow_weekly_range = tuple(weekly_data.get("followWeeklyRange", [50, 100]))
