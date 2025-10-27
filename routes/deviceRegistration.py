@@ -1774,13 +1774,30 @@ async def send_command(
 
     duration = int(command.get("duration", 0))
 
+    newInputs = request.command.get("newInputs")
+    newSchedules = request.command.get("newSchecdules")
     durationType = request.command.get("durationType")
+    # --- Patch: Detect MultipleRunTimes from newSchecdules if durationType is missing or not set ---
+    # Only override durationType if not set or not recognized
+    if not durationType or durationType not in [
+            "MultipleRunTimes",
+            "DurationWithExactStartTime",
+            "ExactStartTime",
+            "DurationWithTimeWindow",
+            "EveryDayAutomaticRun",
+            "WeeklyRandomizedPlan"
+        ]:
+        # Try to detect MultipleRunTimes from newSchecdules
+        if newSchedules and isinstance(newSchedules, dict):
+            sched_inputs = newSchedules.get("inputs", [])
+            if isinstance(sched_inputs, list):
+                for entry in sched_inputs:
+                    if entry.get("type") == "MultipleRunTimes":
+                        durationType = "MultipleRunTimes"
+                        break
+    # --- End Patch ---
 
     time_zone = request.command.get("timeZone", "UTC")
-
-    newInputs = request.command.get("newInputs")
-
-    newSchedules = request.command.get("newSchecdules")
 
     # Update only non-null inputs/schedules; never set to null
     update_fields = {"deviceIds": device_ids}
@@ -1800,6 +1817,135 @@ async def send_command(
 
         print(f"Current time in {time_zone}: {now}")
 
+        # --- MultipleRunTimes scheduling ---
+        if durationType == "MultipleRunTimes":
+            print(f"[LOG] MultipleRunTimes detected for task {task_id}")
+            # Clear old scheduled jobs before scheduling new multiple run times
+            task = tasks_collection.find_one({"id": task_id}, {"activeJobs": 1})
+            if task and task.get("activeJobs"):
+                for old_job in task["activeJobs"]:
+                    job_id_to_remove = old_job.get("job_id")
+                    if job_id_to_remove:
+                        try:
+                            scheduler.remove_job(job_id_to_remove)
+                            print(f"[LOG] Removed old job {job_id_to_remove} from scheduler")
+                        except Exception as e:
+                            print(f"[LOG] Could not remove job {job_id_to_remove} from scheduler: {str(e)}")
+            tasks_collection.update_one({"id": task_id}, {"$set": {"activeJobs": []}})
+            print(f"[LOG] Cleared activeJobs array for task {task_id}")
+
+            # Extract MultipleRunTimes info from newSchecdules
+            multiple_schedule = None
+            if newSchedules and isinstance(newSchedules, dict):
+                inputs = newSchedules.get("inputs", [])
+                for entry in inputs:
+                    if entry.get("type") == "MultipleRunTimes":
+                        multiple_schedule = entry
+                        break
+            if not multiple_schedule:
+                raise HTTPException(status_code=400, detail="MultipleRunTimes schedule not found in newSchecdules")
+
+            run_times = multiple_schedule.get("runStartTimes", [])
+            number_of_runs = multiple_schedule.get("numberOfRuns", len(run_times))
+            if not run_times or number_of_runs < 1:
+                raise HTTPException(status_code=400, detail="No run times provided for MultipleRunTimes")
+
+            scheduled_job_ids = []
+            first_job_scheduled = False
+            for idx, time_str in enumerate(run_times):
+                try:
+                    hour, minute = map(int, time_str.split(":"))
+                except Exception:
+                    raise HTTPException(status_code=400, detail=f"Invalid runStartTime format: {time_str}")
+                run_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                end_time = run_time + timedelta(minutes=duration)
+                if run_time < now:
+                    run_time += timedelta(days=1)
+                    end_time += timedelta(days=1)
+                run_time_utc = run_time.astimezone(pytz.UTC)
+                end_time_utc = end_time.astimezone(pytz.UTC)
+                job_id = f"cmd_{uuid.uuid4()}"
+                job_command = copy.deepcopy(command)
+                job_command["job_id"] = job_id
+                job_command["runIndex"] = idx
+                scheduler.add_job(
+                    wrapper_for_send_command,
+                    trigger=DateTrigger(run_date=run_time_utc, timezone=pytz.UTC),
+                    args=[device_ids, job_command],
+                    id=job_id,
+                    name=f"MultipleRunTimes {idx+1} for devices {device_ids}",
+                )
+                scheduled_job_ids.append(job_id)
+                job_instance = {
+                    "job_id": job_id,
+                    "startTime": run_time_utc,
+                    "endTime": end_time_utc,
+                    "device_ids": device_ids,
+                    "deliveryStatus": "pending",
+                    "deliveryAttempts": 0,
+                    "method": durationType,
+                    "runIndex": idx,
+                    "durationType": durationType,
+                }
+                if not first_job_scheduled:
+                    tasks_collection.update_one(
+                        {"id": task_id},
+                        {
+                            "$set": {
+                                "status": "scheduled",
+                                "nextRunTime": run_time_utc.isoformat()
+                            },
+                            "$unset": {"scheduledTime": ""},
+                            "$push": {"activeJobs": job_instance},
+                        },
+                    )
+                    first_job_scheduled = True
+                else:
+                    tasks_collection.update_one(
+                        {"id": task_id},
+                        {"$push": {"activeJobs": job_instance}},
+                    )
+                print(f"[LOG] Scheduled MultipleRunTimes job {job_id} at {run_time_utc}")
+            # --- Send Discord notification after scheduling ---
+            try:
+                task_meta = tasks_collection.find_one(
+                    {"id": task_id}, {"_id": 0, "taskName": 1, "serverId": 1, "channelId": 1}
+                ) or {}
+                server_id = task_meta.get("serverId")
+                channel_id = task_meta.get("channelId")
+                if server_id and channel_id:
+                    lines = []
+                    for idx, time_str in enumerate(run_times):
+                        job_id = scheduled_job_ids[idx] if idx < len(scheduled_job_ids) else ""
+                        run_time = now.replace(hour=int(time_str.split(":")[0]), minute=int(time_str.split(":")[1]), second=0, microsecond=0)
+                        if run_time < now:
+                            run_time += timedelta(days=1)
+                        date_str = run_time.strftime("%b %d")
+                        time_str_fmt = run_time.strftime("%H:%M")
+                        lines.append(f"Run {idx+1}: {date_str} {time_str_fmt} | Job ID: {job_id}")
+                    summary = (
+                        f"Multiple Run Times scheduled: {task_meta.get('taskName', 'Unknown Task')}\n"
+                        f"Task ID: {task_id}\n"
+                        f"Total runs: {number_of_runs}\n"
+                        + "\n".join(lines)
+                    )
+                    from Bot.discord_bot import get_bot_instance
+                    bot = get_bot_instance()
+                    bot.send_message_sync(
+                        {
+                            "message": summary,
+                            "task_id": task_id,
+                            "job_id": f"multipleruntimes_summary_{task_id}",
+                            "server_id": int(server_id) if isinstance(server_id, str) and server_id.isdigit() else server_id,
+                            "channel_id": int(channel_id) if isinstance(channel_id, str) and channel_id.isdigit() else channel_id,
+                            "type": "info",
+                        }
+                    )
+                else:
+                    print("[LOG] Skipping Discord summary; serverId/channelId not set on task")
+            except Exception as e:
+                print(f"[LOG] Failed to send MultipleRunTimes Discord summary: {e}")
+            return {"message": "MultipleRunTimes command scheduled successfully"}
 
 
         if durationType in ["DurationWithExactStartTime", "ExactStartTime"]:
@@ -2702,6 +2848,11 @@ async def send_command(
                             "startTime": start_time_utc,
                             "endTime": end_time_utc,
                             "device_ids": device_ids,
+                            "deliveryStatus": "pending",
+                            "deliveryAttempts": 0,
+                            "method": day_method,
+                            "dayIndex": day_index,
+                            "durationType": durationType,
                         }
                         
                         # Set nextRunTime only for the first scheduled job
@@ -3497,6 +3648,64 @@ async def send_command_to_devices(device_ids, command):
 
         results = await send_commands_to_devices(device_ids, command)
 
+        # Update delivery status based on results
+        job_id = command.get("job_id")
+        task_id = command.get("task_id")
+        
+        if job_id and task_id:
+            # Update successful deliveries
+            if results["success"]:
+                await asyncio.to_thread(
+                    tasks_collection.update_one,
+                    {"id": task_id, "activeJobs.job_id": job_id},
+                    {
+                        "$set": {
+                            "activeJobs.$.deliveryStatus": "delivered",
+                            "activeJobs.$.deliveredAt": datetime.now(pytz.UTC)
+                        },
+                        "$inc": {"activeJobs.$.deliveryAttempts": 1}
+                    }
+                )
+                logger.info(f"[DELIVERY] Job {job_id} delivered to {len(results['success'])} devices")
+                
+                # Check if this is a weekly plan that needs auto-renewal
+                # Don't remove jobs immediately for weekly plans to allow renewal logic to work
+                duration_type = command.get("durationType", "")
+                is_weekly_plan = duration_type == "WeeklyRandomizedPlan"
+                
+                if not is_weekly_plan:
+                    # Remove successful job from activeJobs after a short delay for non-weekly plans
+                    # This prevents immediate removal while still cleaning up completed jobs
+                    await asyncio.sleep(5)  # 5 second delay
+                    await asyncio.to_thread(
+                        tasks_collection.update_one,
+                        {"id": task_id},
+                        {"$pull": {"activeJobs": {"job_id": job_id}}}
+                    )
+                    logger.info(f"[CLEANUP] Removed completed job {job_id} from activeJobs (non-weekly plan)")
+                else:
+                    logger.info(f"[CLEANUP] Preserving job {job_id} in activeJobs for weekly auto-renewal logic")
+            
+            # Update failed deliveries
+            if results["failed"]:
+                await asyncio.to_thread(
+                    tasks_collection.update_one,
+                    {"id": task_id, "activeJobs.job_id": job_id},
+                    {
+                        "$set": {
+                            "activeJobs.$.deliveryStatus": "failed",
+                            "activeJobs.$.failedAt": datetime.now(pytz.UTC),
+                            "activeJobs.$.failureReason": f"Devices not responding: {results['failed']}"
+                        },
+                        "$inc": {"activeJobs.$.deliveryAttempts": 1}
+                    }
+                )
+                logger.warning(f"[DELIVERY] Job {job_id} failed for {len(results['failed'])} devices")
+            
+            # Handle mixed results (some success, some failure)
+            if results["success"] and results["failed"]:
+                logger.warning(f"[DELIVERY] Job {job_id} partial delivery: {len(results['success'])} success, {len(results['failed'])} failed")
+
 
 
         if results["success"]:
@@ -3719,6 +3928,11 @@ async def send_command_to_devices(device_ids, command):
                                                     "startTime": start_time_utc,
                                                     "endTime": end_time_utc,
                                                     "device_ids": device_ids_for_renewal,
+                                                    "deliveryStatus": "pending",
+                                                    "deliveryAttempts": 0,
+                                                    "method": day_method,
+                                                    "dayIndex": day_index_new,
+                                                    "durationType": "WeeklyRandomizedPlan",
                                                 }
                                                 await asyncio.to_thread(
                                                     tasks_collection.update_one,
@@ -4266,6 +4480,10 @@ def schedule_split_jobs(
             "endTime": end_time_utc,
 
             "device_ids": device_ids,
+            "deliveryStatus": "pending",
+            "deliveryAttempts": 0,
+            "method": command.get("method", 1),
+            "durationType": command.get("durationType", "FixedTime"),
 
         }
 
@@ -4690,6 +4908,10 @@ def schedule_recurring_job(
         "endTime": end_time_utc,
 
         "device_ids": device_ids,
+        "deliveryStatus": "pending",
+        "deliveryAttempts": 0,
+        "method": command.get("method", 1),
+        "durationType": command.get("durationType", "EveryDayAutomaticRun"),
 
     }
 
@@ -4888,6 +5110,10 @@ def schedule_single_job(
         "endTime": end_time_utc,
 
         "device_ids": device_ids,
+        "deliveryStatus": "pending",
+        "deliveryAttempts": 0,
+        "method": command.get("method", 1),
+        "durationType": command.get("durationType", "FixedTime"),
 
     }
 
