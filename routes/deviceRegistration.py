@@ -1336,7 +1336,7 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 
                 )
 
-                if message:
+                if message and message_type != "command":
 
                     message = f"Device Name: {device_name}\n\n{message}"
 
@@ -1369,71 +1369,91 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 
 
                 if message_type == "update":
-
                     print(f"Processing 'update' message for task_id {task_id}")
-
                     if (
-
                         taskData
-
                         and taskData.get("serverId")
-
                         and taskData.get("channelId")
-
                     ):
-
                         server_id = (
-
                             int(taskData["serverId"])
-
                             if isinstance(taskData["serverId"], str)
-
                             and taskData["serverId"].isdigit()
-
                             else taskData["serverId"]
-
                         )
-
                         channel_id = (
-
                             int(taskData["channelId"])
-
                             if isinstance(taskData["channelId"], str)
-
                             and taskData["channelId"].isdigit()
-
                             else taskData["channelId"]
-
                         )
+                        try:
+                            await bot_instance.send_message(
+                                {
+                                    "message": message,
+                                    "task_id": task_id,
+                                    "job_id": job_id,
+                                    "server_id": server_id,
+                                    "channel_id": channel_id,
+                                    "type": "update",
+                                }
+                            )
+                        except Exception as e:
+                            print(f"Failed to send message to bot: {e}")
+                    
+                    continue
+
+                elif message_type == "command":
+                    try:
+                        inner = json.loads(payload.get("message", "{}")) if isinstance(payload.get("message"), str) else (payload.get("message") or {})
+                    except Exception:
+                        inner = {}
+
+                    action = inner.get("action")
+                    if action == "SCHEDULE_WEEKLY_WARMUPS":
+                        # Build command compatible with HTTP scheduling flow
+                        command_payload = {
+                            **{k: v for k, v in inner.items() if k not in ("action",)},
+                            "task_id": task_id,
+                        }
+
+                        # Ensure required durationType for weekly scheduling
+                        if command_payload.get("durationType") != "WeeklyRandomizedPlan":
+                            command_payload["durationType"] = "WeeklyRandomizedPlan"
+
+                        # Force warmup-only weekly plan: 4 warmup days, 3 off days
+                        command_payload["warmupOnly"] = True
+                        command_payload["testMode"] = False
+                        # Provide safe defaults to avoid validation paths
+                        command_payload.setdefault("followWeeklyRange", [0, 0])
+                        command_payload.setdefault("restDaysRange", [4, 4])
+                        command_payload.setdefault("offDaysRange", [3, 3])
+
+                        device_ids = [device_id]
 
                         try:
-
-                            await bot_instance.send_message(
-
-                                {
-
-                                    "message": message,
-
-                                    "task_id": task_id,
-
-                                    "job_id": job_id,
-
-                                    "server_id": server_id,
-
-                                    "channel_id": channel_id,
-
-                                    "type": "update",
-
-                                }
-
-                            )
-
-                        except Exception as e:
-
-                            print(f"Failed to send message to bot: {e}")
-
-
-
+                            req_obj = CommandRequest(command=command_payload, device_ids=device_ids)
+                            current_user_context = {"email": (device_info or {}).get("email", "")}
+                            await send_command(req_obj, current_user=current_user_context)  # type: ignore
+                            ack = {
+                                "type": "command_ack",
+                                "task_id": task_id,
+                                "job_id": job_id,
+                                "action": action,
+                                "success": True,
+                            }
+                            await websocket.send_text(json.dumps(ack))
+                        except Exception as schedule_err:
+                            err_ack = {
+                                "type": "command_ack",
+                                "task_id": task_id,
+                                "job_id": job_id,
+                                "action": action,
+                                "success": False,
+                                "error": str(schedule_err),
+                            }
+                            await websocket.send_text(json.dumps(err_ack))
+                    
                     continue
 
 
@@ -1785,7 +1805,8 @@ async def send_command(
             "ExactStartTime",
             "DurationWithTimeWindow",
             "EveryDayAutomaticRun",
-            "WeeklyRandomizedPlan"
+            "WeeklyRandomizedPlan",
+            "WeeklyWarmupOnly"
         ]:
         # Try to detect MultipleRunTimes from newSchecdules
         if newSchedules and isinstance(newSchedules, dict):
@@ -2253,7 +2274,7 @@ async def send_command(
                     except Exception:
                         off_days_range = None
                 no_two_high_rule_raw = command.get("noTwoHighRule")
-                test_mode = bool(command.get("testMode", False))  # Test mode: schedule with 10-min gaps
+                test_mode = bool(command.get("testMode", False))  # Test mode: schedule with 10-min/5-min gaps
                 # Resolve method (prefer command-level, else schedules index 2, else default 1)
                 resolved_method = command.get("method")
                 try:
@@ -2282,11 +2303,26 @@ async def send_command(
                 if test_mode:
                     logger.warning(f"[WEEKLY] ⚠️ TEST MODE ENABLED - Scheduling with 10-minute gaps starting NOW")
 
-                if not week_start_raw or len(follow_weekly_range) != 2 or len(rest_days_range) != 2:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="Weekly data not found in schedules OR command-level fields",
-                    )
+                # Warmup-only support: allow missing weekly ranges and week_start
+                warmup_only_flag = bool(command.get("warmupOnly", False))
+                # Default weekly warmup to TEST mode unless explicitly provided
+                if warmup_only_flag and ("testMode" not in command):
+                    test_mode = True
+                    logger.warning("[WEEKLY] Defaulting to TEST MODE for warmup-only weekly plan")
+                if warmup_only_flag:
+                    # Provide safe defaults if missing
+                    if len(follow_weekly_range) != 2:
+                        follow_weekly_range = (0, 0)
+                    if len(rest_days_range) != 2:
+                        rest_days_range = (4, 4)
+                    if not off_days_range_raw:
+                        off_days_range_raw = (3, 3)
+                else:
+                    if not week_start_raw or len(follow_weekly_range) != 2 or len(rest_days_range) != 2:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="Weekly data not found in schedules OR command-level fields",
+                        )
 
                 # Resolve no_two_high_rule (default if missing)
                 def _coerce_pair(val):
@@ -2346,7 +2382,11 @@ async def send_command(
                             # Date-only string
                             local_dt = datetime.fromisoformat(clean + "T00:00:00")
                     else:
-                        raise ValueError("Invalid week_start")
+                        # For warmup-only, allow missing week_start and use current time
+                        if warmup_only_flag:
+                            local_dt = datetime.now(pytz.timezone(time_zone))
+                        else:
+                            raise ValueError("Invalid week_start")
 
                     user_tz = pytz.timezone(time_zone)
                     if local_dt.tzinfo is None:
@@ -2391,13 +2431,44 @@ async def send_command(
                     rest_day_duration_range,
                     (int(off_days_range[0]), int(off_days_range[1])),
                 )
-                validate_weekly_plan(
-                    generated,
-                    (int(follow_weekly_range[0]), int(follow_weekly_range[1])),
-                    (int(rest_days_range[0]), int(rest_days_range[1])),
-                    (int(no_two_high_rule[0]), int(no_two_high_rule[1])),
-                    (int(off_days_range[0]), int(off_days_range[1])),
-                )
+                # Special mode: warmup-only weekly plan (4 warmup days, 3 off days)
+                is_warmup_only = warmup_only_flag
+                if is_warmup_only:
+                    warmup_indices = sorted(random.sample(range(7), 4))
+                    custom_generated = []
+                    for d in range(7):
+                        if d in warmup_indices:
+                            # Randomize warmup targets within the same ranges used for rest days
+                            wl = random.randint(rest_day_likes_range[0], rest_day_likes_range[1])
+                            wc = random.randint(rest_day_comments_range[0], rest_day_comments_range[1])
+                            wd = random.randint(rest_day_duration_range[0], rest_day_duration_range[1])
+                            custom_generated.append({
+                                "dayIndex": d,
+                                "target": 0,
+                                "isRest": True,
+                                "isOff": False,
+                                "method": 9,
+                                "maxLikes": wl,
+                                "maxComments": wc,
+                                "warmupDuration": wd,
+                            })
+                        else:
+                            custom_generated.append({
+                                "dayIndex": d,
+                                "target": 0,
+                                "isRest": False,
+                                "isOff": True,
+                                "method": 0,
+                            })
+                    generated = custom_generated
+                else:
+                    validate_weekly_plan(
+                        generated,
+                        (int(follow_weekly_range[0]), int(follow_weekly_range[1])),
+                        (int(rest_days_range[0]), int(rest_days_range[1])),
+                        (int(no_two_high_rule[0]), int(no_two_high_rule[1])),
+                        (int(off_days_range[0]), int(off_days_range[1])),
+                    )
 
                 logger.info(f"[WEEKLY] Generated {len(generated)} days")
 
@@ -2412,19 +2483,27 @@ async def send_command(
                     day_method = int(d.get("method", 0 if is_off else (9 if is_rest else 1)))
                     
                     if test_mode:
-                        start_time_local = local_dt + timedelta(minutes=idx * 10)
-                        end_time_local = start_time_local + timedelta(hours=11)
+                        # For warmup-only: use 5-minute gaps starting from now, otherwise 10-minute gaps
+                        gap_minutes = 5 if is_warmup_only else 10
+                        start_time_local = local_dt + timedelta(minutes=idx * gap_minutes)
+                        # For warmup-only, keep session short placeholder end; device manages day plan
+                        end_time_local = start_time_local + (timedelta(minutes=1) if is_warmup_only else timedelta(hours=11))
                     else:
                         day_local = local_dt + timedelta(days=idx)
-                        start_window_start = day_local.replace(hour=11, minute=0, second=0, microsecond=0)
-                        start_window_end = day_local.replace(hour=22, minute=0, second=0, microsecond=0)
+                        if is_warmup_only:
+                            # Trigger morning window 09:10–12:00 to align device day window
+                            start_window_start = day_local.replace(hour=9, minute=10, second=0, microsecond=0)
+                            start_window_end = day_local.replace(hour=12, minute=0, second=0, microsecond=0)
+                        else:
+                            start_window_start = day_local.replace(hour=11, minute=0, second=0, microsecond=0)
+                            start_window_end = day_local.replace(hour=22, minute=0, second=0, microsecond=0)
                         window_minutes = int((start_window_end - start_window_start).total_seconds() // 60)
                         if window_minutes <= 0:
                             # Skip invalid window day
                             continue
                         random_offset = random.randint(0, window_minutes - 1)
                         start_time_local = start_window_start + timedelta(minutes=random_offset)
-                        end_time_local = start_window_end
+                        end_time_local = (start_time_local + timedelta(minutes=1)) if is_warmup_only else start_window_end
                     
                     entry = {
                         "dayIndex": idx,
@@ -2574,10 +2653,17 @@ async def send_command(
                     schedules_inputs = []
                     schedules_payload = {"type": "schedules", "inputs": []}
 
-                # Ensure index 2 is WeeklyRandomizedPlan
+                # Preserve existing schedule cards; only overwrite the weekly block at index 2
+                for entry in schedules_inputs:
+                    if isinstance(entry, dict):
+                        entry["selected"] = False
+
                 while len(schedules_inputs) < 3:
                     schedules_inputs.append({})
-                schedules_inputs[2] = weekly_entry
+
+                weekly_entry_selected = dict(weekly_entry)
+                weekly_entry_selected["selected"] = True
+                schedules_inputs[2] = weekly_entry_selected
                 schedules_payload["inputs"] = schedules_inputs
 
                 # Persist inputs/schedules/newInputs (avoid nulls)
@@ -2604,18 +2690,34 @@ async def send_command(
                 # The per-job mutation logic in send_command_to_devices handles this correctly
                 logger.info("[WEEKLY] Skipping instant caps - will be applied per-job when each day runs")
 
-                # Clear old scheduled jobs before scheduling weekly plan
-                print(f"[WEEKLY] Clearing old jobs for task {task_id}")
+                # Clear old WEEKLY jobs before scheduling weekly plan (preserve Fixed/Daily jobs)
+                print(f"[WEEKLY] Clearing old weekly jobs for task {task_id}")
                 task = tasks_collection.find_one({"id": task_id}, {"activeJobs": 1})
                 if task and task.get("activeJobs"):
                     for old_job in task["activeJobs"]:
-                        old_job_id = old_job.get("job_id")
-                        if old_job_id:
-                            try:
-                                scheduler.remove_job(old_job_id)
-                            except Exception:
-                                pass
-                tasks_collection.update_one({"id": task_id}, {"$set": {"activeJobs": []}})
+                        try:
+                            if old_job.get("durationType") == "WeeklyRandomizedPlan":
+                                old_job_id = old_job.get("job_id")
+                                if old_job_id:
+                                    try:
+                                        scheduler.remove_job(old_job_id)
+                                    except Exception:
+                                        pass
+                                    # Also remove the reminder job for this weekly job if present
+                                    try:
+                                        scheduler.remove_job(f"reminder_{old_job_id}")
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
+                # Remove only weekly entries from activeJobs in DB
+                try:
+                    tasks_collection.update_one(
+                        {"id": task_id},
+                        {"$pull": {"activeJobs": {"durationType": "WeeklyRandomizedPlan"}}}
+                    )
+                except Exception:
+                    pass
 
                 # Schedule 7 jobs with random local start time 11:00–22:00, end at 22:00
                 # Also schedule "1 hour before" reminder notifications
@@ -2623,6 +2725,7 @@ async def send_command(
                 notify_daily = bool(command.get("notifyDaily", False))
                 total_target = 0
                 active_days = 0
+                warmup_days = 0
                 first_job_scheduled = False  # Track if we've set nextRunTime yet
                 # Extract account usernames once for per-account plan mutation
                 account_usernames_for_caps = []
@@ -2691,7 +2794,9 @@ async def send_command(
                         continue
                     
                     total_target += target_count
-                    if not is_rest:
+                    if is_rest:
+                        warmup_days += 1
+                    else:
                         active_days += 1
 
                     # Reuse planned times
@@ -2715,6 +2820,9 @@ async def send_command(
                         "dailyTarget": 0,
                         "method": day_method,  # Randomly 1 or 4 for active days, 9 for rest days
                     })
+                    # If warmup day, use the new daily warmup scheduler command type
+                    if day_method == 9 and is_rest:
+                        job_command["type"] = "WARMUPS_DAILY_START"
                     
                     # Add likes, comments, and duration for rest days (method 9)
                     if day_method == 9 and is_rest:
@@ -2953,7 +3061,7 @@ async def send_command(
                         raise HTTPException(status_code=500, detail=f"Failed to schedule weekly job: {str(e)}")
 
                 logger.info(
-                    f"[WEEKLY] ✅ Weekly plan scheduled: {task_id} | Total weekly target: {total_target} | Active days: {active_days} | Rest days: {7 - active_days}"
+                    f"[WEEKLY] ✅ Weekly plan scheduled: {task_id} | Total weekly target: {total_target} | Active days: {active_days} | Warmup days: {warmup_days} | Rest days: {7 - active_days - warmup_days}"
                 )
 
                 # Invalidate cache for immediate frontend refresh
@@ -3903,6 +4011,9 @@ async def send_command_to_devices(device_ids, command):
                                                     "timeZone": time_zone,
                                                     "appName": "Instagram Followers Bot",
                                                 }
+                                                # If warmup day, use the new daily warmup scheduler command type
+                                                if day_method == 9 and is_rest:
+                                                    job_command_new["type"] = "WARMUPS_DAILY_START"
                                                 
                                                 # Add likes, comments, and duration for rest days (method 9)
                                                 if day_method == 9 and is_rest:
@@ -4041,14 +4152,35 @@ async def send_command_to_devices(device_ids, command):
                                                         # Use the same account list and per-account plan if available
                                                         accounts_notify = []
                                                         per_acc_notify = {}
-                                                        try:
-                                                            accounts_notify = account_usernames if account_usernames else accounts_notify
-                                                        except NameError:
-                                                            pass
-                                                        try:
-                                                            per_acc_notify = per_account_plans if per_account_plans else per_acc_notify
-                                                        except NameError:
-                                                            pass
+                                                        # account_usernames / per_account_plans may not be in scope; try to extract from inputs_for_renewal
+                                                        if not accounts_notify:
+                                                            try:
+                                                                tmp_accounts = []
+                                                                new_inputs_notify2 = inputs_for_renewal
+                                                                if isinstance(new_inputs_notify2, dict):
+                                                                    wrap2 = new_inputs_notify2.get("inputs", [])
+                                                                    for wrap_entry2 in (wrap2 or []):
+                                                                        inner2 = wrap_entry2.get("inputs", [])
+                                                                        for node2 in (inner2 or []):
+                                                                            if isinstance(node2, dict) and node2.get("type") == "instagrmFollowerBotAcountWise":
+                                                                                for acc2 in (node2.get("Accounts") or []):
+                                                                                    uname2 = acc2.get("username")
+                                                                                    if isinstance(uname2, str):
+                                                                                        tmp_accounts.append(uname2)
+                                                                accounts_notify = tmp_accounts
+                                                            except Exception:
+                                                                accounts_notify = []
+                                                        if not per_acc_notify and accounts_notify:
+                                                            try:
+                                                                from utils.weekly_scheduler import generate_per_account_plans
+                                                                per_acc_notify = generate_per_account_plans(
+                                                                    generated,
+                                                                    accounts_notify,
+                                                                    (int(follow_weekly_range[0]), int(follow_weekly_range[1])),
+                                                                    (int(no_two_high_rule[0]), int(no_two_high_rule[1])),
+                                                                )
+                                                            except Exception:
+                                                                per_acc_notify = {}
                                                         if accounts_notify and per_acc_notify:
                                                             for uname in accounts_notify:
                                                                 plan = per_acc_notify.get(uname) or [0]*7
