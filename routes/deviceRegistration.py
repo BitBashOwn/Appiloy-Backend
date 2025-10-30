@@ -2306,9 +2306,9 @@ async def send_command(
                 # Warmup-only support: allow missing weekly ranges and week_start
                 warmup_only_flag = bool(command.get("warmupOnly", False))
                 # Default weekly warmup to TEST mode unless explicitly provided
-                if warmup_only_flag and ("testMode" not in command):
-                    test_mode = True
-                    logger.warning("[WEEKLY] Defaulting to TEST MODE for warmup-only weekly plan")
+                # if warmup_only_flag and ("testMode" not in command):
+                #     test_mode = True
+                #     logger.warning("[WEEKLY] Defaulting to TEST MODE for warmup-only weekly plan")
                 if warmup_only_flag:
                     # Provide safe defaults if missing
                     if len(follow_weekly_range) != 2:
