@@ -8,6 +8,7 @@ from utils.utils import generate_unique_id, get_current_user
 from datetime import datetime, timedelta
 from pydantic import BaseModel
 from typing import List, Optional
+from collections.abc import Mapping, Sequence
 import traceback
 import pytz
 import json
@@ -95,6 +96,17 @@ def invalidate_user_tasks_cache(email):
     """Invalidate all task cache entries for a specific user"""
     pattern = f"tasks:list:{email}:*"
     return cache_delete_pattern(pattern)
+
+
+def _json_serialize(value):
+    """Recursively convert datetimes and unsupported types to JSON-serializable forms."""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Mapping):
+        return {k: _json_serialize(v) for k, v in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_json_serialize(v) for v in value]
+    return value
 
 
 def process_task_schedule(task):
@@ -358,6 +370,7 @@ async def get_all_Task(
     page: int = Query(1, ge=1, description="Page number"),
     limit: int = Query(50, ge=1, le=200, description="Items per page"),
     search: str = Query(None, description="Search query for task name"),
+    include_schedule: bool = Query(False, description="Include schedule computation and fields"),
     current_user: dict = Depends(get_current_user)
 ):
     print("entered /get-all-task")
@@ -380,7 +393,36 @@ async def get_all_Task(
         
         # 3. Fetch tasks with pagination (add stable, indexed sort)
         skip = (page - 1) * limit
-        tasks_cursor = tasks_collection.find(query_filter, {"_id": 0}).sort([("LastModifiedDate", -1), ("id", 1)]).skip(skip).limit(limit)
+        # Lightweight projection by default; include heavier fields only when requested
+        projection = {
+            "_id": 0,
+            "id": 1,
+            "taskName": 1,
+            "status": 1,
+            "bot": 1,
+            "activationDate": 1,
+            "LastModifiedDate": 1,
+            "deviceIds": 1,
+            "scheduledTime": 1,
+            "exactStartTime": 1,
+            "timeZone": 1,
+            "scheduleTimeZone": 1,
+            "nextRunTime": 1,
+        }
+        if include_schedule:
+            projection.update({
+                "isScheduled": 1,
+                "newSchecdules": 1,
+                "activeJobs": 1,
+            })
+        tasks_cursor = (
+            tasks_collection
+                .find(query_filter, projection)
+                .sort([("LastModifiedDate", -1), ("id", 1)])
+                .skip(skip)
+                .limit(limit)
+                .batch_size(min(200, max(50, limit)))
+        )
         tasks = await asyncio.to_thread(list, tasks_cursor)
         
         # 4. Collect all unique bot IDs to avoid N+1 query problem
@@ -415,11 +457,13 @@ async def get_all_Task(
             if 'activationDate' in task and isinstance(task['activationDate'], datetime):
                 task['activationDate'] = task['activationDate'].isoformat()
 
-            # Use optimized schedule processing function
-            process_task_schedule(task)
+            # Use optimized schedule processing function only when requested
+            if include_schedule:
+                process_task_schedule(task)
 
             # Remove activeJobs from response to match original behavior
-            task.pop('activeJobs', None)
+            if not include_schedule:
+                task.pop('activeJobs', None)
 
             # Use pre-fetched bot data instead of individual database queries
             bot_id = task.get("bot")
@@ -428,13 +472,14 @@ async def get_all_Task(
         
         # 7. Prepare response
         response_data = {"message": "Task fetched successfully!", "tasks": tasks}
+        response_data_serialized = _json_serialize(response_data)
         
-        # 8. Cache the response for 10 seconds (short TTL for freshness)
+        # 8. Cache the response for 60 seconds (short TTL for freshness)
         if cache_key:
-            cache_set_json(cache_key, response_data, 10)  # Reduced from 30 to 10 seconds
+            cache_set_json(cache_key, response_data_serialized, 60)
             print(f"[CACHE] Stored task response for {cache_key}")
         
-        return JSONResponse(content=response_data, status_code=200)
+        return JSONResponse(content=response_data_serialized, status_code=200)
     except Exception as e:
         print(f"Exception occurred: {str(e)}")
         traceback.print_exc()
