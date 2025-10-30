@@ -24,6 +24,7 @@ class AppilotBot:
 
         @self.bot.event
         async def on_ready():
+            await self.bot.wait_until_ready()  # Wait for bot cache to be fully populated
             print(f"{self.bot.user} has connected to Discord!")
             # Start the message queue processor
             if self.queue_processor_task is None:

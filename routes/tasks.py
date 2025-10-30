@@ -12,6 +12,7 @@ import traceback
 import pytz
 import json
 import hashlib
+import asyncio
 from redis_client import get_redis_client
 
 
@@ -223,7 +224,8 @@ async def create_Task(task: taskModel, current_user: dict = Depends(get_current_
     try:
         task_dict = task.dict(by_alias=True)
         task_id = generate_unique_id()
-        bot = bots_collection.find_one(
+        bot = await asyncio.to_thread(
+            bots_collection.find_one,
             {"id": task.bot}, {"inputs": 1, "schedules": 1})
         task_dict.update({
             "id": task_id,
@@ -233,7 +235,7 @@ async def create_Task(task: taskModel, current_user: dict = Depends(get_current_
             "deviceIds": [],
             "schedules": bot.get("schedules")
         })
-        result = tasks_collection.insert_one(task_dict)
+        result = await asyncio.to_thread(tasks_collection.insert_one, task_dict)
         
         # Invalidate cache for the user after creating new task
         user_email = current_user.get("email")
@@ -253,7 +255,8 @@ async def create_Task_copy(task: taskCopyRequest, current_user: dict = Depends(g
         task_id = generate_unique_id()
         
         # Find the task to copy inputs from
-        task_to_copy = tasks_collection.find_one(
+        task_to_copy = await asyncio.to_thread(
+            tasks_collection.find_one,
             {"id": task.taskTocopy, "email": current_user.get("email")}, 
             {"inputs": 1}
         )
@@ -265,7 +268,8 @@ async def create_Task_copy(task: taskCopyRequest, current_user: dict = Depends(g
             )
         
         # Get bot information for schedules
-        bot = bots_collection.find_one(
+        bot = await asyncio.to_thread(
+            bots_collection.find_one,
             {"id": task.bot}, {"inputs": 1, "schedules": 1}
         )
         
@@ -298,7 +302,7 @@ async def create_Task_copy(task: taskCopyRequest, current_user: dict = Depends(g
             task_dict["channelId"] = task.channelId
         
         # Insert the new task
-        result = tasks_collection.insert_one(task_dict)
+        result = await asyncio.to_thread(tasks_collection.insert_one, task_dict)
         
         # Invalidate cache for the user after creating task copy
         user_email = current_user.get("email")
@@ -326,7 +330,8 @@ async def create_Task_copy(task: taskCopyRequest, current_user: dict = Depends(g
 @tasks_router.get("/get-task")
 async def get_Task(id: str, current_user: dict = Depends(get_current_user)):
     try:
-        task = tasks_collection.find_one(
+        task = await asyncio.to_thread(
+            tasks_collection.find_one,
             {"id": id}, {"_id": 0, "activationDate": 0, "status": 0,"activeJobs":0})
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -334,7 +339,9 @@ async def get_Task(id: str, current_user: dict = Depends(get_current_user)):
         if 'activationDate' in task and isinstance(task['activationDate'], datetime):
             task['activationDate'] = task['activationDate'].isoformat()
         # Fetch associated bot details
-        bot = bots_collection.find_one({"id": task.get("bot")}, {
+        bot = await asyncio.to_thread(
+            bots_collection.find_one,
+            {"id": task.get("bot")}, {
                                        "_id": 0, "platform": 1, "botName": 1, "imagePath": 1, "id": 1})
         if not bot:
             raise HTTPException(status_code=404, detail="Bot not found")
@@ -373,13 +380,8 @@ async def get_all_Task(
         
         # 3. Fetch tasks with pagination (add stable, indexed sort)
         skip = (page - 1) * limit
-        tasks = list(
-            tasks_collection
-                .find(query_filter, {"_id": 0})
-                .sort([("LastModifiedDate", -1), ("id", 1)])
-                .skip(skip)
-                .limit(limit)
-        )
+        tasks_cursor = tasks_collection.find(query_filter, {"_id": 0}).sort([("LastModifiedDate", -1), ("id", 1)]).skip(skip).limit(limit)
+        tasks = await asyncio.to_thread(list, tasks_cursor)
         
         # 4. Collect all unique bot IDs to avoid N+1 query problem
         bot_ids = list(set(task.get("bot") for task in tasks if task.get("bot")))
@@ -396,10 +398,11 @@ async def get_all_Task(
             else:
                 print(f"[CACHE MISS] Fetching bot data for {len(bot_ids)} bots")
                 # Fetch all bots in ONE query instead of individual queries
-                bots = list(bots_collection.find(
+                bots_cursor = bots_collection.find(
                     {"id": {"$in": bot_ids}},
                     {"_id": 0, "platform": 1, "botName": 1, "imagePath": 1, "id": 1}
-                ))
+                )
+                bots = await asyncio.to_thread(list, bots_cursor)
                 bots_map = {bot["id"]: bot for bot in bots}
                 
                 # Cache bot data for 30 minutes (bots don't change frequently)
@@ -452,8 +455,9 @@ async def get_scheduled_tasks(current_user: dict = Depends(get_current_user)):
         print(f"[CACHE MISS] Fetching fresh scheduled tasks for {user_email}")
         
         # 2. Get scheduled tasks, excluding _id only (keep activeJobs for processing)
-        result = list(tasks_collection.find(
-            {"email": user_email, "status": "scheduled"}, {"_id": 0}))
+        result_cursor = tasks_collection.find(
+            {"email": user_email, "status": "scheduled"}, {"_id": 0})
+        result = await asyncio.to_thread(list, result_cursor)
 
         # 3. Collect all unique bot IDs to avoid N+1 query problem
         bot_ids = list(set(task.get("bot") for task in result if task.get("bot")))
@@ -470,10 +474,11 @@ async def get_scheduled_tasks(current_user: dict = Depends(get_current_user)):
             else:
                 print(f"[CACHE MISS] Fetching bot data for {len(bot_ids)} bots")
                 # Fetch all bots in ONE query instead of individual queries
-                bots = list(bots_collection.find(
+                bots_cursor = bots_collection.find(
                     {"id": {"$in": bot_ids}},
                     {"_id": 0, "platform": 1, "botName": 1, "imagePath": 1, "id": 1}
-                ))
+                )
+                bots = await asyncio.to_thread(list, bots_cursor)
                 bots_map = {bot["id"]: bot for bot in bots}
                 
                 # Cache bot data for 30 minutes (bots don't change frequently)
@@ -525,8 +530,9 @@ async def get_running_tasks(current_user: dict = Depends(get_current_user)):
         print(f"[CACHE MISS] Fetching fresh running tasks for {user_email}")
         
         # 2. Get running tasks, excluding _id only (keep activeJobs for processing)
-        result = list(tasks_collection.find(
-            {"email": user_email, "status": "running"}, {"_id": 0}))
+        result_cursor = tasks_collection.find(
+            {"email": user_email, "status": "running"}, {"_id": 0})
+        result = await asyncio.to_thread(list, result_cursor)
         
         # 3. Collect all unique bot IDs to avoid N+1 query problem
         bot_ids = list(set(task.get("bot") for task in result if task.get("bot")))
@@ -543,10 +549,11 @@ async def get_running_tasks(current_user: dict = Depends(get_current_user)):
             else:
                 print(f"[CACHE MISS] Fetching bot data for {len(bot_ids)} bots")
                 # Fetch all bots in ONE query instead of individual queries
-                bots = list(bots_collection.find(
+                bots_cursor = bots_collection.find(
                     {"id": {"$in": bot_ids}},
                     {"_id": 0, "platform": 1, "botName": 1, "imagePath": 1, "id": 1}
-                ))
+                )
+                bots = await asyncio.to_thread(list, bots_cursor)
                 bots_map = {bot["id"]: bot for bot in bots}
                 
                 # Cache bot data for 30 minutes (bots don't change frequently)
@@ -587,7 +594,8 @@ async def delete_tasks(tasks: deleteRequest, current_user: dict = Depends(get_cu
     # print("Devices to delete:", tasks.tasks)
     # object_ids = [ObjectId(device_id) for device_id in devices.devices]
     # result = devices_collection.delete_many({"_id": {"$in": tasks.tasks}})
-    result = tasks_collection.delete_many(
+    result = await asyncio.to_thread(
+        tasks_collection.delete_many,
         {"id": {"$in": tasks.tasks}, "email": current_user.get("email")})
     
     # Invalidate cache for the user after deleting tasks
@@ -598,11 +606,12 @@ async def delete_tasks(tasks: deleteRequest, current_user: dict = Depends(get_cu
     return JSONResponse(content={"message": "Devices deleted successfully"}, status_code=200)
 
 @tasks_router.get("/get-task-fields")
-def get_task_fields(id: str, fields: List[str] = Query(...), current_user: dict = Depends(get_current_user)):
+async def get_task_fields(id: str, fields: List[str] = Query(...), current_user: dict = Depends(get_current_user)):
     try:
         projection = {field: 1 for field in fields}
         projection.update({"_id": 0})
-        task = tasks_collection.find_one(
+        task = await asyncio.to_thread(
+            tasks_collection.find_one,
             {"id": id, "email": current_user.get('email')}, projection)
         if task:
             # bot['_id'] = str(bot['_id'])
@@ -612,8 +621,10 @@ def get_task_fields(id: str, fields: List[str] = Query(...), current_user: dict 
 
 @tasks_router.post("/save-inputs")
 async def save_task_inputs(inputs: inputsSaveRequest, current_user: dict = Depends(get_current_user)):
-    result = tasks_collection.update_one({"id": inputs.id, "email": current_user.get(
-        "email")}, {"$set": {"inputs": inputs.inputs}})
+    result = await asyncio.to_thread(
+        tasks_collection.update_one,
+        {"id": inputs.id, "email": current_user.get("email")},
+        {"$set": {"inputs": inputs.inputs}})
     
     # Invalidate cache for the user after updating task inputs
     user_email = current_user.get("email")
@@ -624,8 +635,10 @@ async def save_task_inputs(inputs: inputsSaveRequest, current_user: dict = Depen
 
 @tasks_router.post("/save-device")
 async def save_task_devices(data: devicesSaveRequest, current_user: dict = Depends(get_current_user)):
-    result = tasks_collection.update_one({"id": data.id, "email": current_user.get(
-        "email")}, {"$set": {"deviceIds": data.devices}})
+    result = await asyncio.to_thread(
+        tasks_collection.update_one,
+        {"id": data.id, "email": current_user.get("email")},
+        {"$set": {"deviceIds": data.devices}})
     
     # Invalidate cache for the user after updating task devices
     user_email = current_user.get("email")
@@ -637,8 +650,10 @@ async def save_task_devices(data: devicesSaveRequest, current_user: dict = Depen
 @tasks_router.put("/update-task")
 async def update_task(data: dict, current_user: dict = Depends(get_current_user)):
     print(data)
-    result = tasks_collection.update_one({"id": data["id"], "email": current_user.get(
-        "email")}, {"$set": data["data"]})
+    result = await asyncio.to_thread(
+        tasks_collection.update_one,
+        {"id": data["id"], "email": current_user.get("email")},
+        {"$set": data["data"]})
     
     # Invalidate cache for the user after updating task
     user_email = current_user.get("email")
@@ -669,9 +684,10 @@ async def clear_old_jobs(tasks: clearOldJobsRequest, current_user: dict = Depend
         print(f"[LOG] Cutoff time for running tasks in {time_zone}: {cutoff_time_running}")
         
         # Fetch all tasks that need to be processed
-        all_tasks = list(tasks_collection.find(
+        all_tasks_cursor = tasks_collection.find(
             {"id": {"$in": task_ids}, "email": current_user.get("email")}
-        ))
+        )
+        all_tasks = await asyncio.to_thread(list, all_tasks_cursor)
         
         if not all_tasks:
             print("[LOG] No tasks found for the provided IDs and user")
@@ -776,7 +792,7 @@ async def clear_old_jobs(tasks: clearOldJobsRequest, current_user: dict = Depend
             
         # Execute bulk update if there are any operations
         if bulk_operations:
-            result = tasks_collection.bulk_write(bulk_operations)
+            result = await asyncio.to_thread(tasks_collection.bulk_write, bulk_operations)
             print(f"[LOG] Updated {result.modified_count} tasks")
             
             # Invalidate cache for the user after clearing old jobs
@@ -834,7 +850,8 @@ async def unschedule_jobs(tasks: deleteRequest, current_user: dict = Depends(get
         from scheduler import scheduler
         
         for task_id in tasks.tasks:
-            task = tasks_collection.find_one(
+            task = await asyncio.to_thread(
+                tasks_collection.find_one,
                 {"id": task_id, "email": current_user.get("email")},
                 {"activeJobs": 1}
             )
@@ -857,7 +874,8 @@ async def unschedule_jobs(tasks: deleteRequest, current_user: dict = Depends(get
                             print(f"[LOG] Could not remove reminder job {reminder_id}: {str(e)}")
         
         # Now update database to clear activeJobs and reset status
-        result = tasks_collection.update_many(
+        result = await asyncio.to_thread(
+            tasks_collection.update_many,
             {"id": {"$in": tasks.tasks}, "email": current_user.get("email")},
             {
                 "$set": {
@@ -873,7 +891,9 @@ async def unschedule_jobs(tasks: deleteRequest, current_user: dict = Depends(get
         
         # Also clear the specific time fields in schedules.inputs for EveryDayAutomaticRun
         for task_id in tasks.tasks:
-            task = tasks_collection.find_one({"id": task_id, "email": current_user.get("email")})
+            task = await asyncio.to_thread(
+                tasks_collection.find_one,
+                {"id": task_id, "email": current_user.get("email")})
             if task and task.get("schedules") and task.get("schedules", {}).get("inputs"):
                 schedules_inputs = task["schedules"]["inputs"]
                 updated_inputs = []
@@ -889,7 +909,8 @@ async def unschedule_jobs(tasks: deleteRequest, current_user: dict = Depends(get
                         updated_inputs.append(input_item)
                 
                 # Update the task with cleared time fields
-                tasks_collection.update_one(
+                await asyncio.to_thread(
+                    tasks_collection.update_one,
                     {"id": task_id, "email": current_user.get("email")},
                     {"$set": {"schedules.inputs": updated_inputs}}
                 )
