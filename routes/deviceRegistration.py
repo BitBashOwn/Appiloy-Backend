@@ -2577,12 +2577,27 @@ async def send_command(
 
                         # Build summary lines with planned start times (show per-account caps on active days; no global headline)
                         lines = []
+                        # Determine if this is a warmup-only plan (weekly target range 0–0)
+                        try:
+                            is_warmup_only_plan = int(follow_weekly_range[0]) == 0 and int(follow_weekly_range[1]) == 0
+                        except Exception:
+                            is_warmup_only_plan = False
                         for p in planned_schedule:
                             actual_day_name = day_names[p["start_local"].weekday()]
                             date_str = p["start_local"].strftime("%b %d")
                             time_str = p["start_local"].strftime("%H:%M")
                             if p["isOff"]:
-                                label = f"{actual_day_name} {date_str}: Off day - No tasks scheduled"
+                                if is_warmup_only_plan:
+                                    # Display off-days as warmup entries in warmup-only plans
+                                    try:
+                                        rand_likes = random.randint(0, 5)
+                                        rand_comments = random.randint(0, 2)
+                                        rand_duration = random.randint(5, 10)
+                                    except Exception:
+                                        rand_likes, rand_comments, rand_duration = 0, 0, 5
+                                    label = f"{actual_day_name} {date_str} {time_str}: Off day Warmup - {rand_likes} likes, {rand_comments} comments, {rand_duration}min"
+                                else:
+                                    label = f"{actual_day_name} {date_str}: Off day - No tasks scheduled"
                             elif p["isRest"]:
                                 label = f"{actual_day_name} {date_str} {time_str}: {p['methodLabel']} - {p.get('maxLikes', 10)} likes, {p.get('maxComments', 5)} comments, {p.get('warmupDuration', 60)}min"
                             else:
@@ -3970,6 +3985,8 @@ async def send_command_to_devices(device_ids, command):
                                         )
                                         last_index_new = scheduled_indices_new[-1] if scheduled_indices_new else None
 
+                                        # Track start times for renewal summary (only used for warmup-only rest day messaging)
+                                        renewal_start_times = {}
                                         for day in generated:
                                             day_index_new = int(day.get("dayIndex", 0))
                                             target_count = int(day.get("target", 0))
@@ -4051,6 +4068,12 @@ async def send_command_to_devices(device_ids, command):
                                                     {"$push": {"activeJobs": job_instance}}
                                                 )
                                                 
+                                                # Record start time for summary use
+                                                try:
+                                                    renewal_start_times[day_index_new] = start_time_local
+                                                except Exception:
+                                                    pass
+
                                                 # Log with actual calendar date
                                                 day_names_log = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
                                                 actual_day_log = day_names_log[start_time_local.weekday()]
@@ -4094,6 +4117,11 @@ async def send_command_to_devices(device_ids, command):
                                                     day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
                                                     method_names = {0: "Off Day", 1: "Follow Suggestions", 4: "Unfollow Non-Followers", 9: "Warmup"}
                                                     lines = []
+                                                    # Determine if this is a warmup-only plan (weekly target range 0–0)
+                                                    try:
+                                                        is_warmup_only_plan = int(follow_weekly_range[0]) == 0 and int(follow_weekly_range[1]) == 0
+                                                    except Exception:
+                                                        is_warmup_only_plan = False
                                                     for d in generated:
                                                         idx = int(d.get("dayIndex", 0))
                                                         is_rest_d = bool(d.get("isRest", False))
@@ -4108,8 +4136,29 @@ async def send_command_to_devices(device_ids, command):
                                                         date_str = actual_date.strftime("%b %d")  # e.g., "Oct 14"
                                                         
                                                         if is_off_d:
-                                                            label = f"{actual_day_name} {date_str}: Off day - No tasks scheduled"
+                                                            # For warmup-only plans, treat off-days as warmup-only in the summary
+                                                            if is_warmup_only_plan:
+                                                                try:
+                                                                    # Use a consistent display time window start (11:00)
+                                                                    display_time = (next_week_start + timedelta(days=idx)).replace(hour=11, minute=0, second=0, microsecond=0)
+                                                                    time_str = display_time.strftime("%H:%M")
+                                                                except Exception:
+                                                                    time_str = ""
+                                                                # Low randomized ranges for display
+                                                                try:
+                                                                    rand_likes = random.randint(0, 5)
+                                                                    rand_comments = random.randint(0, 2)
+                                                                    rand_duration = random.randint(5, 10)
+                                                                except Exception:
+                                                                    rand_likes, rand_comments, rand_duration = 0, 0, 5
+                                                                if time_str:
+                                                                    label = f"{actual_day_name} {date_str} {time_str}: Off day Warmup - {rand_likes} likes, {rand_comments} comments, {rand_duration}min"
+                                                                else:
+                                                                    label = f"{actual_day_name} {date_str}: Off day Warmup - {rand_likes} likes, {rand_comments} comments, {rand_duration}min"
+                                                            else:
+                                                                label = f"{actual_day_name} {date_str}: Off day - No tasks scheduled"
                                                         elif is_rest_d:
+                                                            # Keep rest day behavior unchanged for renewal summary
                                                             label = f"{actual_day_name} {date_str}: {method_label}"
                                                         else:
                                                             # Per-account breakdown for renewal summary
