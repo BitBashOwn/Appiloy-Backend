@@ -110,9 +110,9 @@ def generate_weekly_targets(
     rest_days_range: Tuple[int, int],
     no_two_high_rule: Tuple[int, int],
     method: int,
-    rest_day_likes_range: Tuple[int, int] = (4, 10),
-    rest_day_comments_range: Tuple[int, int] = (1, 3),
-    rest_day_duration_range: Tuple[int, int] = (30, 120),
+    rest_day_likes_range: Tuple[int, int] = (0, 5),
+    rest_day_comments_range: Tuple[int, int] = (0, 2),
+    rest_day_duration_range: Tuple[int, int] = (5, 10),
     off_days_range: Tuple[int, int] = (1, 1),
 ) -> List[Dict]:
     """
@@ -307,43 +307,69 @@ def generate_per_account_plans(
     min_week, max_week = follow_weekly_range
     high_day_threshold, follow_threshold = no_two_high_rule
 
-    # Identify active day indices from the schedule
+    # Identify active day indices and per-day methods
     active_indices = [d.get("dayIndex") for d in schedule if not d.get("isRest") and not d.get("isOff")]
     active_indices = [i for i in active_indices if isinstance(i, int)]
     min_active_days = max(1, len(active_indices))
 
-    # Compute a reasonable base per-day cap similar to calculate_daily_bounds
-    # Then introduce per-account variability to avoid identical caps
-    per_day_cap_base = max(1, min(30, max_week // min_active_days))
+    # Build method map and per-day caps: method 1 => 80, others => 30
+    method_per_day: List[int] = [0] * 7
+    per_day_caps: List[int] = [0] * 7
+    for day in schedule:
+        idx = day.get("dayIndex")
+        if isinstance(idx, int):
+            method_per_day[idx] = int(day.get("method", 0))
+            if not day.get("isRest") and not day.get("isOff"):
+                per_day_caps[idx] = 80 if method_per_day[idx] == 1 else 30
 
     per_account: Dict[str, List[int]] = {}
 
     for username in accounts:
         # Pick a random weekly total per account (independent to diversify)
         account_week_total = random.randint(min_week, max_week)
-        # Initialize all days to 0
         daily_targets = [0 for _ in range(7)]
 
-        # Per-account cap: add +/- 20-30% noise to base
-        per_account_cap = int(per_day_cap_base * random.uniform(0.8, 1.3))
-        per_account_cap = max(1, min(30, per_account_cap))
+        # Method 1 indices among active days
+        method1_indices = [i for i in active_indices if method_per_day[i] == 1]
 
-        # Distribute across active days with per-account caps
+        # Encourage baseline 40 per method 1 day, within weekly cap
+        min_required_for_method1 = 40 * len(method1_indices)
+        if method1_indices:
+            account_week_total = min(max(account_week_total, min_required_for_method1), max_week)
+
         remaining = account_week_total
-        # Prime with zeros across active days
+
+        # Seed method 1 days up to 40 each (capped by remaining and per-day caps)
+        for idx in method1_indices:
+            if remaining <= 0:
+                break
+            seed = min(40, per_day_caps[idx])
+            add = min(seed, remaining)
+            daily_targets[idx] += add
+            remaining -= add
+
+        # Distribute remaining across active days with slight noise to caps
+        cap_noise = random.uniform(0.9, 1.15)
+        effective_caps = [0] * 7
+        for i in active_indices:
+            noisy_cap = int(per_day_caps[i] * cap_noise)
+            effective_caps[i] = max(1, min(per_day_caps[i], noisy_cap))
+
         while remaining > 0 and active_indices:
             idx = random.choice(active_indices)
-            if daily_targets[idx] < per_account_cap:
+            if daily_targets[idx] < effective_caps[idx]:
                 daily_targets[idx] += 1
                 remaining -= 1
             else:
-                # If all active days are at cap, break to avoid infinite loop
-                if all(daily_targets[i] >= per_account_cap for i in active_indices):
+                if all(daily_targets[i] >= effective_caps[i] for i in active_indices):
                     break
 
-        # Apply no-two-high rule per account
-        # Build ordered list of targets by day 0..6
+        # Apply no-two-high rule and clamp method 1 to max 80
         adjusted = _apply_no_two_high_rule(daily_targets, high_day_threshold, follow_threshold)
+        for i in method1_indices:
+            if adjusted[i] > 80:
+                adjusted[i] = 80
+
         per_account[username] = adjusted
 
     return per_account
