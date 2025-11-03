@@ -332,21 +332,29 @@ def generate_per_account_plans(
         # Method 1 indices among active days
         method1_indices = [i for i in active_indices if method_per_day[i] == 1]
 
-        # Encourage baseline 40 per method 1 day, within weekly cap
-        min_required_for_method1 = 40 * len(method1_indices)
+        # Encourage baseline 10–20 per Method 1 day (randomized), within weekly cap
+        baseline_map: Dict[int, int] = {}
         if method1_indices:
+            for idx in method1_indices:
+                # Random baseline in [10, 20], also respect per-day caps for that index
+                baseline_map[idx] = min(per_day_caps[idx], random.randint(10, 20))
+            min_required_for_method1 = sum(baseline_map.values())
             account_week_total = min(max(account_week_total, min_required_for_method1), max_week)
 
         remaining = account_week_total
 
-        # Seed method 1 days up to 40 each (capped by remaining and per-day caps)
+        # Seed Method 1 days up to their randomized baseline (capped by remaining and per-day caps)
         for idx in method1_indices:
             if remaining <= 0:
                 break
-            seed = min(40, per_day_caps[idx])
+            seed_target = baseline_map.get(idx, 0)
+            if seed_target <= 0:
+                continue
+            seed = min(seed_target, per_day_caps[idx])
             add = min(seed, remaining)
-            daily_targets[idx] += add
-            remaining -= add
+            if add > 0:
+                daily_targets[idx] += add
+                remaining -= add
 
         # Distribute remaining across active days with slight noise to caps
         cap_noise = random.uniform(0.9, 1.15)

@@ -2521,6 +2521,9 @@ async def send_command(
                     planned_schedule.append(entry)
 
                 # --- BEGIN full weekly schedule Discord summary ---
+                task_meta = {}
+                server_id = None
+                channel_id = None
                 try:
                     task_meta = tasks_collection.find_one(
                         {"id": task_id}, {"_id": 0, "taskName": 1, "serverId": 1, "channelId": 1}
@@ -2790,6 +2793,93 @@ async def send_command(
                 else:
                     per_account_plans_caps = {}
 
+                # Precompute per-day account method choices (70/30 split for methods 1/4)
+                base_account_usernames = []
+                if account_usernames_for_caps:
+                    base_account_usernames = list(dict.fromkeys(account_usernames_for_caps))
+                elif 'account_usernames' in locals() and account_usernames:
+                    base_account_usernames = list(dict.fromkeys(account_usernames))
+                elif per_account_plans_caps:
+                    base_account_usernames = list(dict.fromkeys(per_account_plans_caps.keys()))
+
+                account_method_map_by_day = {}
+                if base_account_usernames:
+                    for planned_day in planned_schedule:
+                        di = int(planned_day.get("dayIndex", 0))
+                        is_rest_day = bool(planned_day.get("isRest", False))
+                        is_off_day = bool(planned_day.get("isOff", False))
+                        planned_method = int(planned_day.get("method", 0 if is_off_day else (9 if is_rest_day else 1)))
+
+                        if is_rest_day or is_off_day or planned_method == 9:
+                            account_method_map_by_day[di] = {}
+                            continue
+
+                        weighted_choices = random.choices([1, 4], weights=[70, 30], k=len(base_account_usernames))
+                        method_map = {
+                            uname: choice
+                            for uname, choice in zip(base_account_usernames, weighted_choices)
+                        }
+
+                        enforce_mixed_methods = len(base_account_usernames) > 1 and random.random() < 0.9
+                        if enforce_mixed_methods:
+                            unique_methods = set(method_map.values())
+                            if len(unique_methods) == 1:
+                                existing_method = unique_methods.pop()
+                                alternate_method = 4 if existing_method == 1 else 1
+                                flip_username = random.choice(base_account_usernames)
+                                method_map[flip_username] = alternate_method
+                                logger.info(
+                                    f"[WEEKLY-METHODS] Forced mixed assignment on day {di}: flipped {flip_username} to method {alternate_method}"
+                                )
+
+                        account_method_map_by_day[di] = method_map
+
+                        method1_count = sum(1 for method_value in method_map.values() if method_value == 1)
+                        method4_count = sum(1 for method_value in method_map.values() if method_value == 4)
+                        logger.info(
+                            f"[WEEKLY-METHODS] Day {di} account method distribution: method1={method1_count}, method4={method4_count}"
+                        )
+
+                if account_method_map_by_day and server_id and channel_id:
+                    try:
+                        method_summary_lines = []
+                        method_labels = {1: "Method 1", 4: "Method 4", 9: "Method 9"}
+                        for planned_day in planned_schedule:
+                            di = int(planned_day.get("dayIndex", 0))
+                            if planned_day.get("isRest") or planned_day.get("isOff"):
+                                continue
+                            per_day_map = account_method_map_by_day.get(di) or {}
+                            if not per_day_map:
+                                continue
+                            day_label = planned_day["start_local"].strftime("%a %b %d")
+                            assignments = []
+                            for uname in sorted(per_day_map.keys()):
+                                method_value = int(per_day_map.get(uname, 0))
+                                method_name = method_labels.get(method_value, f"Method {method_value}")
+                                assignments.append(f"{uname}: {method_name}")
+                            if assignments:
+                                method_summary_lines.append(f"{day_label} (Day {di})\n  " + "\n  ".join(assignments))
+                        if method_summary_lines:
+                            message_header = task_meta.get("taskName", "Weekly plan")
+                            test_flag = "[TEST MODE] " if test_mode else ""
+                            method_summary = (
+                                f"{test_flag}Account method selections for {message_header}:\n" + "\n".join(method_summary_lines)
+                            )
+                            from Bot.discord_bot import get_bot_instance
+                            bot = get_bot_instance()
+                            bot.send_message_sync(
+                                {
+                                    "message": method_summary,
+                                    "task_id": task_id,
+                                    "job_id": f"weekly_methods_{task_id}",
+                                    "server_id": int(server_id) if isinstance(server_id, str) and server_id.isdigit() else server_id,
+                                    "channel_id": int(channel_id) if isinstance(channel_id, str) and channel_id.isdigit() else channel_id,
+                                    "type": "info",
+                                }
+                            )
+                    except Exception as send_map_err:
+                        logger.warning(f"[WEEKLY] Failed to send account method summary: {send_map_err}")
+
                 job_day_indices = sorted(
                     int(p.get("dayIndex", 0))
                     for p in planned_schedule
@@ -2835,6 +2925,9 @@ async def send_command(
                         "dailyTarget": 0,
                         "method": day_method,  # Randomly 1 or 4 for active days, 9 for rest days
                     })
+
+                    account_method_map = account_method_map_by_day.get(day_index, {})
+                    job_command["accountMethodMap"] = account_method_map
                     # If warmup day, use the new daily warmup scheduler command type
                     if day_method == 9 and is_rest:
                         job_command["type"] = "WARMUPS_DAILY_START"
@@ -2854,26 +2947,57 @@ async def send_command(
                     # Apply per-account caps into newInputs and legacy inputs for active days (method != 9)
                     if day_method != 9 and account_usernames_for_caps and per_account_plans_caps:
                         try:
-                            logger.info(f"[WEEKLY-CAPS] Applying per-account caps for day {day_index}, method {day_method}")
+                            logger.info(f"[WEEKLY-CAPS] Applying per-account caps for day {day_index}, base method {day_method}")
                             logger.info(f"[WEEKLY-CAPS] Accounts: {account_usernames_for_caps}")
                             logger.info(f"[WEEKLY-CAPS] Per-account plans available: {list(per_account_plans_caps.keys())}")
-                            
-                            adjusted_inputs = copy.deepcopy(job_command.get("newInputs"))
-                            def set_follow_daily_for_account(block, uname, v):
-                                if block.get("input") is True:
-                                    if "minFollowsDaily" in block:
-                                        block["minFollowsDaily"] = max(1, int(v) - 1)
-                                    if "maxFollowsDaily" in block:
-                                        block["maxFollowsDaily"] = int(v)
-                                    # Calculate dynamic hourly limits based on daily target
-                                    # Formula: min = daily * 0.2, max = daily * 0.5
-                                    min_hourly = max(1, int(int(v) * 0.2))
-                                    max_hourly = max(min_hourly + 1, int(int(v) * 0.5))
-                                    if "minFollowsPerHour" in block:
-                                        block["minFollowsPerHour"] = min_hourly
-                                    if "maxFollowsPerHour" in block:
-                                        block["maxFollowsPerHour"] = max_hourly
 
+                            account_method_map = job_command.get("accountMethodMap") or {}
+                            if account_method_map:
+                                method1_count = sum(1 for m in account_method_map.values() if m == 1)
+                                method4_count = sum(1 for m in account_method_map.values() if m == 4)
+                                logger.info(
+                                    f"[WEEKLY-METHODS] Day {day_index} account method map attached: method1={method1_count}, method4={method4_count}"
+                                )
+
+                            def compute_caps(target_value):
+                                try:
+                                    daily_total = int(target_value)
+                                except (TypeError, ValueError):
+                                    daily_total = 0
+                                min_daily = max(1, daily_total - 1)
+                                min_hourly = max(1, int(daily_total * 0.2))
+                                max_hourly = max(min_hourly + 1, int(daily_total * 0.5))
+                                return daily_total, min_daily, min_hourly, max_hourly
+
+                            follow_block_names = {"Follow from Notification Suggestions", "Follow from Profile Posts"}
+
+                            def set_follow_caps(block, target_value):
+                                block["input"] = True
+                                daily_total, min_daily, min_hourly, max_hourly = compute_caps(target_value)
+                                if "minFollowsDaily" in block:
+                                    block["minFollowsDaily"] = min_daily
+                                if "maxFollowsDaily" in block:
+                                    block["maxFollowsDaily"] = daily_total
+                                if "minFollowsPerHour" in block:
+                                    block["minFollowsPerHour"] = min_hourly
+                                if "maxFollowsPerHour" in block:
+                                    block["maxFollowsPerHour"] = max_hourly
+
+                            def disable_follow_block(block):
+                                block["input"] = False
+
+                            def set_unfollow_caps(block, target_value):
+                                block["input"] = True
+                                daily_total, min_daily, min_hourly, max_hourly = compute_caps(target_value)
+                                block["minFollowsDaily"] = min_daily
+                                block["maxFollowsDaily"] = daily_total
+                                block["minFollowsPerHour"] = min_hourly
+                                block["maxFollowsPerHour"] = max_hourly
+
+                            def disable_unfollow_block(block):
+                                block["input"] = False
+
+                            adjusted_inputs = copy.deepcopy(job_command.get("newInputs"))
                             if isinstance(adjusted_inputs, dict):
                                 inputs_arr = adjusted_inputs.get("inputs", [])
                                 for wrap in (inputs_arr or []):
@@ -2883,32 +3007,25 @@ async def send_command(
                                             for acc in (node.get("Accounts") or []):
                                                 uname = acc.get("username")
                                                 if uname in account_usernames_for_caps:
-                                                    v = (per_account_plans_caps.get(uname) or [0]*7)[day_index]
-                                                    for blk in (acc.get("inputs") or []):
-                                                        # Only adjust the block matching the day's method
+                                                    v = (per_account_plans_caps.get(uname) or [0] * 7)[day_index]
+                                                    chosen_method = (account_method_map or {}).get(uname) or day_method
+                                                    account_inputs = acc.get("inputs") or []
+                                                    for blk in account_inputs:
                                                         name = blk.get("name") or ""
-                                                        if day_method == 1:
-                                                            if name in ("Follow from Notification Suggestions", "Follow from Profile Posts"):
-                                                                set_follow_daily_for_account(blk, uname, v)
-                                                        elif day_method == 4:
-                                                            # Tolerant detection: match by type or name prefix to avoid label drift
-                                                            is_unfollow_block = (
-                                                                (blk.get("type") == "toggleAndUnFollowInputs")
-                                                                or (name.startswith("Unfollow Non-Followers"))
-                                                            )
-                                                            if is_unfollow_block:
-                                                                # Force enable unfollow block for this per-day method
-                                                                blk["input"] = True
-                                                                # ⚠️ CRITICAL: Android expects "minFollowsDaily" NOT "minUnFollowsDaily"
-                                                                # Android reuses follow field names for unfollowing (quirk of the codebase)
-                                                                blk["minFollowsDaily"] = max(1, int(v) - 1)
-                                                                blk["maxFollowsDaily"] = int(v)
-                                                                # Calculate dynamic hourly limits based on daily target
-                                                                # Formula: min = daily * 0.2, max = daily * 0.5
-                                                                min_hourly = max(1, int(int(v) * 0.2))
-                                                                max_hourly = max(min_hourly + 1, int(int(v) * 0.5))
-                                                                blk["minFollowsPerHour"] = min_hourly
-                                                                blk["maxFollowsPerHour"] = max_hourly
+                                                        is_unfollow_block = (
+                                                            blk.get("type") == "toggleAndUnFollowInputs"
+                                                            or name.startswith("Unfollow Non-Followers")
+                                                        )
+                                                        if chosen_method == 1:
+                                                            if name in follow_block_names:
+                                                                set_follow_caps(blk, v)
+                                                            elif is_unfollow_block:
+                                                                disable_unfollow_block(blk)
+                                                        elif chosen_method == 4:
+                                                            if name in follow_block_names:
+                                                                disable_follow_block(blk)
+                                                            elif is_unfollow_block:
+                                                                set_unfollow_caps(blk, v)
                             job_command["newInputs"] = adjusted_inputs
 
                             # Also update legacy structure `inputs` so the device (which reads legacy) gets the same per-account caps
@@ -2917,40 +3034,38 @@ async def send_command(
                                 for acct in adjusted_legacy:
                                     uname_legacy = acct.get("username")
                                     if uname_legacy in account_usernames_for_caps:
-                                        v = (per_account_plans_caps.get(uname_legacy) or [0]*7)[day_index]
+                                        v = (per_account_plans_caps.get(uname_legacy) or [0] * 7)[day_index]
+                                        chosen_method_legacy = (account_method_map or {}).get(uname_legacy) or day_method
+                                        daily_total, min_daily, min_hourly, max_hourly = compute_caps(v)
                                         blocks = acct.get("inputs")
                                         if isinstance(blocks, list):
+                                            unfollow_configured_legacy = False
                                             for blk in blocks:
-                                                # Legacy blocks have method name as key with boolean true/false and the numeric fields beside
-                                                # For method 1: check if block has the key (regardless of current value)
-                                                if day_method == 1 and "Follow from Notification Suggestions" in blk:
-                                                    # Force enable for this method
-                                                    blk["Follow from Notification Suggestions"] = True
-                                                    # Apply caps
-                                                    blk["minFollowsDaily"] = max(1, int(v) - 1)
-                                                    blk["maxFollowsDaily"] = int(v)
-                                                    # Calculate dynamic hourly limits based on daily target
-                                                    # Formula: min = daily * 0.2, max = daily * 0.5
-                                                    min_hourly = max(1, int(int(v) * 0.2))
-                                                    max_hourly = max(min_hourly + 1, int(int(v) * 0.5))
-                                                    blk["minFollowsPerHour"] = min_hourly
-                                                    blk["maxFollowsPerHour"] = max_hourly
-                                                # For method 4: check if block has the key (regardless of current value)
-                                                elif day_method == 4 and "Unfollow Non-Followers" in blk:
-                                                    # Force enable for this method
-                                                    blk["Unfollow Non-Followers"] = True
-                                                    # ⚠️ CRITICAL: Android expects "minFollowsDaily" NOT "minUnFollowsDaily"
-                                                    # Android reuses follow field names for unfollowing (quirk of the codebase)
-                                                    blk["minFollowsDaily"] = max(1, int(v) - 1)
-                                                    blk["maxFollowsDaily"] = int(v)
-                                                    # Calculate dynamic hourly limits based on daily target
-                                                    # Formula: min = daily * 0.2, max = daily * 0.5
-                                                    min_hourly = max(1, int(int(v) * 0.2))
-                                                    max_hourly = max(min_hourly + 1, int(int(v) * 0.5))
-                                                    blk["minFollowsPerHour"] = min_hourly
-                                                    blk["maxFollowsPerHour"] = max_hourly
-                                                    logger.info(f"[WEEKLY-CAPS] Set unfollow caps for {uname_legacy}: daily={int(v)}, hourly=({min_hourly}-{max_hourly})")
-                                                # Extend here for other methods if needed
+                                                if chosen_method_legacy == 1:
+                                                    for follow_key in follow_block_names:
+                                                        if follow_key in blk:
+                                                            blk[follow_key] = True
+                                                            blk["minFollowsDaily"] = min_daily
+                                                            blk["maxFollowsDaily"] = daily_total
+                                                            blk["minFollowsPerHour"] = min_hourly
+                                                            blk["maxFollowsPerHour"] = max_hourly
+                                                    if "Unfollow Non-Followers" in blk:
+                                                        blk["Unfollow Non-Followers"] = False
+                                                elif chosen_method_legacy == 4:
+                                                    for follow_key in follow_block_names:
+                                                        if follow_key in blk:
+                                                            blk[follow_key] = False
+                                                    if "Unfollow Non-Followers" in blk:
+                                                        blk["Unfollow Non-Followers"] = True
+                                                        blk["minFollowsDaily"] = min_daily
+                                                        blk["maxFollowsDaily"] = daily_total
+                                                        blk["minFollowsPerHour"] = min_hourly
+                                                        blk["maxFollowsPerHour"] = max_hourly
+                                                        unfollow_configured_legacy = True
+                                            if chosen_method_legacy == 4 and unfollow_configured_legacy:
+                                                logger.info(
+                                                    f"[WEEKLY-CAPS] Set unfollow caps for {uname_legacy}: daily={daily_total}, hourly=({min_hourly}-{max_hourly})"
+                                                )
                             job_command["inputs"] = adjusted_legacy
                         except Exception as e:
                             logger.warning(f"[WEEKLY] Failed to inject per-account caps: {e}")
@@ -2976,6 +3091,7 @@ async def send_command(
                             "method": day_method,
                             "dayIndex": day_index,
                             "durationType": durationType,
+                            "accountMethodMap": account_method_map,
                         }
                         
                         # Set nextRunTime only for the first scheduled job
@@ -3480,15 +3596,26 @@ async def send_command_to_devices(device_ids, command):
     }
     
     # Modify inputs to enable the correct method and disable others
+    # Check for per-account method map (weekly randomization)
+    account_method_map = command.get("accountMethodMap", {})
+    
     if method_value in method_to_input_map:
         target_input_name = method_to_input_map[method_value]
-        logger.info(f"[METHOD-ENABLE] Detected method: {method_value} for task {task_id}, enabling '{target_input_name}'")
+        
+        if account_method_map:
+            logger.info(f"[METHOD-ENABLE] Using per-account method map for task {task_id}")
+        else:
+            logger.info(f"[METHOD-ENABLE] Detected method: {method_value} for task {task_id}, enabling '{target_input_name}'")
         
         # Modify legacy inputs format
         inputs_list = command.get("inputs", [])
         if isinstance(inputs_list, list):
             for account_data in inputs_list:
                 if isinstance(account_data, dict) and "inputs" in account_data:
+                    username = account_data.get("username")
+                    account_method = account_method_map.get(username, method_value) if account_method_map else method_value
+                    account_target_name = method_to_input_map.get(account_method, target_input_name)
+                    
                     account_inputs = account_data["inputs"]
                     if isinstance(account_inputs, list):
                         for block in account_inputs:
@@ -3497,10 +3624,10 @@ async def send_command_to_devices(device_ids, command):
                                 for method_name in method_to_input_map.values():
                                     if method_name in block:
                                         block[method_name] = False
-                                # Enable the target method
-                                if target_input_name in block:
-                                    block[target_input_name] = True
-                                    if method_value == 9:
+                                # Enable the target method for this account
+                                if account_target_name in block:
+                                    block[account_target_name] = True
+                                    if account_method == 9:
                                         # Use randomized warmup parameters from command
                                         warmup_duration = command.get("warmupDuration", 60)
                                         max_likes = command.get("maxLikes", 10)
@@ -3508,7 +3635,10 @@ async def send_command_to_devices(device_ids, command):
                                         block["warmupDuration"] = warmup_duration
                                         block["maxLikes"] = max_likes
                                         block["maxComments"] = max_comments
-                                    logger.info(f"[METHOD-ENABLE] Enabled '{target_input_name}' in legacy inputs")
+                                    if account_method_map:
+                                        logger.info(f"[METHOD-ENABLE] {username}: method {account_method} → '{account_target_name}'")
+                                    else:
+                                        logger.info(f"[METHOD-ENABLE] Enabled '{account_target_name}' in legacy inputs")
         
         # Also modify newInputs format (account-wise structure)
         new_inputs = command.get("newInputs")
@@ -3525,6 +3655,10 @@ async def send_command_to_devices(device_ids, command):
                                     accounts = node.get("Accounts", [])
                                     if isinstance(accounts, list):
                                         for account in accounts:
+                                            username = account.get("username")
+                                            account_method = account_method_map.get(username, method_value) if account_method_map else method_value
+                                            account_target_name = method_to_input_map.get(account_method, target_input_name)
+                                            
                                             acc_inputs = account.get("inputs", [])
                                             if isinstance(acc_inputs, list):
                                                 for block in acc_inputs:
@@ -3533,10 +3667,10 @@ async def send_command_to_devices(device_ids, command):
                                                         # Disable all methods
                                                         if name in method_to_input_map.values():
                                                             block["input"] = False
-                                                        # Enable the target method
-                                                        if name == target_input_name:
+                                                        # Enable the target method for this account
+                                                        if name == account_target_name:
                                                             block["input"] = True
-                                                            if method_value == 9:
+                                                            if account_method == 9:
                                                                 # Use randomized warmup parameters from command
                                                                 warmup_duration = command.get("warmupDuration", 60)
                                                                 max_likes = command.get("maxLikes", 10)
@@ -3544,7 +3678,10 @@ async def send_command_to_devices(device_ids, command):
                                                                 block["warmupDuration"] = warmup_duration
                                                                 block["maxLikes"] = max_likes
                                                                 block["maxComments"] = max_comments
-                                                            logger.info(f"[METHOD-ENABLE] Enabled '{target_input_name}' (account-wise)")
+                                                            if account_method_map:
+                                                                logger.info(f"[METHOD-ENABLE] {username}: method {account_method} → '{account_target_name}' (account-wise)")
+                                                            else:
+                                                                logger.info(f"[METHOD-ENABLE] Enabled '{account_target_name}' (account-wise)")
 
 
 
