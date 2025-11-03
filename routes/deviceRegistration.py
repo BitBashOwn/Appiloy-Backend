@@ -2856,9 +2856,9 @@ async def send_command(
                             for uname in sorted(per_day_map.keys()):
                                 method_value = int(per_day_map.get(uname, 0))
                                 method_name = method_labels.get(method_value, f"Method {method_value}")
-                                assignments.append(f"{uname}: {method_name}")
+                                assignments.append(f"  - {uname}: {method_name}")
                             if assignments:
-                                method_summary_lines.append(f"{day_label} (Day {di})\n  " + "\n  ".join(assignments))
+                                method_summary_lines.append(f"**📅 {day_label} (Day {di})**\n" + "\n".join(assignments))
                         if method_summary_lines:
                             message_header = task_meta.get("taskName", "Weekly plan")
                             test_flag = "[TEST MODE] " if test_mode else ""
