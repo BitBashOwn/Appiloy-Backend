@@ -2678,8 +2678,13 @@ async def send_command(
                                 parts = []
                                 for uname in sorted(account_usernames):
                                     if uname in per_day_map:
-                                        max_f = (per_account_plans.get(uname) or [0]*7)[di] if per_account_plans else 0
-                                        parts.append(f"{uname}: Method {per_day_map[uname]}, {max_f}(follows max)")
+                                        account_m = per_day_map[uname]
+                                        if account_m == 9:
+                                            # For warmup, do not show or assign follows
+                                            parts.append(f"{uname}: Method 9")
+                                        else:
+                                            max_f = (per_account_plans.get(uname) or [0]*7)[di] if per_account_plans else 0
+                                            parts.append(f"{uname}: Method {account_m}, {max_f}(follows max)")
                                 if parts:
                                     label = f"{heading}\n" + ", ".join(parts)
                                 else:
