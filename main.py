@@ -75,6 +75,7 @@ import uvicorn
 from routes.bots import bots_router
 from routes.tasks import tasks_router
 from routes.tier import tier_router
+from routes.twofa import twofa_router
 from scheduler import scheduler
 import asyncio
 from connection_registry import WORKER_ID, cleanup_stale_workers
@@ -147,6 +148,7 @@ app.include_router(devices_router, tags=["devices endpoints"])
 app.include_router(bots_router, tags=["bot endpoints"])
 app.include_router(tasks_router, tags=["Task endpoints"])
 app.include_router(tier_router, prefix="/api/tier", tags=["Tier endpoints"])
+app.include_router(twofa_router, tags=["2FA endpoints"])
 app.include_router(device_router, tags=["Android endpoints"])
 
 if __name__ == "__main__":

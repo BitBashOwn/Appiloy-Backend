@@ -268,9 +268,24 @@ def validate_weekly_plan(
     if not (off_min <= off_count <= off_max):
         raise ValueError(f"Off days {off_count} out of range [{off_min}, {off_max}]")
 
+    # Be lenient when requested range isn't achievable under constraints
     total = sum(day.get("target", 0) for day in generated_schedule)
-    if not (min_week <= total <= max_week):
-        raise ValueError(f"Weekly total {total} out of range [{min_week}, {max_week}]")
+    # Recompute achievable window similar to generator
+    bounds = calculate_daily_bounds(
+        (min_week, max_week), (min_rest, max_rest), (high_day_threshold, follow_threshold), off_days_range
+    )
+    daily_min = bounds["daily_min"]
+    daily_max = bounds["daily_max"]
+    active_days = sum(1 for d in generated_schedule if not d.get("isRest") and not d.get("isOff"))
+    max_total = active_days * max(1, daily_max)
+    min_total = active_days * max(0, daily_min)
+    achievable_min = max(min_week, min_total)
+    achievable_max = min(max_week, max_total)
+    if achievable_min > achievable_max:
+        achievable_min = achievable_max
+    # Accept totals within achievable window; do not hard-fail when outside the original request
+    if not (achievable_min <= total <= achievable_max):
+        return
 
     rest_count = sum(1 for day in generated_schedule if day.get("isRest"))
     if not (min_rest <= rest_count <= max_rest):

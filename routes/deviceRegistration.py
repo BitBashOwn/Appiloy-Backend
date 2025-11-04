@@ -2537,9 +2537,9 @@ async def send_command(
                         day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
                         method_names = {
                             0: "Off Day",
-                            1: "Method 1: Follow Suggestions",
-                            4: "Method 4: Unfollow Non-Followers",
-                            9: "Method 9: Warmup"
+                            1: "Method 1",
+                            4: "Method 4",
+                            9: "Method 9"
                         }
                         
                         # Add methodLabel to planned_schedule entries for Discord summary
@@ -2547,7 +2547,7 @@ async def send_command(
                             day_method = int(p.get("method", 0))
                             p["methodLabel"] = method_names.get(day_method, f"method {day_method}")
                         
-                        # --- Per-account weekly plans (randomized per account) ---
+                        # --- Per-account weekly plans (caps only; methods come from newInputs) ---
                         per_account_plans = {}
                         account_usernames = []
                         try:
@@ -2578,6 +2578,74 @@ async def send_command(
                                 logger.warning(f"[WEEKLY] Failed to build per-account plans: {e}")
                                 per_account_plans = {}
 
+                        # Extract per-account methods from newInputs for summary display
+                        input_name_to_method_map = {
+                            "Follow from Notification Suggestions": 1,
+                            "Follow from Profile Followers List": 2,
+                            "Follow from Post": 3,
+                            "Unfollow Non-Followers": 4,
+                            "Accept All Follow Requests": 5,
+                            "Follow from Profile Posts": 6,
+                            "Switch Account Public To Private": 7,
+                            "Switch Account Private To Public": 8,
+                            "Standalone Warmup": 9,
+                        }
+
+                        def extract_account_methods_for_summary(new_inputs_obj):
+                            account_methods = {}
+                            try:
+                                if isinstance(new_inputs_obj, dict):
+                                    wrapper_inputs = new_inputs_obj.get("inputs", [])
+                                    for wrapper_entry in (wrapper_inputs or []):
+                                        inner_inputs = wrapper_entry.get("inputs", [])
+                                        for node in (inner_inputs or []):
+                                            if isinstance(node, dict) and node.get("type") == "instagrmFollowerBotAcountWise":
+                                                accounts = node.get("Accounts", [])
+                                                for acc in (accounts or []):
+                                                    username = acc.get("username")
+                                                    if not isinstance(username, str):
+                                                        continue
+                                                    acc_inputs = acc.get("inputs", [])
+                                                    enabled_method = None
+                                                    for input_block in (acc_inputs or []):
+                                                        if isinstance(input_block, dict):
+                                                            if input_block.get("input", False):
+                                                                name = input_block.get("name", "")
+                                                                if name in input_name_to_method_map:
+                                                                    m = input_name_to_method_map[name]
+                                                                    if enabled_method is None or (m != 9 and enabled_method == 9):
+                                                                        enabled_method = m
+                                                    if enabled_method:
+                                                        account_methods[username] = enabled_method
+                            except Exception:
+                                pass
+                            return account_methods
+
+                        account_methods_for_summary = extract_account_methods_for_summary(command.get("newInputs"))
+                        resolved_method = command.get("method")
+                        try:
+                            if isinstance(resolved_method, list) and len(resolved_method) > 0:
+                                base_method_for_summary = int(resolved_method[0])
+                            else:
+                                base_method_for_summary = int(resolved_method) if resolved_method is not None else 1
+                        except (ValueError, TypeError):
+                            base_method_for_summary = 1
+
+                        # Build a simple per-day account method map for summary display
+                        account_method_map_by_day_for_summary = {}
+                        for p in planned_schedule:
+                            di_tmp = int(p.get("dayIndex", 0))
+                            is_rest_tmp = bool(p.get("isRest", False))
+                            is_off_tmp = bool(p.get("isOff", False))
+                            planned_m = int(p.get("method", 0 if is_off_tmp else (9 if is_rest_tmp else base_method_for_summary)))
+                            if is_rest_tmp or is_off_tmp or planned_m == 9:
+                                account_method_map_by_day_for_summary[di_tmp] = {}
+                            else:
+                                m = {}
+                                for uname in account_usernames:
+                                    m[uname] = account_methods_for_summary.get(uname, planned_m)
+                                account_method_map_by_day_for_summary[di_tmp] = m
+
                         # Build summary lines with planned start times (show per-account caps on active days; no global headline)
                         lines = []
                         # Determine if this is a warmup-only plan (weekly target range 0–0)
@@ -2589,6 +2657,7 @@ async def send_command(
                             actual_day_name = day_names[p["start_local"].weekday()]
                             date_str = p["start_local"].strftime("%b %d")
                             time_str = p["start_local"].strftime("%H:%M")
+                            heading = f"📅 **{actual_day_name} {date_str}** {time_str}:"
                             if p["isOff"]:
                                 if is_warmup_only_plan:
                                     # Display off-days as warmup entries in warmup-only plans
@@ -2598,31 +2667,29 @@ async def send_command(
                                         rand_duration = random.randint(5, 10)
                                     except Exception:
                                         rand_likes, rand_comments, rand_duration = 0, 0, 5
-                                    label = f"{actual_day_name} {date_str} {time_str}: Off day Warmup - {rand_likes} likes, {rand_comments} comments, {rand_duration}min"
+                                    label = f"{heading}\nOff day Warmup - {rand_likes} likes, {rand_comments} comments, {rand_duration}min"
                                 else:
-                                    label = f"{actual_day_name} {date_str}: Off day - No tasks scheduled"
+                                    label = f"📅 **{actual_day_name} {date_str}**:\nOff day - No tasks scheduled"
                             elif p["isRest"]:
-                                label = f"{actual_day_name} {date_str} {time_str}: {p['methodLabel']} - {p.get('maxLikes', 10)} likes, {p.get('maxComments', 5)} comments, {p.get('warmupDuration', 60)}min"
+                                label = f"{heading}\n{p['methodLabel']} - {p.get('maxLikes', 10)} likes, {p.get('maxComments', 5)} comments, {p.get('warmupDuration', 60)}min"
                             else:
-                                # Per-account breakdown
-                                per_account_str = ""
-                                if per_account_plans and account_usernames:
-                                    di = int(p.get("dayIndex", 0))
-                                    parts = []
-                                    for uname in account_usernames:
-                                        v = (per_account_plans.get(uname) or [0]*7)[di]
-                                        parts.append(f"{uname}: {v}")
-                                    per_account_str = f" | Accounts: " + ", ".join(parts)
-                                label = f"{actual_day_name} {date_str} {time_str}: {p['methodLabel']}{per_account_str}"
+                                di = int(p.get("dayIndex", 0))
+                                per_day_map = account_method_map_by_day_for_summary.get(di) or {}
+                                parts = []
+                                for uname in sorted(account_usernames):
+                                    if uname in per_day_map:
+                                        max_f = (per_account_plans.get(uname) or [0]*7)[di] if per_account_plans else 0
+                                        parts.append(f"{uname}: Method {per_day_map[uname]}, {max_f}(follows max)")
+                                if parts:
+                                    label = f"{heading}\n" + ", ".join(parts)
+                                else:
+                                    label = f"{heading}\n{p['methodLabel']}"
                             lines.append(label)
                         
                         test_mode_indicator = "TEST MODE (10-min gaps)\n" if test_mode else ""
                         summary = (
                             f"Weekly plan scheduled: {task_meta.get('taskName', 'Unknown Task')}\n"
-                            f"{test_mode_indicator}"
-                            f"Week start: {local_dt.strftime('%a %b %d')}\n"
-                            f"Weekly target range: {int(follow_weekly_range[0])}–{int(follow_weekly_range[1])}\n"
-                            f"Rest days range: {int(rest_days_range[0])}–{int(rest_days_range[1])}\n\n" + "\n".join(lines)
+                            f"{test_mode_indicator}\n" + "\n".join(lines)
                         )
 
                         from Bot.discord_bot import get_bot_instance
@@ -2793,7 +2860,7 @@ async def send_command(
                 else:
                     per_account_plans_caps = {}
 
-                # Precompute per-day account method choices (70/30 split for methods 1/4)
+                # Build per-day account method map from newInputs (no randomization)
                 base_account_usernames = []
                 if account_usernames_for_caps:
                     base_account_usernames = list(dict.fromkeys(account_usernames_for_caps))
@@ -2802,83 +2869,75 @@ async def send_command(
                 elif per_account_plans_caps:
                     base_account_usernames = list(dict.fromkeys(per_account_plans_caps.keys()))
 
+                input_name_to_method_map = {
+                    "Follow from Notification Suggestions": 1,
+                    "Follow from Profile Followers List": 2,
+                    "Follow from Post": 3,
+                    "Unfollow Non-Followers": 4,
+                    "Accept All Follow Requests": 5,
+                    "Follow from Profile Posts": 6,
+                    "Switch Account Public To Private": 7,
+                    "Switch Account Private To Public": 8,
+                    "Standalone Warmup": 9,
+                }
+
+                def extract_account_methods_from_newinputs(new_inputs_obj):
+                    methods = {}
+                    try:
+                        if isinstance(new_inputs_obj, dict):
+                            for wrap in (new_inputs_obj.get("inputs") or []):
+                                for node in (wrap.get("inputs") or []):
+                                    if isinstance(node, dict) and node.get("type") == "instagrmFollowerBotAcountWise":
+                                        for acc in (node.get("Accounts") or []):
+                                            uname = acc.get("username")
+                                            if not isinstance(uname, str):
+                                                continue
+                                            enabled_m = None
+                                            for blk in (acc.get("inputs") or []):
+                                                if isinstance(blk, dict) and blk.get("input", False):
+                                                    name = blk.get("name", "")
+                                                    if name in input_name_to_method_map:
+                                                        mval = input_name_to_method_map[name]
+                                                        if enabled_m is None or (mval != 9 and enabled_m == 9):
+                                                            enabled_m = mval
+                                            if enabled_m:
+                                                methods[uname] = enabled_m
+                    except Exception:
+                        pass
+                    return methods
+
+                account_methods_from_inputs = extract_account_methods_from_newinputs(command.get("newInputs"))
+                resolved_method_any = command.get("method")
+                try:
+                    if isinstance(resolved_method_any, list) and len(resolved_method_any) > 0:
+                        base_day_method = int(resolved_method_any[0])
+                    else:
+                        base_day_method = int(resolved_method_any) if resolved_method_any is not None else 1
+                except (ValueError, TypeError):
+                    base_day_method = 1
+
                 account_method_map_by_day = {}
                 if base_account_usernames:
                     for planned_day in planned_schedule:
                         di = int(planned_day.get("dayIndex", 0))
                         is_rest_day = bool(planned_day.get("isRest", False))
                         is_off_day = bool(planned_day.get("isOff", False))
-                        planned_method = int(planned_day.get("method", 0 if is_off_day else (9 if is_rest_day else 1)))
+                        planned_method = int(planned_day.get("method", 0 if is_off_day else (9 if is_rest_day else base_day_method)))
 
                         if is_rest_day or is_off_day or planned_method == 9:
                             account_method_map_by_day[di] = {}
                             continue
 
-                        weighted_choices = random.choices([1, 4], weights=[70, 30], k=len(base_account_usernames))
-                        method_map = {
-                            uname: choice
-                            for uname, choice in zip(base_account_usernames, weighted_choices)
-                        }
-
-                        enforce_mixed_methods = len(base_account_usernames) > 1 and random.random() < 0.9
-                        if enforce_mixed_methods:
-                            unique_methods = set(method_map.values())
-                            if len(unique_methods) == 1:
-                                existing_method = unique_methods.pop()
-                                alternate_method = 4 if existing_method == 1 else 1
-                                flip_username = random.choice(base_account_usernames)
-                                method_map[flip_username] = alternate_method
-                                logger.info(
-                                    f"[WEEKLY-METHODS] Forced mixed assignment on day {di}: flipped {flip_username} to method {alternate_method}"
-                                )
+                        method_map = {}
+                        for uname in base_account_usernames:
+                            method_map[uname] = account_methods_from_inputs.get(uname, planned_method)
 
                         account_method_map_by_day[di] = method_map
+                        m1 = sum(1 for v in method_map.values() if v == 1)
+                        m4 = sum(1 for v in method_map.values() if v == 4)
+                        logger.info(f"[WEEKLY-METHODS] Day {di} account method distribution: method1={m1}, method4={m4}")
 
-                        method1_count = sum(1 for method_value in method_map.values() if method_value == 1)
-                        method4_count = sum(1 for method_value in method_map.values() if method_value == 4)
-                        logger.info(
-                            f"[WEEKLY-METHODS] Day {di} account method distribution: method1={method1_count}, method4={method4_count}"
-                        )
-
-                if account_method_map_by_day and server_id and channel_id:
-                    try:
-                        method_summary_lines = []
-                        method_labels = {1: "Method 1", 4: "Method 4", 9: "Method 9"}
-                        for planned_day in planned_schedule:
-                            di = int(planned_day.get("dayIndex", 0))
-                            if planned_day.get("isRest") or planned_day.get("isOff"):
-                                continue
-                            per_day_map = account_method_map_by_day.get(di) or {}
-                            if not per_day_map:
-                                continue
-                            day_label = planned_day["start_local"].strftime("%a %b %d")
-                            assignments = []
-                            for uname in sorted(per_day_map.keys()):
-                                method_value = int(per_day_map.get(uname, 0))
-                                method_name = method_labels.get(method_value, f"Method {method_value}")
-                                assignments.append(f"  - {uname}: {method_name}")
-                            if assignments:
-                                method_summary_lines.append(f"**📅 {day_label} (Day {di})**\n" + "\n".join(assignments))
-                        if method_summary_lines:
-                            message_header = task_meta.get("taskName", "Weekly plan")
-                            test_flag = "[TEST MODE] " if test_mode else ""
-                            method_summary = (
-                                f"{test_flag}Account method selections for {message_header}:\n" + "\n".join(method_summary_lines)
-                            )
-                            from Bot.discord_bot import get_bot_instance
-                            bot = get_bot_instance()
-                            bot.send_message_sync(
-                                {
-                                    "message": method_summary,
-                                    "task_id": task_id,
-                                    "job_id": f"weekly_methods_{task_id}",
-                                    "server_id": int(server_id) if isinstance(server_id, str) and server_id.isdigit() else server_id,
-                                    "channel_id": int(channel_id) if isinstance(channel_id, str) and channel_id.isdigit() else channel_id,
-                                    "type": "info",
-                                }
-                            )
-                    except Exception as send_map_err:
-                        logger.warning(f"[WEEKLY] Failed to send account method summary: {send_map_err}")
+                # (Merged per-account method details into the main summary above; no separate method map message)
 
                 job_day_indices = sorted(
                     int(p.get("dayIndex", 0))
@@ -2923,7 +2982,7 @@ async def send_command(
                         "weeklyRenewalTrigger": bool(last_scheduled_day_index is not None and day_index == last_scheduled_day_index),
                         # Device should rely on per-account caps only
                         "dailyTarget": 0,
-                        "method": day_method,  # Randomly 1 or 4 for active days, 9 for rest days
+                        "method": day_method,  # Base method; per-account overrides provided via accountMethodMap
                     })
 
                     account_method_map = account_method_map_by_day.get(day_index, {})
@@ -4221,7 +4280,7 @@ async def send_command_to_devices(device_ids, command):
                                                 reminder_time_utc_renewal = start_time_utc - timedelta(hours=1)
                                                 if reminder_time_utc_renewal > datetime.now(pytz.UTC):
                                                     reminder_job_id_renewal = f"reminder_{job_id_new}"
-                                                    method_names_renewal = {1: "Method 1: Follow Suggestions", 4: "Method 4: Unfollow Non-Followers", 9: "Method 9: Warmup"}
+                                                    method_names_renewal = {1: "Method 1", 4: "Method 4", 9: "Method 9"}
                                                     method_label_renewal = method_names_renewal.get(day_method, f"method {day_method}")
                                                     activity_text_renewal = f"{target_count} follows ({method_label_renewal})" if not is_rest else f"{method_label_renewal}"
                                                     
