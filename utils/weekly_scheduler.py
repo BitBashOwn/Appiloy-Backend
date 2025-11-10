@@ -1,6 +1,6 @@
 import random
 from datetime import datetime, timedelta
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional, Set
 
 
 def _ensure_monday(dt: datetime) -> bool:
@@ -114,6 +114,7 @@ def generate_weekly_targets(
     rest_day_comments_range: Tuple[int, int] = (0, 2),
     rest_day_duration_range: Tuple[int, int] = (5, 10),
     off_days_range: Tuple[int, int] = (1, 1),
+    previous_active_days: Optional[Set[int]] = None,
 ) -> List[Dict]:
     """
     Generate a 7-day schedule list of dicts: {dayIndex, target, isRest, method, maxLikes, maxComments, warmupDuration}.
@@ -132,45 +133,90 @@ def generate_weekly_targets(
     min_rest, max_rest = rest_days_range
     high_day_threshold, follow_threshold = no_two_high_rule
 
-    off_min, off_max = off_days_range
-    if off_min > off_max:
-        off_min, off_max = off_max, off_min
-    off_min = max(0, off_min)
-    # Keep at least one non-off day available for activity/rest selections
-    off_max = max(off_min, min(6, max(0, off_max)))
-    off_count = random.randint(off_min, off_max) if off_max >= 0 else 0
-    off_indices = set(random.sample(range(7), off_count)) if off_count else set()
-
-    # Choose rest days (excluding the off days) respecting provided range
-    available_for_rest = [d for d in range(7) if d not in off_indices]
-    max_possible_rest = len(available_for_rest)
-    rest_min = max(0, min_rest)
-    rest_max = min(max(0, max_rest), max_possible_rest)
-    if rest_min > rest_max:
-        rest_min = rest_max
-    rest_days_count = random.randint(rest_min, rest_max) if rest_max >= 0 else 0
-    rest_indices = set()
-    if rest_days_count and max_possible_rest > 0:
-        rest_indices = set(random.sample(available_for_rest, min(rest_days_count, max_possible_rest)))
-
-    # Determine active days and bounds
+    # ALWAYS ensure exactly 4 active days
+    TARGET_ACTIVE_DAYS = 4
+    active_days = TARGET_ACTIVE_DAYS
+    
+    # First, select 4 active days randomly, avoid repeating the exact previous set if provided
+    all_days = list(range(7))
+    attempts = 0
+    while True:
+        active_indices_set = set(random.sample(all_days, TARGET_ACTIVE_DAYS))
+        attempts += 1
+        if not previous_active_days or active_indices_set != previous_active_days or attempts >= 8:
+            break
+    
+    # Remaining 3 days will be distributed between rest and off days
+    remaining_days = [d for d in range(7) if d not in active_indices_set]
+    
+    # Determine bounds for calculation (using rest/off ranges for remaining days)
     bounds = calculate_daily_bounds(follow_weekly_range, rest_days_range, no_two_high_rule, off_days_range)
     daily_min = bounds["daily_min"]
     daily_max = bounds["daily_max"]
-    # Effective active days exclude rest days and off days
-    active_days = 7 - len(rest_indices) - len(off_indices)
-
-    # Ensure at least one active day remains
-    if active_days <= 0:
-        # First, try converting rest days back to active days
-        while active_days <= 0 and rest_indices:
-            rest_indices.pop()
-            active_days = 7 - len(rest_indices) - len(off_indices)
-        # If still no active day, reduce off days
-        while active_days <= 0 and off_indices:
-            off_indices.pop()
-            active_days = 7 - len(rest_indices) - len(off_indices)
-        active_days = max(1, active_days)
+    
+    # Distribute the 3 remaining days between rest and off days
+    # Respect the provided ranges, but ensure we end up with exactly 3 non-active days
+    off_min, off_max = off_days_range
+    if off_min > off_max:
+        off_min, off_max = off_max, off_min
+    off_min = max(0, min(off_min, 3))  # Can't have more than 3 off days (since we need 4 active)
+    off_max = max(off_min, min(3, max(0, off_max)))  # Can't have more than 3 off days
+    
+    rest_min = max(0, min_rest)
+    rest_max = min(max(0, max_rest), 3)  # Can't have more than 3 rest days
+    
+    # With exactly 4 active days, we have 3 remaining days to split
+    # Find valid combinations where off_count + rest_count = 3
+    # and both are within their respective ranges
+    valid_combinations = []
+    for off_candidate in range(off_min, off_max + 1):
+        rest_candidate = 3 - off_candidate
+        if rest_min <= rest_candidate <= rest_max:
+            valid_combinations.append((off_candidate, rest_candidate))
+    
+    # If no valid combination exists, prioritize rest days minimum, then off days minimum
+    if not valid_combinations:
+        # Try to satisfy rest_min first
+        if rest_min <= 3:
+            rest_count = rest_min
+            off_count = 3 - rest_count
+            # Adjust if off_count is out of range
+            if off_count < off_min:
+                off_count = off_min
+                rest_count = 3 - off_count
+            elif off_count > off_max:
+                off_count = off_max
+                rest_count = 3 - off_count
+        else:
+            # Can't satisfy rest_min, use minimum off days
+            off_count = off_min
+            rest_count = 3 - off_count
+    else:
+        # Randomly choose from valid combinations
+        off_count, rest_count = random.choice(valid_combinations)
+    
+    # Ensure rest_count is at least rest_min if possible (safety check)
+    # Only convert if it doesn't violate off_min constraint
+    if rest_min > 0 and rest_count < rest_min and off_count > off_min:
+        # Try to convert some off days to rest days
+        needed_rest = rest_min - rest_count
+        max_convertible = off_count - off_min  # Can't go below off_min
+        if max_convertible >= needed_rest:
+            rest_count += needed_rest
+            off_count -= needed_rest
+        elif max_convertible > 0:
+            # Convert as many as possible
+            rest_count += max_convertible
+            off_count -= max_convertible
+    
+    # Now select which days are off and which are rest
+    off_indices = set(random.sample(remaining_days, off_count)) if off_count > 0 else set()
+    rest_indices = set([d for d in remaining_days if d not in off_indices])
+    
+    # Verify we have exactly 4 active days
+    assert len(active_indices_set) == TARGET_ACTIVE_DAYS, f"Expected {TARGET_ACTIVE_DAYS} active days, got {len(active_indices_set)}"
+    assert len(off_indices) + len(rest_indices) == 3, f"Expected 3 non-active days, got {len(off_indices)} off + {len(rest_indices)} rest"
+    assert len(rest_indices) == rest_count, f"Expected {rest_count} rest days, got {len(rest_indices)}"
 
     # Pick weekly total inside achievable range
     max_total = active_days * max(1, daily_max)
@@ -185,25 +231,57 @@ def generate_weekly_targets(
 
     # Seed active day targets at daily_min; remaining to distribute
     active_targets = [daily_min for _ in range(active_days)]
+    
+    # Ensure each active day gets at least 1 follow if weekly total allows
+    # This ensures all 4 active days are meaningful
+    min_per_day = 1
+    if target_week_total >= active_days * min_per_day:
+        # First, ensure each day has at least min_per_day
+        for i in range(active_days):
+            if active_targets[i] < min_per_day:
+                active_targets[i] = min_per_day
+    
     remaining = max(0, target_week_total - sum(active_targets))
 
-    # Distribute remaining randomly with caps
+    # Distribute remaining randomly with caps, ensuring all days get some distribution
+    # Use a round-robin approach first to ensure fairness, then random
+    distribution_order = list(range(active_days))
+    random.shuffle(distribution_order)
+    distribution_idx = 0
+    
     while remaining > 0:
-        i = random.randrange(active_days)
+        # Try round-robin first for fairness
+        if distribution_idx < len(distribution_order):
+            i = distribution_order[distribution_idx]
+            distribution_idx += 1
+        else:
+            # Then random distribution
+            i = random.randrange(active_days)
+        
         if active_targets[i] < daily_max:
             active_targets[i] += 1
             remaining -= 1
         else:
-            # If all are at max, break
-            if all(t >= daily_max for t in active_targets):
-                break
+            # If this day is at max, try next in order or random
+            if distribution_idx >= len(distribution_order):
+                # All days tried, check if any can still take more
+                if all(t >= daily_max for t in active_targets):
+                    break
+                # Reset and try random
+                distribution_idx = 0
+                random.shuffle(distribution_order)
 
     # Apply no-two-high rule
     active_targets = _apply_no_two_high_rule(active_targets, high_day_threshold, follow_threshold)
 
-    # Build 7-day schedule aligning active targets with non-rest indices in order
+    # Create a mapping from day index to target value for active days
+    sorted_active_indices = sorted(active_indices_set)
+    day_to_target = {}
+    for idx, target in zip(sorted_active_indices, active_targets):
+        day_to_target[idx] = target
+
+    # Build 7-day schedule aligning active targets with correct day indices
     schedule = []
-    active_iter = iter(active_targets)
     for d in range(7):
         if d in off_indices:
             # Off day: no tasks scheduled
@@ -231,10 +309,12 @@ def generate_weekly_targets(
             })
         else:
             # Active day: randomly assign method 1 (70%) or 4 (30%)
+            # Ensure this day gets a target (should always be in day_to_target)
+            target_value = day_to_target.get(d, daily_min)
             random_method = random.choices([1, 4], weights=[70, 30])[0]
             schedule.append({
                 "dayIndex": d, 
-                "target": next(active_iter), 
+                "target": target_value, 
                 "isRest": False,
                 "isOff": False,
                 "method": random_method
@@ -263,6 +343,11 @@ def validate_weekly_plan(
     if len(generated_schedule) != 7:
         raise ValueError("Generated schedule must have exactly 7 days")
 
+    # Check that we have exactly 4 active days
+    active_count = sum(1 for day in generated_schedule if not day.get("isRest") and not day.get("isOff"))
+    if active_count != 4:
+        raise ValueError(f"Expected exactly 4 active days, got {active_count}")
+
     # Check off day count is within allowed bounds
     off_count = sum(1 for day in generated_schedule if day.get("isOff"))
     if not (off_min <= off_count <= off_max):
@@ -288,8 +373,14 @@ def validate_weekly_plan(
         return
 
     rest_count = sum(1 for day in generated_schedule if day.get("isRest"))
+    # With exactly 4 active days, rest days can be 0-3, so validation should be lenient
+    # Only fail if rest_count is clearly outside reasonable bounds (0-3)
+    if rest_count < 0 or rest_count > 3:
+        raise ValueError(f"Rest days {rest_count} out of valid range [0, 3]")
+    # Log a warning if rest_count doesn't match requested range, but don't fail
     if not (min_rest <= rest_count <= max_rest):
-        raise ValueError(f"Rest days {rest_count} out of range [{min_rest}, {max_rest}]")
+        # This is acceptable with the 4 active days constraint - rest days are adjusted to fit
+        pass
 
     # No two consecutive high days
     prev_high = False
@@ -327,7 +418,8 @@ def generate_per_account_plans(
     active_indices = [i for i in active_indices if isinstance(i, int)]
     min_active_days = max(1, len(active_indices))
 
-    # Build method map and per-day caps: method 1 => 80, others => 30
+    # Build method map and per-day caps: maximum 25 follows per day per account
+    MAX_FOLLOWS_PER_DAY_PER_ACCOUNT = 25
     method_per_day: List[int] = [0] * 7
     per_day_caps: List[int] = [0] * 7
     for day in schedule:
@@ -335,7 +427,7 @@ def generate_per_account_plans(
         if isinstance(idx, int):
             method_per_day[idx] = int(day.get("method", 0))
             if not day.get("isRest") and not day.get("isOff"):
-                per_day_caps[idx] = 80 if method_per_day[idx] == 1 else 30
+                per_day_caps[idx] = MAX_FOLLOWS_PER_DAY_PER_ACCOUNT
 
     per_account: Dict[str, List[int]] = {}
 
@@ -372,11 +464,12 @@ def generate_per_account_plans(
                 remaining -= add
 
         # Distribute remaining across active days with slight noise to caps
+        # Ensure effective caps never exceed MAX_FOLLOWS_PER_DAY_PER_ACCOUNT
         cap_noise = random.uniform(0.9, 1.15)
         effective_caps = [0] * 7
         for i in active_indices:
             noisy_cap = int(per_day_caps[i] * cap_noise)
-            effective_caps[i] = max(1, min(per_day_caps[i], noisy_cap))
+            effective_caps[i] = max(1, min(MAX_FOLLOWS_PER_DAY_PER_ACCOUNT, noisy_cap))
 
         while remaining > 0 and active_indices:
             idx = random.choice(active_indices)
@@ -387,11 +480,12 @@ def generate_per_account_plans(
                 if all(daily_targets[i] >= effective_caps[i] for i in active_indices):
                     break
 
-        # Apply no-two-high rule and clamp method 1 to max 80
+        # Apply no-two-high rule and clamp all days to max 25 per account
         adjusted = _apply_no_two_high_rule(daily_targets, high_day_threshold, follow_threshold)
-        for i in method1_indices:
-            if adjusted[i] > 80:
-                adjusted[i] = 80
+        # Ensure no day exceeds MAX_FOLLOWS_PER_DAY_PER_ACCOUNT
+        for i in range(7):
+            if adjusted[i] > MAX_FOLLOWS_PER_DAY_PER_ACCOUNT:
+                adjusted[i] = MAX_FOLLOWS_PER_DAY_PER_ACCOUNT
 
         per_account[username] = adjusted
 

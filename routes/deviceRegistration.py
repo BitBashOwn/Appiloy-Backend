@@ -8,7 +8,7 @@ from pymongo import MongoClient, UpdateOne
 
 from pydantic import BaseModel
 
-from typing import List
+from typing import List, Optional, Set
 
 import random
 
@@ -191,6 +191,33 @@ async def register_device_endpoint(device_data: DeviceRegistration):
 
     return register_device(device_data)
 
+
+def chunk_text_for_discord(text: str, max_length: int = 900) -> List[str]:
+    """
+    Split long strings into chunks that fit within Discord embed field limits.
+    """
+    if not text:
+        return [""]
+
+    lines = text.split("\n")
+    chunks: List[str] = []
+    current_chunk: List[str] = []
+    current_length = 0
+
+    for line in lines:
+        line_length = len(line) + 1  # include newline
+        if current_chunk and current_length + line_length > max_length:
+            chunks.append("\n".join(current_chunk))
+            current_chunk = [line]
+            current_length = line_length
+        else:
+            current_chunk.append(line)
+            current_length += line_length
+
+    if current_chunk:
+        chunks.append("\n".join(current_chunk))
+
+    return chunks
 
 
 
@@ -1950,9 +1977,7 @@ async def send_command(
                         f"Total runs: {number_of_runs}\n"
                         + "\n".join(lines)
                     )
-                    from Bot.discord_bot import get_bot_instance
-                    bot = get_bot_instance()
-                    bot.send_message_sync(
+                    await bot_instance.send_message(
                         {
                             "message": summary,
                             "task_id": task_id,
@@ -2420,6 +2445,33 @@ async def send_command(
                 rest_day_comments_range = (1, 3)  # 1-3 comments per rest day
                 rest_day_duration_range = (30, 120)  # 30-120 minutes per rest day
                 
+                previous_active_days: Optional[Set[int]] = None
+                try:
+                    sched_inputs_for_prev = None
+                    if isinstance(schedules_payload, dict) and isinstance(schedules_payload.get("inputs"), list):
+                        sched_inputs_for_prev = schedules_payload.get("inputs")
+                    elif isinstance(schedules_payload, list):
+                        sched_inputs_for_prev = schedules_payload
+                    if (
+                        sched_inputs_for_prev
+                        and len(sched_inputs_for_prev) >= 3
+                        and isinstance(sched_inputs_for_prev[2], dict)
+                    ):
+                        prev_generated_schedule = sched_inputs_for_prev[2].get("generatedSchedule") or []
+                        if isinstance(prev_generated_schedule, list):
+                            previous_active_days = {
+                                int(day.get("dayIndex"))
+                                for day in prev_generated_schedule
+                                if isinstance(day, dict)
+                                and not day.get("isRest")
+                                and not day.get("isOff")
+                                and day.get("dayIndex") is not None
+                            }
+                            if not previous_active_days:
+                                previous_active_days = None
+                except Exception:
+                    previous_active_days = None
+
                 generated = generate_weekly_targets(
                     local_dt,
                     (int(follow_weekly_range[0]), int(follow_weekly_range[1])),
@@ -2430,6 +2482,7 @@ async def send_command(
                     rest_day_comments_range,
                     rest_day_duration_range,
                     (int(off_days_range[0]), int(off_days_range[1])),
+                    previous_active_days=previous_active_days,
                 )
                 # Special mode: warmup-only weekly plan (4 warmup days, 3 off days)
                 is_warmup_only = warmup_only_flag
@@ -2697,18 +2750,19 @@ async def send_command(
                             f"{test_mode_indicator}\n" + "\n".join(lines)
                         )
 
-                        from Bot.discord_bot import get_bot_instance
-                        bot = get_bot_instance()
-                        bot.send_message_sync(
-                            {
-                                "message": summary,
-                                "task_id": task_id,
-                                "job_id": f"weekly_summary_{task_id}",
-                                "server_id": int(server_id) if isinstance(server_id, str) and server_id.isdigit() else server_id,
-                                "channel_id": int(channel_id) if isinstance(channel_id, str) and channel_id.isdigit() else channel_id,
-                                "type": "info",
-                            }
-                        )
+                        summary_chunks = chunk_text_for_discord(summary)
+                        for idx, chunk in enumerate(summary_chunks, start=1):
+                            prefix = "" if idx == 1 else f"(Part {idx})\n"
+                            await bot_instance.send_message(
+                                {
+                                    "message": f"{prefix}{chunk}",
+                                    "task_id": task_id,
+                                    "job_id": f"weekly_summary_{task_id}_part{idx}",
+                                    "server_id": int(server_id) if isinstance(server_id, str) and server_id.isdigit() else server_id,
+                                    "channel_id": int(channel_id) if isinstance(channel_id, str) and channel_id.isdigit() else channel_id,
+                                    "type": "info",
+                                }
+                            )
                     else:
                         logger.info(
                             "[WEEKLY] Skipping full schedule summary; serverId/channelId not set on task"
@@ -4110,6 +4164,20 @@ async def send_command_to_devices(device_ids, command):
                                         rest_day_comments_range = (1, 3)  # 1-3 comments per rest day
                                         rest_day_duration_range = (30, 120)  # 30-120 minutes per rest day
                                         
+                                        previous_active_days = None
+                                        prev_generated_schedule = weekly_entry.get("generatedSchedule") or []
+                                        if isinstance(prev_generated_schedule, list):
+                                            prev_active_set = {
+                                                int(day.get("dayIndex"))
+                                                for day in prev_generated_schedule
+                                                if isinstance(day, dict)
+                                                and not day.get("isRest")
+                                                and not day.get("isOff")
+                                                and day.get("dayIndex") is not None
+                                            }
+                                            if prev_active_set:
+                                                previous_active_days = prev_active_set
+
                                         generated = generate_weekly_targets(
                                             next_week_start,
                                             (int(follow_weekly_range[0]), int(follow_weekly_range[1])),
@@ -4120,6 +4188,7 @@ async def send_command_to_devices(device_ids, command):
                                             rest_day_comments_range,
                                             rest_day_duration_range,
                                             (int(off_days_range_meta[0]), int(off_days_range_meta[1])),
+                                            previous_active_days=previous_active_days,
                                         )
                                         validate_weekly_plan(
                                             generated,
@@ -4446,16 +4515,17 @@ async def send_command_to_devices(device_ids, command):
                                                         + ("\n\nAccounts:\n" + "\n".join(per_account_lines) if per_account_lines else "")
                                                     )
                                                     
-                                                    from Bot.discord_bot import get_bot_instance
-                                                    bot = get_bot_instance()
-                                                    bot.send_message_sync({
-                                                        "message": summary,
-                                                        "task_id": task_id,
-                                                        "job_id": f"weekly_renewal_{task_id}",
-                                                        "server_id": int(server_id_notify) if isinstance(server_id_notify, str) and server_id_notify.isdigit() else server_id_notify,
-                                                        "channel_id": int(channel_id_notify) if isinstance(channel_id_notify, str) and channel_id_notify.isdigit() else channel_id_notify,
-                                                        "type": "info",
-                                                    })
+                                                    renewal_chunks = chunk_text_for_discord(summary)
+                                                    for idx, chunk in enumerate(renewal_chunks, start=1):
+                                                        prefix = "" if idx == 1 else f"(Part {idx})\n"
+                                                        await bot_instance.send_message({
+                                                            "message": f"{prefix}{chunk}",
+                                                            "task_id": task_id,
+                                                            "job_id": f"weekly_renewal_{task_id}_part{idx}",
+                                                            "server_id": int(server_id_notify) if isinstance(server_id_notify, str) and server_id_notify.isdigit() else server_id_notify,
+                                                            "channel_id": int(channel_id_notify) if isinstance(channel_id_notify, str) and channel_id_notify.isdigit() else channel_id_notify,
+                                                            "type": "info",
+                                                        })
                                         except Exception as notify_err:
                                             logger.warning(f"[WEEKLY-RENEWAL] Failed to send Discord notification: {notify_err}")
                                         
@@ -4587,11 +4657,9 @@ async def send_command_to_devices(device_ids, command):
 
 
 
-                # Get the bot instance and use the thread-safe method
+                # Use async send_message in async context
 
-                bot = get_bot_instance()
-
-                bot.send_message_sync(
+                await bot_instance.send_message(
 
                     {
 
@@ -4729,11 +4797,9 @@ async def send_command_to_devices(device_ids, command):
 
             try:
 
-                # Get the bot instance and use the thread-safe method
+                # Use async send_message in async context
 
-                bot = get_bot_instance()
-
-                bot.send_message_sync(
+                await bot_instance.send_message(
 
                     {
 
