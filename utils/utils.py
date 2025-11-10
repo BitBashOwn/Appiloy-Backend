@@ -15,6 +15,8 @@ from models.users import user_collection
 from models.tasks import tasks_collection
 import random
 from Bot.discord_bot import bot_instance
+import httpx
+from logger import logger
 
 load_dotenv()
 
@@ -27,6 +29,52 @@ oauth2_bearer = OAuth2PasswordBearer(tokenUrl="token")
 
 def generate_unique_id():
     return str(uuid.uuid4())
+
+
+async def get_country_from_ip(ip_address: str) -> dict:
+    """
+    Detect country from IP address using ip-api.com (free, no API key needed).
+    Returns dict with countryCode and countryName, or None values if detection fails.
+    
+    Rate limit: 45 requests per minute from an IP address.
+    """
+    logger.info(f"🌍 Attempting IP geolocation for IP: {ip_address}")
+    
+    try:
+        # Skip private/local IPs
+        if ip_address in ["127.0.0.1", "localhost", "::1"] or ip_address.startswith(("192.168.", "10.", "172.")):
+            logger.warning(f"⚠️ Skipping geolocation for private/local IP: {ip_address}")
+            return {"countryCode": None, "countryName": None}
+        
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            logger.info(f"📡 Calling ip-api.com for IP: {ip_address}")
+            response = await client.get(f"http://ip-api.com/json/{ip_address}?fields=status,country,countryCode,message")
+            
+            if response.status_code == 200:
+                data = response.json()
+                logger.info(f"✅ IP-API Response: {data}")
+                
+                if data.get("status") == "success":
+                    country_code = data.get("countryCode")
+                    country_name = data.get("country")
+                    logger.info(f"✅ Detected country: {country_name} ({country_code})")
+                    return {
+                        "countryCode": country_code,
+                        "countryName": country_name
+                    }
+                else:
+                    logger.warning(f"⚠️ IP-API returned failure status: {data.get('message')}")
+                    return {"countryCode": None, "countryName": None}
+            else:
+                logger.error(f"❌ IP-API returned status code: {response.status_code}")
+                return {"countryCode": None, "countryName": None}
+        
+    except httpx.TimeoutException:
+        logger.error(f"⏱️ IP geolocation timeout for IP: {ip_address}")
+        return {"countryCode": None, "countryName": None}
+    except Exception as e:
+        logger.error(f"❌ Error detecting country from IP {ip_address}: {str(e)}")
+        return {"countryCode": None, "countryName": None}
 
 
 def create_confirmation_token(user: User):
