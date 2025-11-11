@@ -58,62 +58,92 @@ class AppilotBot:
             print(f"Error starting Discord bot: {e}")
 
     async def process_message_queue(self):
-        """Process messages from the queue in the main bot event loop"""
+        """Process messages from the queue in the main bot event loop with retry logic"""
         print("Message queue processor running")
         while True:
             try:
                 message_data = await self.message_queue.get()
                 print(f"Processing message from queue: {message_data.get('type')}")
-                
-                server_id = message_data.get("server_id")
-                channel_id = message_data.get("channel_id")
-                message_type = message_data.get("type")
 
-                guild = self.bot.get_guild(server_id)
-                if not guild:
-                    print(f"Could not find server with ID: {server_id}")
-                    self.message_queue.task_done()
-                    continue
+                # Retry logic: max 3 attempts with exponential backoff
+                success = False
+                for attempt in range(3):
+                    success = await self._send_discord_message(message_data, attempt)
+                    if success:
+                        break
+                    if attempt < 2:  # Don't sleep after the last attempt
+                        await asyncio.sleep(2 ** attempt)  # 1s, 2s, 4s backoff
 
-                channel = guild.get_channel(channel_id)
-                if not channel:
-                    print(f"Could not find channel with ID: {channel_id}")
-                    self.message_queue.task_done()
-                    continue
+                if not success:
+                    # Log final failure after all retries exhausted
+                    print(f"[DISCORD] Failed to send message after 3 attempts. Task: {message_data.get('task_id')}, Job: {message_data.get('job_id')}")
 
-                try:
-                    if message_type == "final":
-                        embed = discord.Embed(
-                            title="Task Final Update", color=discord.Color.green()
-                        )
-                    elif message_type == "update":
-                        embed = discord.Embed(title="Task Update", color=discord.Color.blue())
-                    elif message_type == "error":
-                        embed = discord.Embed(title="Error", color=discord.Color.red())
-                    elif message_type == "warning":
-                        embed = discord.Embed(
-                            title="⚠️ Task Starting Soon", color=discord.Color.orange()
-                        )
-                    elif message_type == "info":
-                        embed = discord.Embed(
-                            title="Schedule", color=discord.Color.dark_green()
-                        )
-
-                    embed.add_field(
-                        name="Stats",
-                        value=message_data.get("message", "No message"),
-                        inline=False,
-                    )
-
-                    await channel.send(embed=embed)
-                    print(f"Message sent to Discord channel {channel_id}")
-
-                except Exception as e:
-                    print(f"Error sending message to Discord: {e}")
-                
                 self.message_queue.task_done()
             except Exception as e:
                 print(f"Error in message queue processor: {e}")
+
+    async def _send_discord_message(self, message_data: dict, attempt: int) -> bool:
+        """
+        Send a message to Discord channel with proper error handling.
+        Returns True if successful, False if failed.
+        """
+        try:
+            server_id = message_data.get("server_id")
+            channel_id = message_data.get("channel_id")
+            message_type = message_data.get("type")
+
+            guild = self.bot.get_guild(server_id)
+            if not guild:
+                print(f"[DISCORD] Could not find server with ID: {server_id}. Task: {message_data.get('task_id')}")
+                return False
+
+            channel = guild.get_channel(channel_id)
+            if not channel:
+                print(f"[DISCORD] Could not find channel with ID: {channel_id}. Task: {message_data.get('task_id')}")
+                return False
+
+            # Create embed based on message type
+            if message_type == "final":
+                embed = discord.Embed(
+                    title="Task Final Update", color=discord.Color.green()
+                )
+            elif message_type == "update":
+                embed = discord.Embed(title="Task Update", color=discord.Color.blue())
+            elif message_type == "error":
+                embed = discord.Embed(title="Error", color=discord.Color.red())
+            elif message_type == "warning":
+                embed = discord.Embed(
+                    title="⚠️ Task Starting Soon", color=discord.Color.orange()
+                )
+            elif message_type == "info":
+                embed = discord.Embed(
+                    title="Schedule", color=discord.Color.dark_green()
+                )
+            else:
+                embed = discord.Embed(title="Message", color=discord.Color.blue())
+
+            embed.add_field(
+                name="Stats",
+                value=message_data.get("message", "No message"),
+                inline=False,
+            )
+
+            await channel.send(embed=embed)
+            print(f"[DISCORD] Message sent to channel {channel_id}. Task: {message_data.get('task_id')}")
+            return True
+
+        except discord.HTTPException as e:
+            if e.status == 429:  # Rate limited
+                retry_after = getattr(e, 'retry_after', 5)
+                print(f"[DISCORD] Rate limited (attempt {attempt + 1}/3). Retry after {retry_after}s. Task: {message_data.get('task_id')}")
+                await asyncio.sleep(retry_after)
+                return False  # Allow retry
+            else:
+                print(f"[DISCORD] HTTP error {e.status} (attempt {attempt + 1}/3): {e}. Task: {message_data.get('task_id')}")
+                return False
+        except Exception as e:
+            print(f"[DISCORD] Error sending message (attempt {attempt + 1}/3). Task: {message_data.get('task_id')}, Job: {message_data.get('job_id')}, Error: {e}")
+            return False
 
     async def send_message(self, message_data: dict):
         """
