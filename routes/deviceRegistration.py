@@ -2613,7 +2613,8 @@ async def send_command(
                                         if isinstance(node, dict) and node.get("type") == "instagrmFollowerBotAcountWise":
                                             for acc in (node.get("Accounts") or []):
                                                 uname = acc.get("username")
-                                                if isinstance(uname, str):
+                                                # Filter out disabled accounts
+                                                if acc.get('enabled', True) is not False and isinstance(uname, str):
                                                     account_usernames.append(uname)
                         except Exception:
                             account_usernames = []
@@ -2883,7 +2884,8 @@ async def send_command(
                                 if isinstance(node_caps, dict) and node_caps.get("type") == "instagrmFollowerBotAcountWise":
                                     for acc_caps in (node_caps.get("Accounts") or []):
                                         uname_caps = acc_caps.get("username")
-                                        if isinstance(uname_caps, str):
+                                        # Filter out disabled accounts
+                                        if acc_caps.get('enabled', True) is not False and isinstance(uname_caps, str):
                                             account_usernames_for_caps.append(uname_caps)
                 except Exception:
                     account_usernames_for_caps = []
@@ -2949,7 +2951,8 @@ async def send_command(
                                     if isinstance(node, dict) and node.get("type") == "instagrmFollowerBotAcountWise":
                                         for acc in (node.get("Accounts") or []):
                                             uname = acc.get("username")
-                                            if not isinstance(uname, str):
+                                            # Filter out disabled accounts
+                                            if acc.get('enabled', True) is False or not isinstance(uname, str):
                                                 continue
                                             enabled_m = None
                                             for blk in (acc.get("inputs") or []):
@@ -4445,7 +4448,8 @@ async def send_command_to_devices(device_ids, command):
                                                                             if isinstance(node_n, dict) and node_n.get("type") == "instagrmFollowerBotAcountWise":
                                                                                 for acc_n in (node_n.get("Accounts") or []):
                                                                                     uname_n = acc_n.get("username")
-                                                                                    if isinstance(uname_n, str):
+                                                                                    # Filter out disabled accounts
+                                                                                    if acc_n.get('enabled', True) is not False and isinstance(uname_n, str):
                                                                                         accounts_notify.append(uname_n)
                                                                 if accounts_notify:
                                                                     from utils.weekly_scheduler import generate_per_account_plans
@@ -4484,7 +4488,8 @@ async def send_command_to_devices(device_ids, command):
                                                                             if isinstance(node2, dict) and node2.get("type") == "instagrmFollowerBotAcountWise":
                                                                                 for acc2 in (node2.get("Accounts") or []):
                                                                                     uname2 = acc2.get("username")
-                                                                                    if isinstance(uname2, str):
+                                                                                    # Filter out disabled accounts
+                                                                                    if acc2.get('enabled', True) is not False and isinstance(uname2, str):
                                                                                         tmp_accounts.append(uname2)
                                                                 accounts_notify = tmp_accounts
                                                             except Exception:
