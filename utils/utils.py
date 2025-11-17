@@ -17,6 +17,7 @@ import random
 from Bot.discord_bot import bot_instance
 import httpx
 from logger import logger
+import asyncio
 
 load_dotenv()
 
@@ -428,7 +429,9 @@ async def get_current_user(request: Request):
             )
         print("user_Id: " + user_id)
         print("Email: " + email)
-        existing_user = user_collection.find_one({"email": email})
+        existing_user = await asyncio.to_thread(
+            user_collection.find_one, {"email": email}
+        )
 
         if existing_user:
             print('valid Token')

@@ -121,6 +121,8 @@ device_connections = {}
 
 active_connections = []
 
+connection_metadata = {}
+
 
 
 set_device_connections(device_connections)
@@ -1283,6 +1285,12 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 
     await websocket.accept()
 
+    device_info = await asyncio.to_thread(
+        device_collection.find_one,
+        {"deviceId": device_id},
+        {"_id": 0, "deviceName": 1, "email": 1, "status": 1},
+    )
+
     reconnection_count = track_reconnection(device_id)
 
     if reconnection_count > 10:
@@ -1299,6 +1307,11 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 
     active_connections.append(websocket)
 
+    connection_metadata[device_id] = {
+        "device_info": device_info or {},
+        "task_cache": {},
+    }
+
 
 
     # Register in Redis
@@ -1309,7 +1322,11 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 
     # Update MongoDB status
 
-    device_collection.update_one({"deviceId": device_id}, {"$set": {"status": True}})
+    await asyncio.to_thread(
+        device_collection.update_one,
+        {"deviceId": device_id},
+        {"$set": {"status": True}},
+    )
 
 
 
@@ -1317,7 +1334,22 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 
     log_all_connected_devices()
 
-
+    async def get_task_routing(task_id: str):
+        if not task_id:
+            return {}
+        state = connection_metadata.get(device_id)
+        if not state:
+            return {}
+        cache = state.setdefault("task_cache", {})
+        if task_id in cache:
+            return cache[task_id]
+        task_data = await asyncio.to_thread(
+            tasks_collection.find_one,
+            {"id": task_id},
+            {"serverId": 1, "channelId": 1, "_id": 0},
+        )
+        cache[task_id] = task_data or {}
+        return cache[task_id]
 
     try:
 
@@ -1351,13 +1383,15 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 
 
 
-                device_info = device_collection.find_one({"deviceId": device_id})
+                device_state = connection_metadata.get(device_id, {})
+
+                cached_device = device_state.get("device_info", {})
 
                 device_name = (
 
-                    device_info.get("deviceName", device_id)
+                    cached_device.get("deviceName", device_id)
 
-                    if device_info
+                    if cached_device
 
                     else device_id
 
@@ -1387,11 +1421,7 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 
 
 
-                taskData = tasks_collection.find_one(
-
-                    {"id": task_id}, {"serverId": 1, "channelId": 1, "_id": 0}
-
-                )
+                taskData = await get_task_routing(task_id)
 
 
 
@@ -1460,7 +1490,7 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 
                         try:
                             req_obj = CommandRequest(command=command_payload, device_ids=device_ids)
-                            current_user_context = {"email": (device_info or {}).get("email", "")}
+                            current_user_context = {"email": cached_device.get("email", "")}
                             await send_command(req_obj, current_user=current_user_context)  # type: ignore
                             ack = {
                                 "type": "command_ack",
@@ -1779,10 +1809,10 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 
         # Update MongoDB
 
-        device_collection.update_one(
-
-            {"deviceId": device_id}, {"$set": {"status": False}}
-
+        await asyncio.to_thread(
+            device_collection.update_one,
+            {"deviceId": device_id},
+            {"$set": {"status": False}},
         )
 
 
@@ -1792,6 +1822,7 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
         active_connections.remove(websocket)
 
         device_connections.pop(device_id, None)
+        connection_metadata.pop(device_id, None)
 
 
 
@@ -2299,7 +2330,7 @@ async def send_command(
                     except Exception:
                         off_days_range = None
                 no_two_high_rule_raw = command.get("noTwoHighRule")
-                test_mode = bool(command.get("testMode", False))  # Test mode: schedule with 10-min/5-min gaps
+                test_mode = bool(command.get("testMode", False))  # Test mode: schedule with 2-min/5-min gaps
                 # Resolve method (prefer command-level, else schedules index 2, else default 1)
                 resolved_method = command.get("method")
                 try:
@@ -2326,7 +2357,7 @@ async def send_command(
                     method = 1
                 logger.info(f"[WEEKLY] Using method: {method}")
                 if test_mode:
-                    logger.warning(f"[WEEKLY] ⚠️ TEST MODE ENABLED - Scheduling with 10-minute gaps starting NOW")
+                    logger.warning(f"[WEEKLY] ⚠️ TEST MODE ENABLED - Scheduling with 2-minute gaps starting NOW")
 
                 # Warmup-only support: allow missing weekly ranges and week_start
                 warmup_only_flag = bool(command.get("warmupOnly", False))
@@ -2536,8 +2567,8 @@ async def send_command(
                     day_method = int(d.get("method", 0 if is_off else (9 if is_rest else 1)))
                     
                     if test_mode:
-                        # For warmup-only: use 5-minute gaps starting from now, otherwise 10-minute gaps
-                        gap_minutes = 5 if is_warmup_only else 10
+                        # For warmup-only: use 5-minute gaps starting from now, otherwise 2-minute gaps
+                        gap_minutes = 5 if is_warmup_only else 2
                         start_time_local = local_dt + timedelta(minutes=idx * gap_minutes)
                         # For warmup-only, keep session short placeholder end; device manages day plan
                         end_time_local = start_time_local + (timedelta(minutes=1) if is_warmup_only else timedelta(hours=11))
@@ -2745,7 +2776,7 @@ async def send_command(
                                     label = f"{heading}\n{p['methodLabel']}"
                             lines.append(label)
                         
-                        test_mode_indicator = "TEST MODE (10-min gaps)\n" if test_mode else ""
+                        test_mode_indicator = "TEST MODE (2-min gaps)\n" if test_mode else ""
                         summary = (
                             f"Weekly plan scheduled: {task_meta.get('taskName', 'Unknown Task')}\n"
                             f"{test_mode_indicator}\n" + "\n".join(lines)

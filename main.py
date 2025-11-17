@@ -90,6 +90,80 @@ async def lifespan(app: FastAPI):
     cleanup_stale_workers()
     logger.info("Starting scheduler...")
     scheduler.start()  # Start the scheduler
+    try:
+        reloaded_jobs = scheduler.get_jobs()
+        job_count = len(reloaded_jobs)
+        
+        # Validate all loaded jobs and remove invalid ones
+        invalid_jobs = []
+        for job in reloaded_jobs:
+            try:
+                if not callable(job.func):
+                    invalid_jobs.append(job.id)
+                    logger.error(f"[SCHEDULER] Job {job.id} has invalid function reference")
+            except Exception as e:
+                invalid_jobs.append(job.id)
+                logger.error(f"[SCHEDULER] Job {job.id} validation failed: {e}")
+        
+        # Remove invalid jobs from scheduler
+        for job_id in invalid_jobs:
+            try:
+                scheduler.remove_job(job_id)
+                logger.info(f"[SCHEDULER] Removed invalid job {job_id}")
+            except Exception as e:
+                logger.warning(f"[SCHEDULER] Could not remove invalid job {job_id}: {e}")
+        
+        valid_count = job_count - len(invalid_jobs)
+        
+        if valid_count:
+            logger.info(f"[SCHEDULER] Reloaded {valid_count} valid jobs from persistent store")
+            if invalid_jobs:
+                logger.warning(f"[SCHEDULER] Removed {len(invalid_jobs)} invalid jobs")
+            
+            # Log first 10 valid jobs
+            valid_jobs = [j for j in reloaded_jobs if j.id not in invalid_jobs]
+            for job in valid_jobs[:10]:
+                logger.info(
+                    "[SCHEDULER] Job id=%s next_run=%s trigger=%s",
+                    job.id,
+                    getattr(job.trigger, "run_date", getattr(job, "next_run_time", None)),
+                    job.trigger,
+                )
+            if valid_count > 10:
+                logger.info(
+                    "[SCHEDULER] Additional jobs not shown in log: %s",
+                    valid_count - 10,
+                )
+        else:
+            logger.info("[SCHEDULER] No valid jobs found in persistent store after startup")
+        
+        # Cleanup expired/stale jobs (older than 7 days past their run time)
+        import pytz
+        from datetime import datetime, timedelta
+        now = datetime.now(pytz.UTC)
+        stale_threshold = now - timedelta(days=7)
+        stale_jobs = []
+        
+        for job in scheduler.get_jobs():
+            next_run = job.next_run_time
+            # If job has no next run time or next run is more than 7 days in the past, it's stale
+            if next_run and next_run < stale_threshold:
+                stale_jobs.append(job.id)
+                logger.warning(f"[SCHEDULER] Found stale job {job.id} (next_run={next_run})")
+        
+        # Remove stale jobs
+        for job_id in stale_jobs:
+            try:
+                scheduler.remove_job(job_id)
+                logger.info(f"[SCHEDULER] Removed stale job {job_id}")
+            except Exception as e:
+                logger.warning(f"[SCHEDULER] Could not remove stale job {job_id}: {e}")
+        
+        if stale_jobs:
+            logger.info(f"[SCHEDULER] Cleanup: Removed {len(stale_jobs)} stale jobs")
+            
+    except Exception as scheduler_log_err:
+        logger.warning(f"[SCHEDULER] Could not validate/log persisted jobs: {scheduler_log_err}")
     logger.info("Started worker scheduler")
 
     asyncio.create_task(bot_instance.start_bot())

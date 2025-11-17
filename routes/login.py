@@ -1,3 +1,4 @@
+import asyncio
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -29,7 +30,9 @@ class LoginRequest(BaseModel):
 @login_router.post("/login")
 async def login(request: LoginRequest):
     # Find the user by email
-    existing_user = user_collection.find_one({"email": request.email})
+    existing_user = await asyncio.to_thread(
+        user_collection.find_one, {"email": request.email}
+    )
 
     if existing_user and pwd_context.verify(request.password, existing_user["password"]):
     # if existing_user:

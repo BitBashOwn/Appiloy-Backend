@@ -1,4 +1,10 @@
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
+
+# Add persistent job store using local SQLite file
+jobstores = {
+    "default": SQLAlchemyJobStore(url='sqlite:///scheduler_jobs.db')
+}
 
 # Define executors as a dictionary with APScheduler's built-in configuration
 executors = {
@@ -13,4 +19,8 @@ job_defaults = {
 }
 
 # Initialize the scheduler with the correct configuration
-scheduler = AsyncIOScheduler(executors=executors, job_defaults=job_defaults)
+scheduler = AsyncIOScheduler(
+    jobstores=jobstores,
+    executors=executors,
+    job_defaults=job_defaults
+)
