@@ -416,10 +416,11 @@ def generate_per_account_plans(
     # Identify active day indices and per-day methods
     active_indices = [d.get("dayIndex") for d in schedule if not d.get("isRest") and not d.get("isOff")]
     active_indices = [i for i in active_indices if isinstance(i, int)]
-    min_active_days = max(1, len(active_indices))
 
     # Build method map and per-day caps: maximum 25 follows per day per account
     MAX_FOLLOWS_PER_DAY_PER_ACCOUNT = 25
+    MIN_FOLLOWS_PER_ACTIVE_DAY = 5
+    MAX_FOLLOWS_PER_ACTIVE_DAY = 15
     method_per_day: List[int] = [0] * 7
     per_day_caps: List[int] = [0] * 7
     for day in schedule:
@@ -429,61 +430,91 @@ def generate_per_account_plans(
             if not day.get("isRest") and not day.get("isOff"):
                 per_day_caps[idx] = MAX_FOLLOWS_PER_DAY_PER_ACCOUNT
 
+    if not active_indices:
+        return {username: [0] * 7 for username in accounts}
+
     per_account: Dict[str, List[int]] = {}
 
     for username in accounts:
-        # Pick a random weekly total per account (independent to diversify)
-        account_week_total = random.randint(min_week, max_week)
         daily_targets = [0 for _ in range(7)]
 
-        # Method 1 indices among active days
-        method1_indices = [i for i in active_indices if method_per_day[i] == 1]
-
-        # Encourage baseline 10–20 per Method 1 day (randomized), within weekly cap
-        baseline_map: Dict[int, int] = {}
-        if method1_indices:
-            for idx in method1_indices:
-                # Random baseline in [10, 20], also respect per-day caps for that index
-                baseline_map[idx] = min(per_day_caps[idx], random.randint(10, 20))
-            min_required_for_method1 = sum(baseline_map.values())
-            account_week_total = min(max(account_week_total, min_required_for_method1), max_week)
-
-        remaining = account_week_total
-
-        # Seed Method 1 days up to their randomized baseline (capped by remaining and per-day caps)
-        for idx in method1_indices:
-            if remaining <= 0:
-                break
-            seed_target = baseline_map.get(idx, 0)
-            if seed_target <= 0:
+        # Establish per-day min/max bounds (random band 5-15, capped by per-day caps)
+        per_day_min_bounds: Dict[int, int] = {}
+        per_day_max_bounds: Dict[int, int] = {}
+        for idx in active_indices:
+            cap = max(0, per_day_caps[idx])
+            if cap <= 0:
+                per_day_min_bounds[idx] = 0
+                per_day_max_bounds[idx] = 0
                 continue
-            seed = min(seed_target, per_day_caps[idx])
-            add = min(seed, remaining)
-            if add > 0:
-                daily_targets[idx] += add
-                remaining -= add
+            day_min = min(MIN_FOLLOWS_PER_ACTIVE_DAY, cap)
+            day_max = min(MAX_FOLLOWS_PER_ACTIVE_DAY, cap)
+            if day_max < day_min:
+                day_min = day_max
+            per_day_min_bounds[idx] = day_min
+            per_day_max_bounds[idx] = max(day_min, day_max)
 
-        # Distribute remaining across active days with slight noise to caps
-        # Ensure effective caps never exceed MAX_FOLLOWS_PER_DAY_PER_ACCOUNT
-        cap_noise = random.uniform(0.9, 1.15)
-        effective_caps = [0] * 7
-        for i in active_indices:
-            noisy_cap = int(per_day_caps[i] * cap_noise)
-            effective_caps[i] = max(1, min(MAX_FOLLOWS_PER_DAY_PER_ACCOUNT, noisy_cap))
-
-        while remaining > 0 and active_indices:
-            idx = random.choice(active_indices)
-            if daily_targets[idx] < effective_caps[idx]:
-                daily_targets[idx] += 1
-                remaining -= 1
+        # Seed each active day with a random value inside [5, 15] (respecting caps)
+        for idx in active_indices:
+            min_bound = per_day_min_bounds.get(idx, 0)
+            max_bound = per_day_max_bounds.get(idx, 0)
+            if max_bound <= 0:
+                continue
+            if min_bound <= 0:
+                daily_targets[idx] = random.randint(0, max_bound)
             else:
-                if all(daily_targets[i] >= effective_caps[i] for i in active_indices):
-                    break
+                daily_targets[idx] = random.randint(min_bound, max_bound)
 
-        # Apply no-two-high rule and clamp all days to max 25 per account
+        min_total_possible = sum(per_day_min_bounds.values())
+        max_total_possible = sum(per_day_max_bounds.values())
+
+        effective_min_total = max(min_week, min_total_possible)
+        effective_max_total = min(max_week, max_total_possible) if max_total_possible > 0 else 0
+        if effective_min_total > effective_max_total:
+            effective_min_total = min_total_possible
+            effective_max_total = max_total_possible
+
+        if effective_max_total > 0 and effective_min_total <= effective_max_total:
+            target_week_total = random.randint(effective_min_total, effective_max_total)
+        else:
+            target_week_total = sum(daily_targets)
+
+        difference = target_week_total - sum(daily_targets)
+        adjustment_safety = 0
+        while difference != 0 and adjustment_safety < 500:
+            adjustment_safety += 1
+            if difference > 0:
+                grow_candidates = [i for i in active_indices if daily_targets[i] < per_day_max_bounds.get(i, 0)]
+                if not grow_candidates:
+                    break
+                idx = random.choice(grow_candidates)
+                max_increase = per_day_max_bounds[idx] - daily_targets[idx]
+                if max_increase <= 0:
+                    continue
+                step = min(difference, random.randint(1, max_increase))
+                daily_targets[idx] += step
+                difference -= step
+            else:
+                shrink_candidates = [i for i in active_indices if daily_targets[i] > per_day_min_bounds.get(i, 0)]
+                if not shrink_candidates:
+                    break
+                idx = random.choice(shrink_candidates)
+                max_decrease = daily_targets[idx] - per_day_min_bounds[idx]
+                if max_decrease <= 0:
+                    continue
+                step = min(-difference, random.randint(1, max_decrease))
+                daily_targets[idx] -= step
+                difference += step
+
+        # Apply no-two-high rule
         adjusted = _apply_no_two_high_rule(daily_targets, high_day_threshold, follow_threshold)
-        # Ensure no day exceeds MAX_FOLLOWS_PER_DAY_PER_ACCOUNT
+
+        # Clamp final values to per-day min/max bounds and hard cap
         for i in range(7):
+            if i in per_day_min_bounds:
+                floor_val = per_day_min_bounds[i]
+                ceiling_val = per_day_max_bounds.get(i, MAX_FOLLOWS_PER_DAY_PER_ACCOUNT)
+                adjusted[i] = max(floor_val, min(ceiling_val, adjusted[i]))
             if adjusted[i] > MAX_FOLLOWS_PER_DAY_PER_ACCOUNT:
                 adjusted[i] = MAX_FOLLOWS_PER_DAY_PER_ACCOUNT
 

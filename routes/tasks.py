@@ -918,6 +918,46 @@ async def unschedule_jobs(tasks: deleteRequest, current_user: dict = Depends(get
                         except Exception as e:
                             print(f"[LOG] Could not remove reminder job {reminder_id}: {str(e)}")
         
+        # Fallback: Remove any APScheduler jobs that reference these task IDs, even if not in activeJobs
+        # This handles cases where activeJobs is empty/stale but scheduler still has jobs registered
+        task_ids_set = set(tasks.tasks)
+        try:
+            all_scheduler_jobs = scheduler.get_jobs()
+            fallback_removed_count = 0
+            for job in all_scheduler_jobs:
+                try:
+                    # Extract task_id from job's command arguments
+                    job_args = list(job.args or [])
+                    if not job_args:
+                        continue
+                    # Command is typically the last argument
+                    cmd = job_args[-1] if len(job_args) > 0 else None
+                    if not isinstance(cmd, dict):
+                        continue
+                    job_task_id = cmd.get("task_id")
+                    if job_task_id and job_task_id in task_ids_set:
+                        try:
+                            scheduler.remove_job(job.id)
+                            fallback_removed_count += 1
+                            print(f"[LOG] ✓ Fallback removed job {job.id} (task {job_task_id}) from scheduler")
+                        except Exception as e:
+                            print(f"[LOG] Fallback could not remove job {job.id}: {str(e)}")
+                        # Also try to remove reminder job
+                        try:
+                            reminder_id = f"reminder_{job.id}"
+                            scheduler.remove_job(reminder_id)
+                            print(f"[LOG] ✓ Fallback removed reminder job {reminder_id}")
+                        except Exception as e:
+                            # Reminder might not exist, which is fine
+                            pass
+                except Exception as e:
+                    # Skip jobs that can't be inspected (e.g., wrong arg structure)
+                    continue
+            if fallback_removed_count > 0:
+                print(f"[LOG] Fallback removal: removed {fallback_removed_count} jobs that weren't in activeJobs")
+        except Exception as e:
+            print(f"[LOG] Failed to enumerate scheduler jobs during fallback unschedule: {str(e)}")
+        
         # Now update database to clear activeJobs and reset status
         result = await asyncio.to_thread(
             tasks_collection.update_many,
