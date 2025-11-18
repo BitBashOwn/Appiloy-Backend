@@ -1,3 +1,12 @@
+import sys
+
+# Use pysqlite3 if _sqlite3 is not available (for Python compiled without SQLite)
+try:
+    import _sqlite3
+except ImportError:
+    import pysqlite3 as sqlite3
+    sys.modules['sqlite3'] = sqlite3
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 
