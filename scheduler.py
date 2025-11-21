@@ -1,19 +1,15 @@
-# import sys
-
-# # Use pysqlite3 if _sqlite3 is not available (for Python compiled without SQLite)
-# try:
-#     import _sqlite3
-# except ImportError:
-#     import pysqlite3 as sqlite3
-#     sys.modules['sqlite3'] = sqlite3
-
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-# from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
+from apscheduler.jobstores.redis import RedisJobStore
+from redis_client import REDIS_HOST, REDIS_PORT, REDIS_DB
 
-# # Add persistent job store using local SQLite file
-# jobstores = {
-#     "default": SQLAlchemyJobStore(url='sqlite:///scheduler_jobs.db')
-# }
+# Use Redis job store for distributed scheduling (prevents duplicate job execution)
+jobstores = {
+    "default": RedisJobStore(
+        host=REDIS_HOST,
+        port=REDIS_PORT,
+        db=REDIS_DB
+    )
+}
 
 # Define executors as a dictionary with APScheduler's built-in configuration
 executors = {
@@ -27,9 +23,9 @@ job_defaults = {
     "max_instances": 10,  # Allow many instances of the same job to run concurrently
 }
 
-# Initialize the scheduler with the correct configuration (using default in-memory jobstore)
+# Initialize the scheduler with Redis job store
 scheduler = AsyncIOScheduler(
-    # jobstores=jobstores,  # Removed - using default in-memory jobstore instead of SQLite
+    jobstores=jobstores,
     executors=executors,
     job_defaults=job_defaults
 )

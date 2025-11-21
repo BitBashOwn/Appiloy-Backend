@@ -8,7 +8,7 @@ from pymongo import MongoClient, UpdateOne
 
 from pydantic import BaseModel
 
-from typing import List, Optional, Set
+from typing import Dict, List, Optional, Set
 
 import random
 
@@ -83,6 +83,7 @@ from utils.weekly_scheduler import (
     calculate_daily_bounds,
     generate_weekly_targets,
     validate_weekly_plan,
+    generate_independent_schedules,
 )
 import copy
 
@@ -220,6 +221,48 @@ def chunk_text_for_discord(text: str, max_length: int = 900) -> List[str]:
         chunks.append("\n".join(current_chunk))
 
     return chunks
+
+
+def get_method_unit(method_id: int) -> str:
+    """Return the unit label ('follows' vs 'unfollows') for a given method."""
+    try:
+        return "unfollows" if int(method_id) == 4 else "follows"
+    except (TypeError, ValueError):
+        return "follows"
+
+
+def format_daily_schedule_lines(
+    day_index: int,
+    account_names: Optional[List[str]],
+    account_method_map: Optional[Dict[str, int]],
+    per_account_plan_lookup: Optional[Dict[str, List[int]]],
+    warmup_summary: str = "Warmup",
+) -> List[str]:
+    """
+    Build human-readable per-account schedule lines for a specific day.
+    """
+    lines: List[str] = []
+    accounted: set = set()
+    account_method_map = account_method_map or {}
+    per_account_plan_lookup = per_account_plan_lookup or {}
+
+    for uname in sorted(account_method_map.keys()):
+        method_val = account_method_map.get(uname)
+        if method_val == 9:
+            lines.append(f"{uname}: {warmup_summary}")
+        else:
+            plan = per_account_plan_lookup.get(uname) or [0] * 7
+            target_val = plan[day_index] if 0 <= day_index < len(plan) else 0
+            unit_label = get_method_unit(method_val)
+            lines.append(f"{uname}: Method {method_val}, {target_val} {unit_label}")
+        accounted.add(uname)
+
+    if account_names:
+        for uname in sorted(dict.fromkeys(account_names)):
+            if uname not in accounted:
+                lines.append(f"{uname}: Off")
+
+    return lines
 
 
 
@@ -2357,7 +2400,7 @@ async def send_command(
                     method = 1
                 logger.info(f"[WEEKLY] Using method: {method}")
                 if test_mode:
-                    logger.warning(f"[WEEKLY] ⚠️ TEST MODE ENABLED - Scheduling with 2-minute gaps starting NOW")
+                    logger.warning(f"[WEEKLY] ⚠️ TEST MODE ENABLED - Scheduling with 5-minute gaps starting NOW")
 
                 # Warmup-only support: allow missing weekly ranges and week_start
                 warmup_only_flag = bool(command.get("warmupOnly", False))
@@ -2476,45 +2519,184 @@ async def send_command(
                 rest_day_comments_range = (1, 3)  # 1-3 comments per rest day
                 rest_day_duration_range = (30, 120)  # 30-120 minutes per rest day
                 
-                previous_active_days: Optional[Set[int]] = None
+                previous_active_days_map: Optional[Dict[str, Set[int]]] = None
+                
+                # Extract account usernames for per-account scheduling
+                account_usernames_for_caps = []
+                try:
+                    new_inputs_obj_caps = command.get("newInputs")
+                    if isinstance(new_inputs_obj_caps, dict):
+                        wrapper_inputs_caps = new_inputs_obj_caps.get("inputs", [])
+                        for wrapper_entry_caps in (wrapper_inputs_caps or []):
+                            inner_inputs_caps = wrapper_entry_caps.get("inputs", [])
+                            for node_caps in (inner_inputs_caps or []):
+                                if isinstance(node_caps, dict) and node_caps.get("type") == "instagrmFollowerBotAcountWise":
+                                    for acc_caps in (node_caps.get("Accounts") or []):
+                                        uname_caps = acc_caps.get("username")
+                                        # Layer 1: Filter by frontend enabled flag - only enabled accounts get schedules
+                                        if isinstance(uname_caps, str) and acc_caps.get('enabled', True) is not False:
+                                            account_usernames_for_caps.append(uname_caps)
+                except Exception:
+                    account_usernames_for_caps = []
+
+                # Fallback: if no usernames found via newInputs, derive from legacy inputs
+                if not account_usernames_for_caps:
+                    try:
+                        legacy_inputs_arr = command.get("inputs")
+                        if isinstance(legacy_inputs_arr, list):
+                            for acct in legacy_inputs_arr:
+                                uname_legacy = acct.get("username")
+                                if isinstance(uname_legacy, str):
+                                    account_usernames_for_caps.append(uname_legacy)
+                    except Exception:
+                        pass
+                
+                # Get previous history for each account if available
                 try:
                     sched_inputs_for_prev = None
                     if isinstance(schedules_payload, dict) and isinstance(schedules_payload.get("inputs"), list):
                         sched_inputs_for_prev = schedules_payload.get("inputs")
                     elif isinstance(schedules_payload, list):
                         sched_inputs_for_prev = schedules_payload
+                    
                     if (
                         sched_inputs_for_prev
+                        
                         and len(sched_inputs_for_prev) >= 3
                         and isinstance(sched_inputs_for_prev[2], dict)
                     ):
-                        prev_generated_schedule = sched_inputs_for_prev[2].get("generatedSchedule") or []
-                        if isinstance(prev_generated_schedule, list):
-                            previous_active_days = {
-                                int(day.get("dayIndex"))
-                                for day in prev_generated_schedule
-                                if isinstance(day, dict)
-                                and not day.get("isRest")
-                                and not day.get("isOff")
-                                and day.get("dayIndex") is not None
-                            }
-                            if not previous_active_days:
-                                previous_active_days = None
+                        prev_generated_map = sched_inputs_for_prev[2].get("generatedSchedulesMap")
+                        if prev_generated_map and isinstance(prev_generated_map, dict):
+                            previous_active_days_map = {}
+                            for uname, sched in prev_generated_map.items():
+                                if isinstance(sched, list):
+                                    active_set = {
+                                        int(day.get("dayIndex"))
+                                        for day in sched
+                                        if isinstance(day, dict)
+                                        and not day.get("isRest")
+                                        and not day.get("isOff")
+                                        and day.get("dayIndex") is not None
+                                    }
+                                    if active_set:
+                                        previous_active_days_map[uname] = active_set
                 except Exception:
-                    previous_active_days = None
+                    previous_active_days_map = None
 
-                generated = generate_weekly_targets(
-                    local_dt,
-                    (int(follow_weekly_range[0]), int(follow_weekly_range[1])),
-                    (int(rest_days_range[0]), int(rest_days_range[1])),
-                    (int(no_two_high_rule[0]), int(no_two_high_rule[1])),
-                    method,
-                    rest_day_likes_range,
-                    rest_day_comments_range,
-                    rest_day_duration_range,
-                    (int(off_days_range[0]), int(off_days_range[1])),
-                    previous_active_days=previous_active_days,
-                )
+                # Generate INDEPENDENT schedules for each account
+                if account_usernames_for_caps:
+                    schedules_map = generate_independent_schedules(
+                        accounts=account_usernames_for_caps,
+                        week_start_dt=local_dt,
+                        follow_weekly_range=(int(follow_weekly_range[0]), int(follow_weekly_range[1])),
+                        rest_days_range=(int(rest_days_range[0]), int(rest_days_range[1])),
+                        no_two_high_rule=(int(no_two_high_rule[0]), int(no_two_high_rule[1])),
+                        off_days_range=(int(off_days_range[0]), int(off_days_range[1])),
+                        previous_active_days_map=previous_active_days_map
+                    )
+                    
+                    # Add start_local and end_local timestamps to each day entry in schedules_map
+                    if schedules_map:
+                        for uname, sched in schedules_map.items():
+                            for d in sched:
+                                idx = int(d.get("dayIndex", 0))
+                                is_rest = bool(d.get("isRest", False))
+                                is_off = bool(d.get("isOff", False))
+                                day_method = int(d.get("method", 0 if is_off else (9 if is_rest else 1)))
+                                
+                                if test_mode:
+                                    # In test mode, use 5-minute gaps between scheduled days
+                                    gap_minutes = 5
+                                    start_time_local = local_dt + timedelta(minutes=idx * gap_minutes)
+                                    # For warmup-only, keep session short placeholder end; device manages day plan
+                                    end_time_local = start_time_local + (timedelta(minutes=1) if warmup_only_flag else timedelta(hours=11))
+                                else:
+                                    day_local = local_dt + timedelta(days=idx)
+                                    if warmup_only_flag:
+                                        # Trigger morning window 09:10–12:00 to align device day window
+                                        start_window_start = day_local.replace(hour=9, minute=10, second=0, microsecond=0)
+                                        start_window_end = day_local.replace(hour=12, minute=0, second=0, microsecond=0)
+                                    else:
+                                        start_window_start = day_local.replace(hour=11, minute=0, second=0, microsecond=0)
+                                        start_window_end = day_local.replace(hour=22, minute=0, second=0, microsecond=0)
+                                    window_minutes = int((start_window_end - start_window_start).total_seconds() // 60)
+                                    if window_minutes > 0:
+                                        random_offset = random.randint(0, window_minutes - 1)
+                                        start_time_local = start_window_start + timedelta(minutes=random_offset)
+                                        end_time_local = (start_time_local + timedelta(minutes=1)) if warmup_only_flag else start_window_end
+                                    else:
+                                        # Invalid window, skip timestamps for this entry
+                                        continue
+                                
+                                # Add timestamps to the day entry as ISO strings (for JSON serialization)
+                                d["start_local"] = start_time_local.isoformat()
+                                d["end_local"] = end_time_local.isoformat()
+                    
+                    # Ensure no warmups occur on days where any account is active
+                    if schedules_map:
+                        for day_idx in range(7):
+                            has_active = False
+                            for sched in schedules_map.values():
+                                entry = next((d for d in sched if d.get("dayIndex") == day_idx), None)
+                                if entry and not entry.get("isRest") and not entry.get("isOff"):
+                                    has_active = True
+                                    break
+                            if not has_active:
+                                continue
+                            for sched in schedules_map.values():
+                                entry = next((d for d in sched if d.get("dayIndex") == day_idx), None)
+                                if entry and entry.get("isRest"):
+                                    entry["method"] = 0
+                                    entry.pop("maxLikes", None)
+                                    entry.pop("maxComments", None)
+                                    entry.pop("warmupDuration", None)
+                    
+                    # Use the first account's schedule as the "generated" schedule for backward compatibility/visuals
+                    # But the real logic will use schedules_map
+                    generated = list(schedules_map.values())[0] if schedules_map else []
+                    
+                else:
+                    # Fallback to old logic if no accounts found (shouldn't happen normally)
+                    logger.warning("[WEEKLY] No accounts found for independent scheduling, falling back to single schedule")
+                    generated = generate_weekly_targets(
+                        local_dt,
+                        (int(follow_weekly_range[0]), int(follow_weekly_range[1])),
+                        (int(rest_days_range[0]), int(rest_days_range[1])),
+                        (int(no_two_high_rule[0]), int(no_two_high_rule[1])),
+                        method,
+                        rest_day_likes_range,
+                        rest_day_comments_range,
+                        rest_day_duration_range,
+                        (int(off_days_range[0]), int(off_days_range[1])),
+                        previous_active_days=None,
+                    )
+                    schedules_map = {} # Empty map means fallback behavior
+
+                # Ensure newInputs enabled flags reflect which accounts actually have scheduled activity
+                if schedules_map:
+                    accounts_with_activity: Set[str] = set()
+                    for uname, sched in schedules_map.items():
+                        if not isinstance(uname, str) or not isinstance(sched, list):
+                            continue
+                        has_activity = any(not entry.get("isOff", False) for entry in sched if isinstance(entry, dict))
+                        if has_activity:
+                            accounts_with_activity.add(uname)
+                    if accounts_with_activity:
+                        try:
+                            new_inputs_obj_enabled = command.get("newInputs")
+                            if isinstance(new_inputs_obj_enabled, dict):
+                                wrapper_inputs_enabled = new_inputs_obj_enabled.get("inputs", [])
+                                for wrapper_entry_enabled in (wrapper_inputs_enabled or []):
+                                    inner_inputs_enabled = wrapper_entry_enabled.get("inputs", [])
+                                    for node_enabled in (inner_inputs_enabled or []):
+                                        if isinstance(node_enabled, dict) and node_enabled.get("type") == "instagrmFollowerBotAcountWise":
+                                            for acc_enabled in (node_enabled.get("Accounts") or []):
+                                                uname_enabled = acc_enabled.get("username")
+                                                if isinstance(uname_enabled, str):
+                                                    acc_enabled["enabled"] = uname_enabled in accounts_with_activity
+                        except Exception as enabled_err:
+                            logger.warning(f"[WEEKLY] Failed to update enabled flags from schedules: {enabled_err}")
+
                 # Special mode: warmup-only weekly plan (4 warmup days, 3 off days)
                 is_warmup_only = warmup_only_flag
                 if is_warmup_only:
@@ -2567,8 +2749,8 @@ async def send_command(
                     day_method = int(d.get("method", 0 if is_off else (9 if is_rest else 1)))
                     
                     if test_mode:
-                        # For warmup-only: use 5-minute gaps starting from now, otherwise 2-minute gaps
-                        gap_minutes = 5 if is_warmup_only else 2
+                        # In test mode, use 5-minute gaps between scheduled days
+                        gap_minutes = 5
                         start_time_local = local_dt + timedelta(minutes=idx * gap_minutes)
                         # For warmup-only, keep session short placeholder end; device manages day plan
                         end_time_local = start_time_local + (timedelta(minutes=1) if is_warmup_only else timedelta(hours=11))
@@ -2644,8 +2826,8 @@ async def send_command(
                                         if isinstance(node, dict) and node.get("type") == "instagrmFollowerBotAcountWise":
                                             for acc in (node.get("Accounts") or []):
                                                 uname = acc.get("username")
-                                                # Filter out disabled accounts
-                                                if acc.get('enabled', True) is not False and isinstance(uname, str):
+                                                # Layer 1: Filter by frontend enabled flag - only enabled accounts get schedules
+                                                if isinstance(uname, str) and acc.get('enabled', True) is not False:
                                                     account_usernames.append(uname)
                         except Exception:
                             account_usernames = []
@@ -2662,6 +2844,28 @@ async def send_command(
                             except Exception as e:
                                 logger.warning(f"[WEEKLY] Failed to build per-account plans: {e}")
                                 per_account_plans = {}
+
+                        # Build account_day_lookup from schedules_map for Discord summary
+                        account_day_lookup: Dict[str, Dict[int, Dict]] = {}
+                        if schedules_map and isinstance(schedules_map, dict):
+                            for uname, sched in schedules_map.items():
+                                if not isinstance(uname, str):
+                                    continue
+                                day_map: Dict[int, Dict] = {}
+                                for entry in (sched or []):
+                                    if not isinstance(entry, dict):
+                                        continue
+                                    idx = entry.get("dayIndex")
+                                    if isinstance(idx, int):
+                                        day_map[idx] = entry
+                                if day_map:
+                                    account_day_lookup[uname] = day_map
+
+                        accounts_for_summary = sorted(
+                            dict.fromkeys(
+                                account_usernames or list(account_day_lookup.keys())
+                            )
+                        )
 
                         # Extract per-account methods from newInputs for summary display
                         input_name_to_method_map = {
@@ -2717,19 +2921,83 @@ async def send_command(
                             base_method_for_summary = 1
 
                         # Build a simple per-day account method map for summary display
-                        account_method_map_by_day_for_summary = {}
-                        for p in planned_schedule:
-                            di_tmp = int(p.get("dayIndex", 0))
-                            is_rest_tmp = bool(p.get("isRest", False))
-                            is_off_tmp = bool(p.get("isOff", False))
-                            planned_m = int(p.get("method", 0 if is_off_tmp else (9 if is_rest_tmp else base_method_for_summary)))
-                            if is_rest_tmp or is_off_tmp or planned_m == 9:
-                                account_method_map_by_day_for_summary[di_tmp] = {}
-                            else:
-                                m = {}
-                                for uname in account_usernames:
-                                    m[uname] = account_methods_for_summary.get(uname, planned_m)
-                                account_method_map_by_day_for_summary[di_tmp] = m
+                        account_method_map_by_day_for_summary: Dict[int, Dict[str, int]] = {}
+                        if account_day_lookup:
+                            for di_tmp in range(7):
+                                day_map: Dict[str, int] = {}
+                                for uname in accounts_for_summary:
+                                    day_entry = (
+                                        account_day_lookup.get(uname, {}).get(di_tmp)
+                                    )
+                                    if not day_entry:
+                                        continue
+                                    entry_method = int(day_entry.get("method", 0))
+                                    if day_entry.get("isOff") or entry_method == 0:
+                                        continue
+                                    if day_entry.get("isRest") or entry_method == 9:
+                                        day_map[uname] = 9
+                                    else:
+                                        chosen_method = account_methods_for_summary.get(uname, entry_method)
+                                        day_map[uname] = chosen_method
+                                account_method_map_by_day_for_summary[di_tmp] = day_map
+                        else:
+                            for p in planned_schedule:
+                                di_tmp = int(p.get("dayIndex", 0))
+                                is_rest_tmp = bool(p.get("isRest", False))
+                                is_off_tmp = bool(p.get("isOff", False))
+                                planned_m = int(
+                                    p.get(
+                                        "method",
+                                        0 if is_off_tmp else (9 if is_rest_tmp else base_method_for_summary),
+                                    )
+                                )
+                                if is_rest_tmp or is_off_tmp or planned_m == 9:
+                                    account_method_map_by_day_for_summary[di_tmp] = {}
+                                else:
+                                    m = {}
+                                    for uname in account_usernames:
+                                        m[uname] = account_methods_for_summary.get(
+                                            uname, planned_m
+                                        )
+                                    account_method_map_by_day_for_summary[di_tmp] = m
+
+                        def build_account_day_parts(day_index: int) -> List[str]:
+                            if not account_day_lookup or not accounts_for_summary:
+                                return []
+                            parts: List[str] = []
+                            method_override_map = account_method_map_by_day_for_summary.get(day_index, {})
+                            for uname in accounts_for_summary:
+                                day_plan = account_day_lookup.get(uname, {}).get(day_index)
+                                if not day_plan:
+                                    parts.append(f"{uname}: Off")
+                                    continue
+                                plan_method = int(day_plan.get("method", 0))
+                                if day_plan.get("isOff") or plan_method == 0:
+                                    parts.append(f"{uname}: Off")
+                                elif day_plan.get("isRest") or plan_method == 9 or method_override_map.get(uname) == 9:
+                                    likes = int(day_plan.get("maxLikes", 10))
+                                    comments = int(day_plan.get("maxComments", 5))
+                                    duration = int(day_plan.get("warmupDuration", 60))
+                                    parts.append(
+                                        f"{uname}: Warmup - {likes} likes, {comments} comments, {duration}min"
+                                    )
+                                else:
+                                    final_method = method_override_map.get(uname, plan_method)
+                                    target_val = int(
+                                        day_plan.get(
+                                            "target",
+                                            (
+                                                (per_account_plans.get(uname) or [0] * 7)[day_index]
+                                                if per_account_plans
+                                                else 0
+                                            ),
+                                        )
+                                    )
+                                    unit_label = get_method_unit(final_method)
+                                    parts.append(
+                                        f"{uname}: Method {final_method}, {target_val} {unit_label}"
+                                    )
+                            return parts
 
                         # Build summary lines with planned start times (show per-account caps on active days; no global headline)
                         lines = []
@@ -2743,6 +3011,16 @@ async def send_command(
                             date_str = p["start_local"].strftime("%b %d")
                             time_str = p["start_local"].strftime("%H:%M")
                             heading = f"📅 **{actual_day_name} {date_str}** {time_str}:"
+                            di = int(p.get("dayIndex", 0))
+                            if account_day_lookup:
+                                parts = build_account_day_parts(di)
+                                if parts:
+                                    label = f"{heading}\n" + "\n".join(parts)
+                                else:
+                                    label = f"{heading}\n{p['methodLabel']}"
+                                lines.append(label)
+                                continue
+
                             if p["isOff"]:
                                 if is_warmup_only_plan:
                                     # Display off-days as warmup entries in warmup-only plans
@@ -2758,7 +3036,6 @@ async def send_command(
                             elif p["isRest"]:
                                 label = f"{heading}\n{p['methodLabel']} - {p.get('maxLikes', 10)} likes, {p.get('maxComments', 5)} comments, {p.get('warmupDuration', 60)}min"
                             else:
-                                di = int(p.get("dayIndex", 0))
                                 per_day_map = account_method_map_by_day_for_summary.get(di) or {}
                                 parts = []
                                 for uname in sorted(account_usernames):
@@ -2769,9 +3046,10 @@ async def send_command(
                                             parts.append(f"{uname}: Method 9")
                                         else:
                                             max_f = (per_account_plans.get(uname) or [0]*7)[di] if per_account_plans else 0
-                                            parts.append(f"{uname}: Method {account_m}, {max_f}(follows max)")
+                                            unit_label = get_method_unit(account_m)
+                                            parts.append(f"{uname}: Method {account_m}, {max_f} {unit_label} (max)")
                                 if parts:
-                                    label = f"{heading}\n" + ", ".join(parts)
+                                    label = f"{heading}\n" + "\n".join(parts)
                                 else:
                                     label = f"{heading}\n{p['methodLabel']}"
                             lines.append(label)
@@ -2817,6 +3095,7 @@ async def send_command(
                     "type": "WeeklyRandomizedPlan",
                     "weeklyData": weekly_data,
                     "generatedSchedule": generated,
+                    "generatedSchedulesMap": schedules_map,  # Store the per-account map for history tracking
                 }
 
                 # Normalize schedules payload to dict with inputs array
@@ -2915,8 +3194,8 @@ async def send_command(
                                 if isinstance(node_caps, dict) and node_caps.get("type") == "instagrmFollowerBotAcountWise":
                                     for acc_caps in (node_caps.get("Accounts") or []):
                                         uname_caps = acc_caps.get("username")
-                                        # Filter out disabled accounts
-                                        if acc_caps.get('enabled', True) is not False and isinstance(uname_caps, str):
+                                        # Layer 1: Filter by frontend enabled flag - only enabled accounts get schedules
+                                        if isinstance(uname_caps, str) and acc_caps.get('enabled', True) is not False:
                                             account_usernames_for_caps.append(uname_caps)
                 except Exception:
                     account_usernames_for_caps = []
@@ -2928,14 +3207,27 @@ async def send_command(
                         if isinstance(legacy_inputs_arr, list):
                             for acct in legacy_inputs_arr:
                                 uname_legacy = acct.get("username")
-                                if isinstance(uname_legacy, str):
+                                # Layer 1: Filter by frontend enabled flag - only enabled accounts get schedules
+                                if isinstance(uname_legacy, str) and acct.get('enabled', True) is not False:
                                     account_usernames_for_caps.append(uname_legacy)
                     except Exception:
                         pass
 
                 # Reuse same per-account plan if available; otherwise compute now
                 if account_usernames_for_caps:
-                    if 'per_account_plans' in locals() and per_account_plans:
+                    # If we generated independent schedules, we can build a compatible "caps plan" from them
+                    if 'schedules_map' in locals() and schedules_map:
+                        per_account_plans_caps = {}
+                        for uname, sched in schedules_map.items():
+                            # Convert list of day-dicts into list of targets
+                            targets_list = [0] * 7
+                            for d in sched:
+                                idx = d.get("dayIndex")
+                                t = d.get("target", 0)
+                                if isinstance(idx, int) and 0 <= idx < 7:
+                                    targets_list[idx] = t
+                            per_account_plans_caps[uname] = targets_list
+                    elif 'per_account_plans' in locals() and per_account_plans:
                         per_account_plans_caps = per_account_plans
                     else:
                         try:
@@ -2982,8 +3274,8 @@ async def send_command(
                                     if isinstance(node, dict) and node.get("type") == "instagrmFollowerBotAcountWise":
                                         for acc in (node.get("Accounts") or []):
                                             uname = acc.get("username")
-                                            # Filter out disabled accounts
-                                            if acc.get('enabled', True) is False or not isinstance(uname, str):
+                                            # Layer 1: Filter by frontend enabled flag - only enabled accounts get method extraction
+                                            if not isinstance(uname, str) or acc.get('enabled', True) is False:
                                                 continue
                                             enabled_m = None
                                             for blk in (acc.get("inputs") or []):
@@ -3011,54 +3303,162 @@ async def send_command(
 
                 account_method_map_by_day = {}
                 if base_account_usernames:
-                    for planned_day in planned_schedule:
-                        di = int(planned_day.get("dayIndex", 0))
-                        is_rest_day = bool(planned_day.get("isRest", False))
-                        is_off_day = bool(planned_day.get("isOff", False))
-                        planned_method = int(planned_day.get("method", 0 if is_off_day else (9 if is_rest_day else base_day_method)))
+                    # Use schedule map to build the method map if available (Account-Centric)
+                    if 'schedules_map' in locals() and schedules_map:
+                        # Iterate 0..6 days
+                        for di in range(7):
+                            method_map = {}
+                            # For each account, find its status on this day
+                            for uname, sched in schedules_map.items():
+                                # Find the day object for this index
+                                day_obj = next((d for d in sched if d.get("dayIndex") == di), None)
+                                if not day_obj:
+                                    continue
+                                
+                                is_rest = bool(day_obj.get("isRest"))
+                                is_off = bool(day_obj.get("isOff"))
+                                plan_method_val = int(day_obj.get("method", 0))
+                                if is_off or plan_method_val == 0:
+                                    continue  # Account is off/idle this day
+                                if is_rest or plan_method_val == 9:
+                                    method_map[uname] = 9
+                                    continue
 
-                        if is_rest_day or is_off_day or planned_method == 9:
-                            account_method_map_by_day[di] = {}
-                            continue
+                                selected_method = account_methods_from_inputs.get(uname)
+                                if selected_method is None:
+                                    selected_method = base_day_method
+                                method_map[uname] = int(selected_method)
+                            
+                            if method_map:
+                                account_method_map_by_day[di] = method_map
+                            
+                            # Log distribution
+                            m1 = sum(1 for v in method_map.values() if v == 1)
+                            m4 = sum(1 for v in method_map.values() if v == 4)
+                            warmups = sum(1 for v in method_map.values() if v == 9)
+                            logger.info(f"[WEEKLY-METHODS] Day {di} independent account method distribution: method1={m1}, method4={m4}, warmups={warmups}")
 
-                        method_map = {}
-                        for uname in base_account_usernames:
-                            method_map[uname] = account_methods_from_inputs.get(uname, planned_method)
+                    else:
+                        # Old logic (Device-Centric / Single Schedule)
+                        for planned_day in planned_schedule:
+                            di = int(planned_day.get("dayIndex", 0))
+                            is_rest_day = bool(planned_day.get("isRest", False))
+                            is_off_day = bool(planned_day.get("isOff", False))
+                            planned_method = int(planned_day.get("method", 0 if is_off_day else (9 if is_rest_day else base_day_method)))
 
-                        account_method_map_by_day[di] = method_map
-                        m1 = sum(1 for v in method_map.values() if v == 1)
-                        m4 = sum(1 for v in method_map.values() if v == 4)
-                        logger.info(f"[WEEKLY-METHODS] Day {di} account method distribution: method1={m1}, method4={m4}")
+                            if is_rest_day or is_off_day or planned_method == 9:
+                                account_method_map_by_day[di] = {}
+                                continue
+
+                            method_map = {}
+                            for uname in base_account_usernames:
+                                method_map[uname] = account_methods_from_inputs.get(uname, planned_method)
+
+                            account_method_map_by_day[di] = method_map
+                            m1 = sum(1 for v in method_map.values() if v == 1)
+                            m4 = sum(1 for v in method_map.values() if v == 4)
+                            logger.info(f"[WEEKLY-METHODS] Day {di} account method distribution: method1={m1}, method4={m4}")
 
                 # (Merged per-account method details into the main summary above; no separate method map message)
 
-                job_day_indices = sorted(
-                    int(p.get("dayIndex", 0))
-                    for p in planned_schedule
-                    if not p.get("isOff", False)
-                )
-                last_scheduled_day_index = job_day_indices[-1] if job_day_indices else None
+                # Determine active days for device (Union of all accounts) based on the generated method map
+                device_active_days = sorted(account_method_map_by_day.keys())
+                last_scheduled_day_index = device_active_days[-1] if device_active_days else None
+                test_mode_instant_sent = False
 
-                for p in planned_schedule:
-                    day_index = int(p.get("dayIndex", 0))
-                    target_count = int(p.get("target", 0))
-                    is_rest = bool(p.get("isRest", False))
-                    is_off = bool(p.get("isOff", False))
-                    day_method = int(p.get("method", 0 if is_off else (9 if is_rest else 1)))
+                # Schedule jobs for every day that has at least one active/warmup account
+                for day_index in range(7):
+                    # Get the account map for this day
+                    account_map = account_method_map_by_day.get(day_index)
                     
-                    # Skip off days - no tasks scheduled
-                    if is_off or day_method == 0:
+                    # If no accounts are active/warming up, skip this day
+                    if not account_map:
                         continue
+                        
+                    # Determine aggregate day properties
+                    # If any account is active (1 or 4), the device runs in active mode.
+                    # If all accounts are warming up (9), the device runs in warmup mode.
+                    
+                    active_methods = [m for m in account_map.values() if m in (1, 4)]
+                    warmup_methods = [m for m in account_map.values() if m == 9]
+                    
+                    if active_methods:
+                        # Active day
+                        day_method = active_methods[0] # Base method for device job
+                        is_rest = False
+                        is_off = False
+                    elif warmup_methods:
+                        # Warmup only day
+                        day_method = 9
+                        is_rest = True
+                        is_off = False
+                    else:
+                        # Should not be reachable if account_map is populated
+                        continue
+
+                    # Determine Start/End Times & Targets from independent schedules
+                    start_times = []
+                    end_times = []
+                    day_target_sum = 0
+                    representative_p = {}
+                    
+                    if 'schedules_map' in locals() and schedules_map:
+                         for uname, sched in schedules_map.items():
+                             if uname not in account_map:
+                                 continue
+                             d_obj = next((d for d in sched if d.get("dayIndex") == day_index), None)
+                             if d_obj:
+                                 if d_obj.get("start_local"):
+                                     # Convert ISO string back to datetime object
+                                     start_time_str = d_obj["start_local"]
+                                     if isinstance(start_time_str, str):
+                                         start_times.append(datetime.fromisoformat(start_time_str))
+                                     else:
+                                         start_times.append(start_time_str)
+                                 if d_obj.get("end_local"):
+                                     # Convert ISO string back to datetime object
+                                     end_time_str = d_obj["end_local"]
+                                     if isinstance(end_time_str, str):
+                                         end_times.append(datetime.fromisoformat(end_time_str))
+                                     else:
+                                         end_times.append(end_time_str)
+                                 day_target_sum += int(d_obj.get("target", 0))
+                                 # Capture params from the first relevant account (esp. for warmup params)
+                                 if not representative_p:
+                                     representative_p = d_obj
+                                 elif d_obj.get("method") == 9 and representative_p.get("method") != 9:
+                                     # Prefer warmup params if we are in warmup mode (though mixing shouldn't happen)
+                                     representative_p = d_obj
+                    
+                    # Fallback: try to pull from planned_schedule (legacy/single-schedule)
+                    p_fallback = None
+                    if not start_times:
+                        p_fallback = next((p for p in planned_schedule if p.get("dayIndex") == day_index), None)
+                        if p_fallback and not p_fallback.get("isOff"):
+                             start_times.append(p_fallback["start_local"])
+                             end_times.append(p_fallback["end_local"])
+                             if day_target_sum == 0:
+                                 day_target_sum = int(p_fallback.get("target", 0))
+                    
+                    if not representative_p and p_fallback:
+                        representative_p = p_fallback
+                    
+                    p = representative_p or {}
+                    
+                    if not start_times:
+                        logger.warning(f"[WEEKLY] No start times found for day {day_index}, skipping.")
+                        continue
+
+                    # Use the window that covers all accounts (min start, max end)
+                    start_time_local = min(start_times)
+                    end_time_local = max(end_times)
+                    target_count = day_target_sum
                     
                     total_target += target_count
                     if is_rest:
                         warmup_days += 1
                     else:
                         active_days += 1
-
-                    # Reuse planned times
-                    start_time_local = p["start_local"]
-                    end_time_local = p["end_local"]
 
                     start_time_utc = start_time_local.astimezone(pytz.UTC)
                     end_time_utc = end_time_local.astimezone(pytz.UTC)
@@ -3078,12 +3478,29 @@ async def send_command(
                         "method": day_method,  # Base method; per-account overrides provided via accountMethodMap
                     })
 
+                    # For the device, each weekly job should look like a normal ExactStartTime run
+                    # so that it follows the same execution path as one-off commands.
+                    try:
+                        job_command["durationType"] = "ExactStartTime"
+                        # Provide an exactStartTime string similar to manual runs
+                        try:
+                            job_command["exactStartTime"] = start_time_local.strftime("%H:%M")
+                        except Exception:
+                            pass
+                        # Weekly metadata is only needed on the server side; the device can ignore it
+                        job_command.pop("newSchecdules", None)
+                        job_command.pop("schedules", None)
+                    except Exception as duration_patch_err:
+                        logger.warning(f"[WEEKLY] Failed to normalize weekly job durationType for device: {duration_patch_err}")
+
                     account_method_map = account_method_map_by_day.get(day_index, {})
                     job_command["accountMethodMap"] = account_method_map
                     # If warmup day, use the new daily warmup scheduler command type
                     if day_method == 9 and is_rest:
                         job_command["type"] = "WARMUPS_DAILY_START"
                     
+                    warmup_summary_text = "Warmup"
+
                     # Add likes, comments, and duration for rest days (method 9)
                     if day_method == 9 and is_rest:
                         max_likes = int(p.get("maxLikes", 10))
@@ -3094,6 +3511,27 @@ async def send_command(
                             "maxComments": max_comments,
                             "warmupDuration": warmup_duration
                         })
+                        
+                        # Set enabled flags for warmup days based on accountMethodMap
+                        account_method_map_warmup = account_method_map_by_day.get(day_index, {})
+                        try:
+                            warmup_adjusted_inputs = copy.deepcopy(job_command.get("newInputs"))
+                            if isinstance(warmup_adjusted_inputs, dict):
+                                warmup_inputs_arr = warmup_adjusted_inputs.get("inputs", [])
+                                for warmup_wrap in (warmup_inputs_arr or []):
+                                    warmup_inner = warmup_wrap.get("inputs", [])
+                                    for warmup_node in (warmup_inner or []):
+                                        if isinstance(warmup_node, dict) and warmup_node.get("type") == "instagrmFollowerBotAcountWise":
+                                            for warmup_acc in (warmup_node.get("Accounts") or []):
+                                                warmup_uname = warmup_acc.get("username")
+                                                if warmup_uname in account_method_map_warmup:
+                                                    warmup_acc["enabled"] = True
+                                                else:
+                                                    warmup_acc["enabled"] = False
+                            job_command["newInputs"] = warmup_adjusted_inputs
+                        except Exception as e:
+                            logger.warning(f"[WEEKLY] Failed to set enabled flags for warmup day: {e}")
+                        warmup_summary_text = f"Warmup - {max_likes} likes, {max_comments} comments, {warmup_duration}min"
                     # Note: method 1 = Follow Suggestions, 4 = Unfollow Non-Followers, 9 = Warmup
 
                     # Apply per-account caps into newInputs and legacy inputs for active days (method != 9)
@@ -3156,40 +3594,89 @@ async def send_command(
                                     inner = wrap.get("inputs", [])
                                     for node in (inner or []):
                                         if isinstance(node, dict) and node.get("type") == "instagrmFollowerBotAcountWise":
+                                            per_account_map = account_method_map or {}
                                             for acc in (node.get("Accounts") or []):
                                                 uname = acc.get("username")
-                                                if uname in account_usernames_for_caps:
-                                                    v = (per_account_plans_caps.get(uname) or [0] * 7)[day_index]
-                                                    chosen_method = (account_method_map or {}).get(uname) or day_method
-                                                    account_inputs = acc.get("inputs") or []
+                                                # Process ALL accounts to ensure enabled flag is set correctly for daily schedule
+                                                account_inputs = acc.get("inputs") or []
+                                                
+                                                # Set enabled flag based on whether account is scheduled for this day
+                                                if uname in per_account_map:
+                                                    acc["enabled"] = True
+                                                else:
+                                                    acc["enabled"] = False
+                                                    # No tasks for this account today – disable all toggle blocks
                                                     for blk in account_inputs:
-                                                        name = blk.get("name") or ""
-                                                        is_unfollow_block = (
-                                                            blk.get("type") == "toggleAndUnFollowInputs"
-                                                            or name.startswith("Unfollow Non-Followers")
-                                                        )
-                                                        if chosen_method == 1:
-                                                            if name in follow_block_names:
-                                                                set_follow_caps(blk, v)
-                                                            elif is_unfollow_block:
-                                                                disable_unfollow_block(blk)
-                                                        elif chosen_method == 4:
-                                                            if name in follow_block_names:
-                                                                disable_follow_block(blk)
-                                                            elif is_unfollow_block:
-                                                                set_unfollow_caps(blk, v)
+                                                        if isinstance(blk, dict) and "input" in blk:
+                                                            blk["input"] = False
+                                                    continue
+
+                                                chosen_method = per_account_map[uname]
+                                                v = (per_account_plans_caps.get(uname) or [0] * 7)[day_index]
+                                                for blk in account_inputs:
+                                                    name = blk.get("name") or ""
+                                                    is_unfollow_block = (
+                                                        blk.get("type") == "toggleAndUnFollowInputs"
+                                                        or name.startswith("Unfollow Non-Followers")
+                                                    )
+                                                    if chosen_method == 1:
+                                                        if name in follow_block_names:
+                                                            set_follow_caps(blk, v)
+                                                        elif is_unfollow_block:
+                                                            disable_unfollow_block(blk)
+                                                    elif chosen_method == 4:
+                                                        if name in follow_block_names:
+                                                            disable_follow_block(blk)
+                                                        elif is_unfollow_block:
+                                                            set_unfollow_caps(blk, v)
                             job_command["newInputs"] = adjusted_inputs
 
                             # Also update legacy structure `inputs` so the device (which reads legacy) gets the same per-account caps
                             adjusted_legacy = copy.deepcopy(job_command.get("inputs"))
                             if isinstance(adjusted_legacy, list):
+                                per_account_map = account_method_map or {}
+                                active_account_entries = []
+                                switch_entries = []
+                                other_entries = []
                                 for acct in adjusted_legacy:
-                                    uname_legacy = acct.get("username")
-                                    if uname_legacy in account_usernames_for_caps:
-                                        v = (per_account_plans_caps.get(uname_legacy) or [0] * 7)[day_index]
-                                        chosen_method_legacy = (account_method_map or {}).get(uname_legacy) or day_method
-                                        daily_total, min_daily, min_hourly, max_hourly = compute_caps(v)
+                                    if isinstance(acct, dict) and "username" in acct and "inputs" in acct:
+                                        uname_legacy = acct.get("username")
+                                        # Process ALL accounts to ensure enabled flag is set correctly for daily schedule
+                                        
+                                        # Set enabled flag based on whether account is scheduled for this day
+                                        if uname_legacy in per_account_map:
+                                            acct["enabled"] = True
+                                        else:
+                                            acct["enabled"] = False
+                                        
                                         blocks = acct.get("inputs")
+                                        if uname_legacy not in per_account_map:
+                                            # Off-schedule account: disable ALL automation inputs so automationType remains empty
+                                            if isinstance(blocks, list):
+                                                for blk in blocks:
+                                                    if isinstance(blk, dict):
+                                                        # Disable all possible automation inputs
+                                                        automation_inputs = [
+                                                            "Follow from Notification Suggestions",
+                                                            "Follow from Profile Followers List",
+                                                            "Follow from Post",
+                                                            "Unfollow Non-Followers",
+                                                            "Accept All Follow Requests",
+                                                            "Follow from Profile Posts",
+                                                            "Switch Account Public To Private",
+                                                            "Switch Account Private To Public",
+                                                            "Standalone Warmup",
+                                                            "Enhanced Warmup",
+                                                            "Auto Post"
+                                                        ]
+                                                        for input_key in automation_inputs:
+                                                            if input_key in blk:
+                                                                blk[input_key] = False
+                                            continue
+
+                                        chosen_method_legacy = per_account_map[uname_legacy]
+                                        v = (per_account_plans_caps.get(uname_legacy) or [0] * 7)[day_index]
+                                        daily_total, min_daily, min_hourly, max_hourly = compute_caps(v)
                                         if isinstance(blocks, list):
                                             unfollow_configured_legacy = False
                                             for blk in blocks:
@@ -3218,9 +3705,43 @@ async def send_command(
                                                 logger.info(
                                                     f"[WEEKLY-CAPS] Set unfollow caps for {uname_legacy}: daily={daily_total}, hourly=({min_hourly}-{max_hourly})"
                                                 )
-                            job_command["inputs"] = adjusted_legacy
+                                        active_account_entries.append(acct)
+                                        continue
+
+                                    if isinstance(acct, dict) and (
+                                        "Switch Account Public To Private" in acct
+                                        or "Switch Account Private To Public" in acct
+                                    ):
+                                        switch_entries.append(acct)
+                                    else:
+                                        other_entries.append(acct)
+
+                                if per_account_map:
+                                    adjusted_legacy = active_account_entries + other_entries + switch_entries
+                                job_command["inputs"] = adjusted_legacy
+                            else:
+                                job_command["inputs"] = adjusted_legacy
                         except Exception as e:
                             logger.warning(f"[WEEKLY] Failed to inject per-account caps: {e}")
+
+                    schedule_accounts = (
+                        base_account_usernames
+                        or account_usernames_for_caps
+                        or list(account_method_map.keys())
+                    )
+                    per_account_plan_lookup = per_account_plans_caps if isinstance(per_account_plans_caps, dict) else {}
+                    daily_schedule_lines = format_daily_schedule_lines(
+                        day_index,
+                        schedule_accounts,
+                        account_method_map,
+                        per_account_plan_lookup,
+                        warmup_summary_text,
+                    )
+
+                    # Ensure ALL accounts are included in payload (not trimmed)
+                    # Off-schedule accounts have enabled=false and all inputs disabled
+                    # This allows device to match all accounts and build accountUsernames correctly
+                    # Device skips accounts with no automation type (all inputs false)
 
                     # Add job to scheduler
                     try:
@@ -3295,44 +3816,67 @@ async def send_command(
                             f"[WEEKLY] 📅 Scheduling Day {day_index} ({actual_day_name} {start_time_local.strftime('%b %d')}): start={start_time_local.strftime('%H:%M')} end={end_time_local.strftime('%H:%M')} target={target_count} method={day_method} rest={is_rest}"
                         )
                         
-                        # Schedule reminder notification
-                        # Test mode: 2 minutes before, Normal mode: 1 hour before
+                        # Schedule daily schedule reminder
+                        reminder_job_id = f"reminder_{job_id}"
+                        schedule_lines_payload = daily_schedule_lines or [f"Device target: {target_count} {get_method_unit(day_method)}"]
                         if test_mode:
-                            reminder_time_utc = start_time_utc - timedelta(minutes=2)
-                            reminder_label = "2 minutes"
-                        else:
-                            reminder_time_utc = start_time_utc - timedelta(hours=1)
-                            reminder_label = "1 hour"
-                        
-                        if reminder_time_utc > datetime.now(pytz.UTC):
-                            reminder_job_id = f"reminder_{job_id}"
-                            method_names_reminder = {
-                                1: "Method 1: Follow Suggestions",
-                                4: "Method 4: Unfollow Non-Followers",
-                                9: "Method 9: Warmup"
-                            }
-                            method_label_reminder = method_names_reminder.get(day_method, f"method {day_method}")
-                            if is_rest:
-                                # Show likes, comments, and duration for rest day reminders
-                                max_likes = int(p.get("maxLikes", 10))
-                                max_comments = int(p.get("maxComments", 5))
-                                warmup_duration = int(p.get("warmupDuration", 60))
-                                activity_text = f"{method_label_reminder} - {max_likes} likes, {max_comments} comments, {warmup_duration}min"
+                            if not test_mode_instant_sent:
+                                try:
+                                    send_weekly_reminder(
+                                        task_id,
+                                        actual_day_name,
+                                        start_time_local.strftime('%Y-%m-%d %H:%M'),
+                                        schedule_lines_payload,
+                                        time_zone,
+                                        True,
+                                    )
+                                    test_mode_instant_sent = True
+                                    logger.info(f"[WEEKLY] ⏰ Sent instant daily schedule for Day {day_index} (test mode)")
+                                except Exception as reminder_err:
+                                    logger.warning(f"[WEEKLY] Could not send instant reminder: {reminder_err}")
                             else:
-                                activity_text = f"{target_count} follows ({method_label_reminder})"
-                                activity_text = f"{target_count} follows ({method_label_reminder})"
-                            
-                            try:
-                                scheduler.add_job(
-                                    send_weekly_reminder,
-                                    trigger=DateTrigger(run_date=reminder_time_utc, timezone=pytz.UTC),
-                                    args=[task_id, actual_day_name, start_time_local.strftime('%Y-%m-%d %H:%M'), activity_text, time_zone, test_mode],
-                                    id=reminder_job_id,
-                                    name=f"Reminder for day {day_index} of task {task_id}",
-                                )
-                                logger.info(f"[WEEKLY] ⏰ Scheduled reminder for Day {day_index}: {reminder_label} before start")
-                            except Exception as reminder_err:
-                                logger.warning(f"[WEEKLY] Could not schedule reminder: {reminder_err}")
+                                reminder_time_utc = start_time_utc - timedelta(minutes=2)
+                                if reminder_time_utc > datetime.now(pytz.UTC):
+                                    try:
+                                        scheduler.add_job(
+                                            send_weekly_reminder,
+                                            trigger=DateTrigger(run_date=reminder_time_utc, timezone=pytz.UTC),
+                                            args=[
+                                                task_id,
+                                                actual_day_name,
+                                                start_time_local.strftime('%Y-%m-%d %H:%M'),
+                                                schedule_lines_payload,
+                                                time_zone,
+                                                True,
+                                                "2 Minutes Before Start",
+                                            ],
+                                            id=reminder_job_id,
+                                            name=f"Reminder for day {day_index} of task {task_id}",
+                                        )
+                                        logger.info(f"[WEEKLY] ⏰ Scheduled daily schedule reminder for Day {day_index}: 2 minutes before start (test mode)")
+                                    except Exception as reminder_err:
+                                        logger.warning(f"[WEEKLY] Could not schedule reminder: {reminder_err}")
+                        else:
+                            reminder_time_utc = start_time_utc - timedelta(hours=2)
+                            if reminder_time_utc > datetime.now(pytz.UTC):
+                                try:
+                                    scheduler.add_job(
+                                        send_weekly_reminder,
+                                        trigger=DateTrigger(run_date=reminder_time_utc, timezone=pytz.UTC),
+                                        args=[
+                                            task_id,
+                                            actual_day_name,
+                                            start_time_local.strftime('%Y-%m-%d %H:%M'),
+                                            schedule_lines_payload,
+                                            time_zone,
+                                            False,
+                                        ],
+                                        id=reminder_job_id,
+                                        name=f"Reminder for day {day_index} of task {task_id}",
+                                    )
+                                    logger.info(f"[WEEKLY] ⏰ Scheduled daily schedule reminder for Day {day_index}: 2 hours before start")
+                                except Exception as reminder_err:
+                                    logger.warning(f"[WEEKLY] Could not schedule reminder: {reminder_err}")
                     except Exception as e:
                         # Cleanup previously scheduled jobs if failure
                         for jid in scheduled_job_ids:
@@ -3590,11 +4134,19 @@ def register_device(device_data: DeviceRegistration):
 
 
 
-def send_weekly_reminder(task_id, day_name, start_time_formatted, activity_text, time_zone, test_mode=False):
+def send_weekly_reminder(
+    task_id,
+    day_name,
+    start_time_formatted,
+    schedule_lines,
+    time_zone,
+    test_mode: bool = False,
+    time_before_label: Optional[str] = None,
+):
     """
-    Send a reminder notification before weekly tasks start
-    Test mode: 2 minutes before
-    Normal mode: 1 hour before
+    Send a per-day schedule reminder before weekly tasks start.
+    Test mode: send immediately.
+    Normal mode: send 2 hours before the task window.
     """
     try:
         from Bot.discord_bot import get_bot_instance
@@ -3609,22 +4161,24 @@ def send_weekly_reminder(task_id, day_name, start_time_formatted, activity_text,
         if not task or not task.get("serverId") or not task.get("channelId"):
             logger.warning(f"[WEEKLY-REMINDER] Cannot send reminder: task {task_id} missing Discord config")
             return
-        if task.get("status") != "scheduled":
-            logger.info(f"[WEEKLY-REMINDER] Skipping reminder for task {task_id}: status is '{task.get('status')}'")
-            return
-        
         task_name = task.get("taskName", "Weekly Task")
         server_id = task.get("serverId")
         channel_id = task.get("channelId")
         
         # Format message based on mode
-        time_before = "2 Minutes" if test_mode else "1 Hour"
+        time_before = (
+            time_before_label
+            if time_before_label
+            else ("Instant (Test Mode)" if test_mode else "2 Hours Before Start")
+        )
+        schedule_body = "\n".join(schedule_lines or []).strip() or "No accounts scheduled."
         message = (
-            f"⚠️ **Weekly Task Starting in {time_before}**\n"
+            f"📋 **Daily Schedule Reminder**\n"
+            f"⏱️ **Notification**: {time_before}\n"
             f"📅 **Day**: {day_name}\n"
             f"⏰ **Start Time**: {start_time_formatted} ({time_zone})\n"
-            f"🎯 **Activity**: {activity_text}\n"
-            f"🧩 **Task**: {task_name}"
+            f"🧩 **Task**: {task_name}\n"
+            f"\n**Accounts**:\n{schedule_body}"
         )
         
         # Send via Discord bot
@@ -3635,10 +4189,10 @@ def send_weekly_reminder(task_id, day_name, start_time_formatted, activity_text,
             "job_id": f"reminder_{task_id}",
             "server_id": int(server_id) if isinstance(server_id, str) and server_id.isdigit() else server_id,
             "channel_id": int(channel_id) if isinstance(channel_id, str) and channel_id.isdigit() else channel_id,
-            "type": "warning",  # Uses the "⚠️ Task Starting Soon" embed
+            "type": "info",
         })
         
-        logger.info(f"[WEEKLY-REMINDER] Sent 1-hour reminder for task {task_id}, day {day_name}")
+        logger.info(f"[WEEKLY-REMINDER] Sent daily schedule reminder for task {task_id}, day {day_name}")
     
     except Exception as e:
         logger.error(f"[WEEKLY-REMINDER] Failed to send reminder: {e}")
@@ -3765,32 +4319,49 @@ async def send_command_to_devices(device_ids, command):
             for account_data in inputs_list:
                 if isinstance(account_data, dict) and "inputs" in account_data:
                     username = account_data.get("username")
-                    account_method = account_method_map.get(username, method_value) if account_method_map else method_value
+                    account_inputs = account_data.get("inputs")
+                    if not isinstance(account_inputs, list):
+                        continue
+
+                    # In weekly/per-account mode, ONLY accounts present in account_method_map
+                    # should have an active method. Others must have all methods disabled.
+                    if account_method_map:
+                        if username not in account_method_map:
+                            # Disable all methods for accounts not scheduled today
+                            for block in account_inputs:
+                                if isinstance(block, dict):
+                                    for method_name in method_to_input_map.values():
+                                        if method_name in block:
+                                            block[method_name] = False
+                            continue
+                        account_method = account_method_map.get(username)
+                    else:
+                        # Non-weekly flows: fall back to global method for all accounts
+                        account_method = method_value
+
                     account_target_name = method_to_input_map.get(account_method, target_input_name)
-                    
-                    account_inputs = account_data["inputs"]
-                    if isinstance(account_inputs, list):
-                        for block in account_inputs:
-                            if isinstance(block, dict):
-                                # Disable all methods
-                                for method_name in method_to_input_map.values():
-                                    if method_name in block:
-                                        block[method_name] = False
-                                # Enable the target method for this account
-                                if account_target_name in block:
-                                    block[account_target_name] = True
-                                    if account_method == 9:
-                                        # Use randomized warmup parameters from command
-                                        warmup_duration = command.get("warmupDuration", 60)
-                                        max_likes = command.get("maxLikes", 10)
-                                        max_comments = command.get("maxComments", 5)
-                                        block["warmupDuration"] = warmup_duration
-                                        block["maxLikes"] = max_likes
-                                        block["maxComments"] = max_comments
-                                    if account_method_map:
-                                        logger.info(f"[METHOD-ENABLE] {username}: method {account_method} → '{account_target_name}'")
-                                    else:
-                                        logger.info(f"[METHOD-ENABLE] Enabled '{account_target_name}' in legacy inputs")
+
+                    for block in account_inputs:
+                        if isinstance(block, dict):
+                            # Disable all methods
+                            for method_name in method_to_input_map.values():
+                                if method_name in block:
+                                    block[method_name] = False
+                            # Enable the target method for this account
+                            if account_target_name in block:
+                                block[account_target_name] = True
+                                if account_method == 9:
+                                    # Use randomized warmup parameters from command
+                                    warmup_duration = command.get("warmupDuration", 60)
+                                    max_likes = command.get("maxLikes", 10)
+                                    max_comments = command.get("maxComments", 5)
+                                    block["warmupDuration"] = warmup_duration
+                                    block["maxLikes"] = max_likes
+                                    block["maxComments"] = max_comments
+                                if account_method_map:
+                                    logger.info(f"[METHOD-ENABLE] {username}: method {account_method} → '{account_target_name}'")
+                                else:
+                                    logger.info(f"[METHOD-ENABLE] Enabled '{account_target_name}' in legacy inputs")
         
         # Also modify newInputs format (account-wise structure)
         new_inputs = command.get("newInputs")
@@ -3808,32 +4379,190 @@ async def send_command_to_devices(device_ids, command):
                                     if isinstance(accounts, list):
                                         for account in accounts:
                                             username = account.get("username")
-                                            account_method = account_method_map.get(username, method_value) if account_method_map else method_value
-                                            account_target_name = method_to_input_map.get(account_method, target_input_name)
-                                            
                                             acc_inputs = account.get("inputs", [])
-                                            if isinstance(acc_inputs, list):
-                                                for block in acc_inputs:
-                                                    if isinstance(block, dict):
-                                                        name = block.get("name", "")
-                                                        # Disable all methods
-                                                        if name in method_to_input_map.values():
-                                                            block["input"] = False
-                                                        # Enable the target method for this account
-                                                        if name == account_target_name:
-                                                            block["input"] = True
-                                                            if account_method == 9:
-                                                                # Use randomized warmup parameters from command
-                                                                warmup_duration = command.get("warmupDuration", 60)
-                                                                max_likes = command.get("maxLikes", 10)
-                                                                max_comments = command.get("maxComments", 5)
-                                                                block["warmupDuration"] = warmup_duration
-                                                                block["maxLikes"] = max_likes
-                                                                block["maxComments"] = max_comments
-                                                            if account_method_map:
-                                                                logger.info(f"[METHOD-ENABLE] {username}: method {account_method} → '{account_target_name}' (account-wise)")
-                                                            else:
-                                                                logger.info(f"[METHOD-ENABLE] Enabled '{account_target_name}' (account-wise)")
+                                            if not isinstance(acc_inputs, list):
+                                                continue
+
+                                            # In weekly/per-account mode, ONLY accounts present in account_method_map
+                                            # should have an active method. Others must have all methods disabled.
+                                            if account_method_map:
+                                                if username not in account_method_map:
+                                                    # Disable all methods for accounts not scheduled today
+                                                    for block in acc_inputs:
+                                                        if isinstance(block, dict):
+                                                            name = block.get("name", "")
+                                                            if name in method_to_input_map.values():
+                                                                block["input"] = False
+                                                    continue
+                                                account_method = account_method_map.get(username)
+                                            else:
+                                                # Non-weekly flows: fall back to global method for all accounts
+                                                account_method = method_value
+
+                                            account_target_name = method_to_input_map.get(account_method, target_input_name)
+
+                                            for block in acc_inputs:
+                                                if isinstance(block, dict):
+                                                    name = block.get("name", "")
+                                                    # Disable all methods
+                                                    if name in method_to_input_map.values():
+                                                        block["input"] = False
+                                                    # Enable the target method for this account
+                                                    if name == account_target_name:
+                                                        block["input"] = True
+                                                        if account_method == 9:
+                                                            # Use randomized warmup parameters from command
+                                                            warmup_duration = command.get("warmupDuration", 60)
+                                                            max_likes = command.get("maxLikes", 10)
+                                                            max_comments = command.get("maxComments", 5)
+                                                            block["warmupDuration"] = warmup_duration
+                                                            block["maxLikes"] = max_likes
+                                                            block["maxComments"] = max_comments
+                                                        if account_method_map:
+                                                            logger.info(f"[METHOD-ENABLE] {username}: method {account_method} → '{account_target_name}' (account-wise)")
+                                                        else:
+                                                            logger.info(f"[METHOD-ENABLE] Enabled '{account_target_name}' (account-wise)")
+
+        skip_payload_filter = bool(account_method_map)
+
+        if skip_payload_filter:
+            logger.info("[PAYLOAD-FILTER] Skipping account trimming - weekly account map present (per-day enable/disable handled upstream)")
+        else:
+            # Filter out accounts with enabled=false or all inputs false to prevent app from getting stuck
+            def has_active_automation(account_data, is_new_inputs_format=False):
+                """Check if account has enabled=true and at least one automation input set to true"""
+                # Check enabled flag first
+                enabled = account_data.get("enabled", True)  # Default to True if not specified
+                if enabled is False:
+                    return False
+                
+                # Get account inputs
+                account_inputs = account_data.get("inputs", [])
+                if not isinstance(account_inputs, list):
+                    return False
+                
+                # List of automation input names to check
+                automation_input_names = [
+                    "Follow from Notification Suggestions",
+                    "Follow from Profile Followers List",
+                    "Follow from Post",
+                    "Unfollow Non-Followers",
+                    "Accept All Follow Requests",
+                    "Follow from Profile Posts",
+                    "Switch Account Public To Private",
+                    "Switch Account Private To Public",
+                    "Standalone Warmup",
+                    "Enhanced Warmup",
+                    "Auto Post"
+                ]
+                
+                # Check if at least one automation input is enabled
+                for block in account_inputs:
+                    if not isinstance(block, dict):
+                        continue
+                    
+                    if is_new_inputs_format:
+                        # New format: check "input" field
+                        block_name = block.get("name", "")
+                        if block_name in automation_input_names:
+                            if block.get("input") is True:
+                                return True
+                    else:
+                        # Legacy format: check direct boolean fields
+                        for input_name in automation_input_names:
+                            if input_name in block and block[input_name] is True:
+                                return True
+                
+                return False
+                
+
+            # Filter accounts from newInputs structure
+            filtered_new_inputs_count = 0
+            new_inputs_filtered = command.get("newInputs")
+            if isinstance(new_inputs_filtered, dict):
+                inputs_wrapper_filtered = new_inputs_filtered.get("inputs", [])
+                if isinstance(inputs_wrapper_filtered, list):
+                    for entry_filtered in inputs_wrapper_filtered:
+                        if isinstance(entry_filtered, dict):
+                            inner_inputs_filtered = entry_filtered.get("inputs", [])
+                            if isinstance(inner_inputs_filtered, list):
+                                for node_filtered in inner_inputs_filtered:
+                                    if isinstance(node_filtered, dict) and node_filtered.get("type") == "instagrmFollowerBotAcountWise":
+                                        accounts_filtered = node_filtered.get("Accounts", [])
+                                        if isinstance(accounts_filtered, list):
+                                            original_count = len(accounts_filtered)
+                                            # Filter accounts that don't have active automation
+                                            filtered_accounts = [
+                                                acc for acc in accounts_filtered
+                                                if has_active_automation(acc, is_new_inputs_format=True)
+                                            ]
+                                            filtered_count = original_count - len(filtered_accounts)
+                                            filtered_new_inputs_count += filtered_count
+                                            if filtered_count > 0:
+                                                filtered_usernames = [
+                                                    acc.get("username", "unknown") 
+                                                    for acc in accounts_filtered 
+                                                    if not has_active_automation(acc, is_new_inputs_format=True)
+                                                ]
+                                                logger.info(f"[PAYLOAD-FILTER] Filtered {filtered_count} accounts from newInputs: {', '.join(filtered_usernames)} (enabled=false or all inputs false)")
+                                            node_filtered["Accounts"] = filtered_accounts
+
+            # Filter accounts from legacy inputs structure
+            filtered_legacy_count = 0
+            legacy_inputs = command.get("inputs")
+            if isinstance(legacy_inputs, list):
+                original_legacy_count = len(legacy_inputs)
+                filtered_legacy = []
+                filtered_legacy_usernames = []
+                for acct in legacy_inputs:
+                    if isinstance(acct, dict):
+                        if has_active_automation(acct, is_new_inputs_format=False):
+                            filtered_legacy.append(acct)
+                        else:
+                            filtered_legacy_usernames.append(acct.get("username", "unknown"))
+                filtered_legacy_count = original_legacy_count - len(filtered_legacy)
+                if filtered_legacy_count > 0:
+                    logger.info(f"[PAYLOAD-FILTER] Filtered {filtered_legacy_count} accounts from legacy inputs: {', '.join(filtered_legacy_usernames)} (enabled=false or all inputs false)")
+                command["inputs"] = filtered_legacy
+
+            # Log final account counts
+            if filtered_new_inputs_count > 0 or filtered_legacy_count > 0:
+                total_filtered = filtered_new_inputs_count + filtered_legacy_count
+                logger.info(f"[PAYLOAD-FILTER] Total accounts filtered: {total_filtered} (newInputs: {filtered_new_inputs_count}, legacy: {filtered_legacy_count})")
+            else:
+                # Log that no filtering was needed
+                logger.info(f"[PAYLOAD-FILTER] No accounts filtered - all accounts have active automation")
+
+        # Reorder inputs array: account objects first, switch objects last
+        # Android app expects accounts before switch objects (skips last 2 objects: size() - 2)
+        legacy_inputs_ordered = command.get("inputs")
+        if isinstance(legacy_inputs_ordered, list):
+            account_objects = []
+            switch_objects = []
+            other_objects = []
+            
+            for item in legacy_inputs_ordered:
+                if not isinstance(item, dict):
+                    other_objects.append(item)
+                    continue
+                
+                # Check if it's an account object (has "username" and "inputs" keys)
+                if "username" in item and "inputs" in item:
+                    account_objects.append(item)
+                # Check if it's a switch object (has "Switch Account Public To Private" or "Switch Account Private To Public" keys)
+                elif "Switch Account Public To Private" in item or "Switch Account Private To Public" in item:
+                    switch_objects.append(item)
+                else:
+                    other_objects.append(item)
+            
+            # Reorder: accounts first, then other objects, then switch objects last
+            reordered_inputs = account_objects + other_objects + switch_objects
+            if len(reordered_inputs) != len(legacy_inputs_ordered):
+                logger.warning(f"[PAYLOAD-ORDER] Inputs array length mismatch after reordering: {len(legacy_inputs_ordered)} -> {len(reordered_inputs)}")
+            else:
+                if account_objects and switch_objects:
+                    logger.info(f"[PAYLOAD-ORDER] Reordered inputs: {len(account_objects)} accounts, {len(other_objects)} other, {len(switch_objects)} switches")
+                command["inputs"] = reordered_inputs
 
 
 
@@ -4281,6 +5010,27 @@ async def send_command_to_devices(device_ids, command):
                                         # Schedule new 7-day jobs
                                         device_ids_for_renewal = weekly_check_task.get("deviceIds", [])
                                         inputs_for_renewal = weekly_check_task.get("inputs")
+                                        renewal_accounts: List[str] = []
+                                        if isinstance(inputs_for_renewal, dict):
+                                            for wrap in (inputs_for_renewal.get("inputs") or []):
+                                                for node in (wrap.get("inputs") or []):
+                                                    if isinstance(node, dict) and node.get("type") == "instagrmFollowerBotAcountWise":
+                                                        for acc in (node.get("Accounts") or []):
+                                                            uname = acc.get("username")
+                                                            if isinstance(uname, str):
+                                                                renewal_accounts.append(uname)
+                                        per_account_plans_renewal: Dict[str, List[int]] = {}
+                                        if renewal_accounts:
+                                            try:
+                                                from utils.weekly_scheduler import generate_per_account_plans
+                                                per_account_plans_renewal = generate_per_account_plans(
+                                                    generated,
+                                                    renewal_accounts,
+                                                    (int(follow_weekly_range[0]), int(follow_weekly_range[1])),
+                                                    (int(no_two_high_rule[0]), int(no_two_high_rule[1])),
+                                                )
+                                            except Exception as renewal_plan_err:
+                                                logger.warning(f"[WEEKLY-RENEWAL] Failed to compute per-account plans: {renewal_plan_err}")
                                         
                                         scheduled_indices_new = sorted(
                                             int(day.get("dayIndex", 0))
@@ -4336,7 +5086,7 @@ async def send_command_to_devices(device_ids, command):
                                                 if day_method == 9 and is_rest:
                                                     job_command_new["type"] = "WARMUPS_DAILY_START"
                                                 
-                                                # Add likes, comments, and duration for rest days (method 9)
+                                                warmup_summary_text = "Warmup"
                                                 if day_method == 9 and is_rest:
                                                     max_likes = day.get("maxLikes", 10)
                                                     max_comments = day.get("maxComments", 5)
@@ -4346,6 +5096,25 @@ async def send_command_to_devices(device_ids, command):
                                                         "maxComments": max_comments,
                                                         "warmupDuration": warmup_duration
                                                     })
+                                                    warmup_summary_text = f"Warmup - {max_likes} likes, {max_comments} comments, {warmup_duration}min"
+
+                                                account_method_map_renewal: Dict[str, int] = {}
+                                                if renewal_accounts:
+                                                    for uname in renewal_accounts:
+                                                        plan = per_account_plans_renewal.get(uname) or [0] * 7
+                                                        day_target_val = plan[day_index_new] if 0 <= day_index_new < len(plan) else 0
+                                                        if day_method == 9:
+                                                            account_method_map_renewal[uname] = 9
+                                                        elif day_target_val > 0:
+                                                            account_method_map_renewal[uname] = day_method
+
+                                                schedule_lines_renewal = format_daily_schedule_lines(
+                                                    day_index_new,
+                                                    renewal_accounts,
+                                                    account_method_map_renewal,
+                                                    per_account_plans_renewal,
+                                                    warmup_summary_text,
+                                                )
                                                 
                                                 scheduler.add_job(
                                                     wrapper_for_send_command,
@@ -4383,24 +5152,30 @@ async def send_command_to_devices(device_ids, command):
                                                 actual_day_log = day_names_log[start_time_local.weekday()]
                                                 logger.info(f"[WEEKLY-RENEWAL] Scheduled Day {day_index_new} ({actual_day_log} {start_time_local.strftime('%b %d')}): {start_time_local.strftime('%H:%M')} (method {day_method})")
                                                 
-                                                # Schedule "1 hour before" reminder for renewed week
-                                                # Auto-renewal is always normal mode (never test mode)
-                                                reminder_time_utc_renewal = start_time_utc - timedelta(hours=1)
+                                                # Schedule 2-hours-before reminder for renewed week (normal mode only)
+                                                reminder_time_utc_renewal = start_time_utc - timedelta(hours=2)
                                                 if reminder_time_utc_renewal > datetime.now(pytz.UTC):
                                                     reminder_job_id_renewal = f"reminder_{job_id_new}"
-                                                    method_names_renewal = {1: "Method 1", 4: "Method 4", 9: "Method 9"}
-                                                    method_label_renewal = method_names_renewal.get(day_method, f"method {day_method}")
-                                                    activity_text_renewal = f"{target_count} follows ({method_label_renewal})" if not is_rest else f"{method_label_renewal}"
+                                                    schedule_lines_payload_renewal = schedule_lines_renewal or [
+                                                        f"Device target: {target_count} {get_method_unit(day_method)}"
+                                                    ]
                                                     
                                                     try:
                                                         scheduler.add_job(
                                                             send_weekly_reminder,
                                                             trigger=DateTrigger(run_date=reminder_time_utc_renewal, timezone=pytz.UTC),
-                                                            args=[task_id, actual_day_log, start_time_local.strftime('%Y-%m-%d %H:%M'), activity_text_renewal, time_zone, False],
+                                                            args=[
+                                                                task_id,
+                                                                actual_day_log,
+                                                                start_time_local.strftime('%Y-%m-%d %H:%M'),
+                                                                schedule_lines_payload_renewal,
+                                                                time_zone,
+                                                                False,
+                                                            ],
                                                             id=reminder_job_id_renewal,
                                                             name=f"Reminder for renewed day {day_index_new} of task {task_id}",
                                                         )
-                                                        logger.info(f"[WEEKLY-RENEWAL] ⏰ Scheduled reminder for renewed Day {day_index_new}: 1 hour before start")
+                                                        logger.info(f"[WEEKLY-RENEWAL] ⏰ Scheduled reminder for renewed Day {day_index_new}: 2 hours before start")
                                                     except Exception as renewal_reminder_err:
                                                         logger.warning(f"[WEEKLY-RENEWAL] Could not schedule reminder: {renewal_reminder_err}")
                                         
@@ -4479,8 +5254,8 @@ async def send_command_to_devices(device_ids, command):
                                                                             if isinstance(node_n, dict) and node_n.get("type") == "instagrmFollowerBotAcountWise":
                                                                                 for acc_n in (node_n.get("Accounts") or []):
                                                                                     uname_n = acc_n.get("username")
-                                                                                    # Filter out disabled accounts
-                                                                                    if acc_n.get('enabled', True) is not False and isinstance(uname_n, str):
+                                                                                    # Include all accounts - enabled flag is for per-day control
+                                                                                    if isinstance(uname_n, str):
                                                                                         accounts_notify.append(uname_n)
                                                                 if accounts_notify:
                                                                     from utils.weekly_scheduler import generate_per_account_plans
@@ -4519,8 +5294,8 @@ async def send_command_to_devices(device_ids, command):
                                                                             if isinstance(node2, dict) and node2.get("type") == "instagrmFollowerBotAcountWise":
                                                                                 for acc2 in (node2.get("Accounts") or []):
                                                                                     uname2 = acc2.get("username")
-                                                                                    # Filter out disabled accounts
-                                                                                    if acc2.get('enabled', True) is not False and isinstance(uname2, str):
+                                                                                    # Include all accounts - enabled flag is for per-day control
+                                                                                    if isinstance(uname2, str):
                                                                                         tmp_accounts.append(uname2)
                                                                 accounts_notify = tmp_accounts
                                                             except Exception:

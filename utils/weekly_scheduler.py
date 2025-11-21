@@ -112,7 +112,7 @@ def generate_weekly_targets(
     method: int,
     rest_day_likes_range: Tuple[int, int] = (0, 5),
     rest_day_comments_range: Tuple[int, int] = (0, 2),
-    rest_day_duration_range: Tuple[int, int] = (5, 10),
+    rest_day_duration_range: Tuple[int, int] = (30, 120),
     off_days_range: Tuple[int, int] = (1, 1),
     previous_active_days: Optional[Set[int]] = None,
 ) -> List[Dict]:
@@ -420,7 +420,9 @@ def generate_per_account_plans(
     # Build method map and per-day caps: maximum 25 follows per day per account
     MAX_FOLLOWS_PER_DAY_PER_ACCOUNT = 25
     MIN_FOLLOWS_PER_ACTIVE_DAY = 5
-    MAX_FOLLOWS_PER_ACTIVE_DAY = 15
+    RANDOM_MAX_LOW_FACTOR = 0.5  # 50% of cap as baseline for randomized max
+    RANDOM_MAX_BUFFER = 2        # ensure randomized max is at least min+buffer when possible
+    RANDOM_MIN_SPREAD = 2
     method_per_day: List[int] = [0] * 7
     per_day_caps: List[int] = [0] * 7
     for day in schedule:
@@ -438,23 +440,75 @@ def generate_per_account_plans(
     for username in accounts:
         daily_targets = [0 for _ in range(7)]
 
-        # Establish per-day min/max bounds (random band 5-15, capped by per-day caps)
+        # Establish per-day min/max bounds (random band 5-25, capped by per-day caps)
         per_day_min_bounds: Dict[int, int] = {}
         per_day_max_bounds: Dict[int, int] = {}
+        used_ranges: Set[Tuple[int, int]] = set()
         for idx in active_indices:
             cap = max(0, per_day_caps[idx])
             if cap <= 0:
                 per_day_min_bounds[idx] = 0
                 per_day_max_bounds[idx] = 0
                 continue
-            day_min = min(MIN_FOLLOWS_PER_ACTIVE_DAY, cap)
-            day_max = min(MAX_FOLLOWS_PER_ACTIVE_DAY, cap)
-            if day_max < day_min:
-                day_min = day_max
-            per_day_min_bounds[idx] = day_min
-            per_day_max_bounds[idx] = max(day_min, day_max)
+            random_max_high = min(MAX_FOLLOWS_PER_DAY_PER_ACCOUNT, cap)
+            if random_max_high <= 0:
+                per_day_min_bounds[idx] = 0
+                per_day_max_bounds[idx] = 0
+                continue
 
-        # Seed each active day with a random value inside [5, 15] (respecting caps)
+            tentative_low = max(
+                MIN_FOLLOWS_PER_ACTIVE_DAY + RANDOM_MAX_BUFFER,
+                int(cap * RANDOM_MAX_LOW_FACTOR),
+            )
+            random_max_low = min(random_max_high, max(MIN_FOLLOWS_PER_ACTIVE_DAY, tentative_low))
+            if random_max_low > random_max_high:
+                random_max_low = random_max_high
+
+            dynamic_day_max = random.randint(random_max_low, random_max_high)
+
+            dynamic_spread = max(1, dynamic_day_max - MIN_FOLLOWS_PER_ACTIVE_DAY)
+            min_upper_bound = max(
+                MIN_FOLLOWS_PER_ACTIVE_DAY,
+                dynamic_day_max - max(RANDOM_MIN_SPREAD, dynamic_spread // 2),
+            )
+            if min_upper_bound > dynamic_day_max:
+                min_upper_bound = dynamic_day_max
+
+            dynamic_day_min = random.randint(MIN_FOLLOWS_PER_ACTIVE_DAY, min_upper_bound)
+
+            day_min = min(dynamic_day_min, cap)
+            day_max = max(day_min, min(dynamic_day_max, cap))
+
+            # Ensure this day's min/max combination is unique
+            uniqueness_guard = 0
+            while (day_min, day_max) in used_ranges and uniqueness_guard < 50:
+                uniqueness_guard += 1
+                # Try shifting the range slightly
+                tweak_choice = random.choice(["shrink_min", "grow_max", "nudge_both"])
+                if tweak_choice == "shrink_min":
+                    new_min = max(MIN_FOLLOWS_PER_ACTIVE_DAY, day_min - 1)
+                    if new_min <= day_max:
+                        day_min = new_min
+                elif tweak_choice == "grow_max":
+                    new_max = min(cap, day_max + 1)
+                    if new_max >= day_min:
+                        day_max = new_max
+                else:
+                    new_min = max(MIN_FOLLOWS_PER_ACTIVE_DAY, day_min - 1)
+                    new_max = min(cap, day_max + 1)
+                    if new_min <= new_max:
+                        day_min = new_min
+                        day_max = new_max
+                if day_min == day_max and day_max < cap:
+                    day_max += 1
+                if day_min > day_max:
+                    day_min = min(day_min, day_max)
+            used_ranges.add((day_min, day_max))
+
+            per_day_min_bounds[idx] = day_min
+            per_day_max_bounds[idx] = day_max
+
+        # Seed each active day with a random value inside [5, cap] (respecting caps)
         for idx in active_indices:
             min_bound = per_day_min_bounds.get(idx, 0)
             max_bound = per_day_max_bounds.get(idx, 0)
@@ -521,3 +575,69 @@ def generate_per_account_plans(
         per_account[username] = adjusted
 
     return per_account
+
+
+def generate_independent_schedules(
+    accounts: List[str],
+    week_start_dt: datetime,
+    follow_weekly_range: Tuple[int, int],
+    rest_days_range: Tuple[int, int],
+    no_two_high_rule: Tuple[int, int],
+    off_days_range: Tuple[int, int] = (1, 1),
+    previous_active_days_map: Optional[Dict[str, Set[int]]] = None,
+) -> Dict[str, List[Dict]]:
+    """
+    Generates a completely independent schedule for each account.
+    
+    Returns:
+        Dict[username, List[Dict]]
+        Where the value is the full 7-day schedule (including methods and targets) for that specific account.
+    """
+    all_schedules = {}
+
+    for username in accounts:
+        # 1. Get previous history for this specific account if available
+        prev_active = None
+        if previous_active_days_map:
+            prev_active = previous_active_days_map.get(username)
+
+        # 2. Generate a UNIQUE structure (Active/Rest/Off days) for this account
+        # We use method=1 as a placeholder; specific methods are assigned inside generate_weekly_targets
+        # but we might want to customize parameters per account here if needed.
+        base_schedule = generate_weekly_targets(
+            week_start_dt=week_start_dt,
+            follow_weekly_range=follow_weekly_range,
+            rest_days_range=rest_days_range,
+            no_two_high_rule=no_two_high_rule,
+            method=1, # Default method, will be randomized inside
+            off_days_range=off_days_range,
+            previous_active_days=prev_active
+        )
+
+        # 3. Calculate specific follow targets for this account based on its unique schedule
+        # We reuse the existing logic but pass ONLY this account
+        targets_map = generate_per_account_plans(
+            schedule=base_schedule,
+            accounts=[username],
+            follow_weekly_range=follow_weekly_range,
+            no_two_high_rule=no_two_high_rule
+        )
+        
+        final_targets = targets_map[username]
+
+        # 4. Merge the calculated targets back into the schedule objects
+        # This creates the final complete plan for this account
+        final_account_schedule = []
+        for day_data, target_val in zip(base_schedule, final_targets):
+            # Create a copy to avoid reference issues
+            day_copy = day_data.copy()
+            
+            # Update the target with the calculated safe value
+            # Note: If the day is Off/Rest, target_val will likely be 0, which is correct.
+            day_copy["target"] = target_val
+            
+            final_account_schedule.append(day_copy)
+
+        all_schedules[username] = final_account_schedule
+
+    return all_schedules
