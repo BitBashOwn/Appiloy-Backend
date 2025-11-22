@@ -969,7 +969,8 @@ async def unschedule_jobs(tasks: deleteRequest, current_user: dict = Depends(get
                 },
                 "$unset": {
                     "scheduledTime": "",
-                    "exactStartTime": ""
+                    "exactStartTime": "",
+                    "nextRunTime": ""
                 }
             }
         )

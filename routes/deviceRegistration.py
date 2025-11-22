@@ -3852,6 +3852,7 @@ async def send_command(
                                             ],
                                             id=reminder_job_id,
                                             name=f"Reminder for day {day_index} of task {task_id}",
+                                            replace_existing=True,
                                         )
                                         logger.info(f"[WEEKLY] ⏰ Scheduled daily schedule reminder for Day {day_index}: 2 minutes before start (test mode)")
                                     except Exception as reminder_err:
@@ -3873,6 +3874,7 @@ async def send_command(
                                         ],
                                         id=reminder_job_id,
                                         name=f"Reminder for day {day_index} of task {task_id}",
+                                        replace_existing=True,
                                     )
                                     logger.info(f"[WEEKLY] ⏰ Scheduled daily schedule reminder for Day {day_index}: 2 hours before start")
                                 except Exception as reminder_err:
@@ -5174,6 +5176,7 @@ async def send_command_to_devices(device_ids, command):
                                                             ],
                                                             id=reminder_job_id_renewal,
                                                             name=f"Reminder for renewed day {day_index_new} of task {task_id}",
+                                                            replace_existing=True,
                                                         )
                                                         logger.info(f"[WEEKLY-RENEWAL] ⏰ Scheduled reminder for renewed Day {day_index_new}: 2 hours before start")
                                                     except Exception as renewal_reminder_err:

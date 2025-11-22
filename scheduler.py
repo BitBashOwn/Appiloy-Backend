@@ -19,8 +19,9 @@ executors = {
 # Define job defaults (optional)
 job_defaults = {
     "misfire_grace_time": 300,  # Allow jobs to execute up to 5 minutes late
-    "coalesce": False,  # Don't combine missed executions
-    "max_instances": 10,  # Allow many instances of the same job to run concurrently
+    "coalesce": True,  # Combine missed executions into one
+    "max_instances": 1,  # Only one instance of the same job can run at a time
+    "replace_existing": True,  # Replace duplicate jobs instead of creating new ones
 }
 
 # Initialize the scheduler with Redis job store
