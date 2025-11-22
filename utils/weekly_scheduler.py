@@ -585,6 +585,9 @@ def generate_independent_schedules(
     no_two_high_rule: Tuple[int, int],
     off_days_range: Tuple[int, int] = (1, 1),
     previous_active_days_map: Optional[Dict[str, Set[int]]] = None,
+    rest_day_likes_range: Tuple[int, int] = (0, 5),
+    rest_day_comments_range: Tuple[int, int] = (0, 2),
+    rest_day_duration_range: Tuple[int, int] = (30, 120),
 ) -> Dict[str, List[Dict]]:
     """
     Generates a completely independent schedule for each account.
@@ -611,7 +614,10 @@ def generate_independent_schedules(
             no_two_high_rule=no_two_high_rule,
             method=1, # Default method, will be randomized inside
             off_days_range=off_days_range,
-            previous_active_days=prev_active
+            previous_active_days=prev_active,
+            rest_day_likes_range=rest_day_likes_range,
+            rest_day_comments_range=rest_day_comments_range,
+            rest_day_duration_range=rest_day_duration_range
         )
 
         # 3. Calculate specific follow targets for this account based on its unique schedule
@@ -635,6 +641,15 @@ def generate_independent_schedules(
             # Update the target with the calculated safe value
             # Note: If the day is Off/Rest, target_val will likely be 0, which is correct.
             day_copy["target"] = target_val
+            
+            # Ensure warmup parameters are preserved for rest days
+            if day_copy.get("isRest") and day_copy.get("method") == 9:
+                if "maxLikes" not in day_copy or "maxComments" not in day_copy or "warmupDuration" not in day_copy:
+                    # Re-randomize if missing (shouldn't happen, but safety check)
+                    import random
+                    day_copy["maxLikes"] = random.randint(rest_day_likes_range[0], rest_day_likes_range[1])
+                    day_copy["maxComments"] = random.randint(rest_day_comments_range[0], rest_day_comments_range[1])
+                    day_copy["warmupDuration"] = random.randint(rest_day_duration_range[0], rest_day_duration_range[1])
             
             final_account_schedule.append(day_copy)
 

@@ -2592,7 +2592,10 @@ async def send_command(
                         rest_days_range=(int(rest_days_range[0]), int(rest_days_range[1])),
                         no_two_high_rule=(int(no_two_high_rule[0]), int(no_two_high_rule[1])),
                         off_days_range=(int(off_days_range[0]), int(off_days_range[1])),
-                        previous_active_days_map=previous_active_days_map
+                        previous_active_days_map=previous_active_days_map,
+                        rest_day_likes_range=rest_day_likes_range,
+                        rest_day_comments_range=rest_day_comments_range,
+                        rest_day_duration_range=rest_day_duration_range
                     )
                     
                     # Add start_local and end_local timestamps to each day entry in schedules_map
@@ -2603,6 +2606,27 @@ async def send_command(
                                 is_rest = bool(d.get("isRest", False))
                                 is_off = bool(d.get("isOff", False))
                                 day_method = int(d.get("method", 0 if is_off else (9 if is_rest else 1)))
+                                
+                                # Preserve warmup parameters before any modifications
+                                preserved_max_likes = d.get("maxLikes")
+                                preserved_max_comments = d.get("maxComments")
+                                preserved_warmup_duration = d.get("warmupDuration")
+                                
+                                # If warmup parameters are missing for a rest day, re-randomize them
+                                if is_rest or day_method == 9:
+                                    # Ensure method is set to 9 for rest days
+                                    if is_rest and day_method != 9:
+                                        d["method"] = 9
+                                        day_method = 9
+                                    
+                                    if preserved_max_likes is None or preserved_max_comments is None or preserved_warmup_duration is None:
+                                        logger.warning(f"[WEEKLY-WARMUP] Missing warmup params for {uname} Day {idx}, re-randomizing...")
+                                        preserved_max_likes = random.randint(rest_day_likes_range[0], rest_day_likes_range[1])
+                                        preserved_max_comments = random.randint(rest_day_comments_range[0], rest_day_comments_range[1])
+                                        preserved_warmup_duration = random.randint(rest_day_duration_range[0], rest_day_duration_range[1])
+                                        d["maxLikes"] = preserved_max_likes
+                                        d["maxComments"] = preserved_max_comments
+                                        d["warmupDuration"] = preserved_warmup_duration
                                 
                                 if test_mode:
                                     # In test mode, use 5-minute gaps between scheduled days
@@ -2625,12 +2649,28 @@ async def send_command(
                                         start_time_local = start_window_start + timedelta(minutes=random_offset)
                                         end_time_local = (start_time_local + timedelta(minutes=1)) if warmup_only_flag else start_window_end
                                     else:
-                                        # Invalid window, skip timestamps for this entry
+                                        # Invalid window, skip timestamps for this entry but preserve warmup params
+                                        if is_rest or day_method == 9:
+                                            if preserved_max_likes is not None:
+                                                d["maxLikes"] = preserved_max_likes
+                                            if preserved_max_comments is not None:
+                                                d["maxComments"] = preserved_max_comments
+                                            if preserved_warmup_duration is not None:
+                                                d["warmupDuration"] = preserved_warmup_duration
                                         continue
                                 
                                 # Add timestamps to the day entry as ISO strings (for JSON serialization)
                                 d["start_local"] = start_time_local.isoformat()
                                 d["end_local"] = end_time_local.isoformat()
+                                
+                                # Restore warmup parameters after adding timestamps (in case they were lost)
+                                if is_rest or day_method == 9:
+                                    if preserved_max_likes is not None:
+                                        d["maxLikes"] = preserved_max_likes
+                                    if preserved_max_comments is not None:
+                                        d["maxComments"] = preserved_max_comments
+                                    if preserved_warmup_duration is not None:
+                                        d["warmupDuration"] = preserved_warmup_duration
                     
                     # Ensure no warmups occur on days where any account is active
                     if schedules_map:
@@ -2857,6 +2897,50 @@ async def send_command(
                                         continue
                                     idx = entry.get("dayIndex")
                                     if isinstance(idx, int):
+                                        # Debug: Log warmup parameters for rest days
+                                        is_rest = entry.get("isRest", False)
+                                        method_val = entry.get("method", 0)
+                                        is_off = entry.get("isOff", False)
+                                        
+                                        # If it's a rest day (isRest=True or method=9), ensure warmup parameters exist
+                                        if (is_rest or method_val == 9) and not is_off:
+                                            # Ensure method is set to 9 for rest days
+                                            if is_rest and method_val != 9:
+                                                entry["method"] = 9
+                                                method_val = 9
+                                            
+                                            max_likes = entry.get('maxLikes')
+                                            max_comments = entry.get('maxComments')
+                                            warmup_duration = entry.get('warmupDuration')
+                                            
+                                            # Always re-randomize for rest days to ensure unique values per account/day
+                                            # This ensures no default values (10, 5, 60) are used
+                                            needs_randomization = (
+                                                max_likes is None or max_comments is None or warmup_duration is None or
+                                                max_likes == 10 or max_comments == 5 or warmup_duration == 60
+                                            )
+                                            
+                                            if needs_randomization:
+                                                if max_likes is None or max_likes == 10 or max_comments is None or max_comments == 5 or warmup_duration is None or warmup_duration == 60:
+                                                    logger.warning(f"[WEEKLY-WARMUP] Missing or default warmup params for {uname} Day {idx} (maxLikes={max_likes}, maxComments={max_comments}, warmupDuration={warmup_duration}), re-randomizing...")
+                                                max_likes = random.randint(rest_day_likes_range[0], rest_day_likes_range[1])
+                                                max_comments = random.randint(rest_day_comments_range[0], rest_day_comments_range[1])
+                                                warmup_duration = random.randint(rest_day_duration_range[0], rest_day_duration_range[1])
+                                                entry["maxLikes"] = max_likes
+                                                entry["maxComments"] = max_comments
+                                                entry["warmupDuration"] = warmup_duration
+                                                # Also update the same entry in schedules_map to ensure consistency
+                                                if schedules_map and uname in schedules_map:
+                                                    for sched_entry in schedules_map[uname]:
+                                                        if isinstance(sched_entry, dict) and sched_entry.get("dayIndex") == idx:
+                                                            sched_entry["maxLikes"] = max_likes
+                                                            sched_entry["maxComments"] = max_comments
+                                                            sched_entry["warmupDuration"] = warmup_duration
+                                                            sched_entry["method"] = 9
+                                                            break
+                                            
+                                            logger.info(f"[WEEKLY-WARMUP] Account {uname} Day {idx}: isRest={is_rest}, method={method_val}, maxLikes={max_likes}, maxComments={max_comments}, warmupDuration={warmup_duration}")
+                                        
                                         day_map[idx] = entry
                                 if day_map:
                                     account_day_lookup[uname] = day_map
@@ -2964,6 +3048,17 @@ async def send_command(
                         def build_account_day_parts(day_index: int) -> List[str]:
                             if not account_day_lookup or not accounts_for_summary:
                                 return []
+                            # Use the same ranges as defined in the outer scope, with fallback defaults
+                            try:
+                                warmup_likes_range = rest_day_likes_range
+                                warmup_comments_range = rest_day_comments_range
+                                warmup_duration_range = rest_day_duration_range
+                            except NameError:
+                                # Fallback if variables not in scope
+                                warmup_likes_range = (4, 10)
+                                warmup_comments_range = (1, 3)
+                                warmup_duration_range = (30, 120)
+                            
                             parts: List[str] = []
                             method_override_map = account_method_map_by_day_for_summary.get(day_index, {})
                             for uname in accounts_for_summary:
@@ -2975,9 +3070,21 @@ async def send_command(
                                 if day_plan.get("isOff") or plan_method == 0:
                                     parts.append(f"{uname}: Off")
                                 elif day_plan.get("isRest") or plan_method == 9 or method_override_map.get(uname) == 9:
-                                    likes = int(day_plan.get("maxLikes", 10))
-                                    comments = int(day_plan.get("maxComments", 5))
-                                    duration = int(day_plan.get("warmupDuration", 60))
+                                    likes = day_plan.get("maxLikes")
+                                    comments = day_plan.get("maxComments")
+                                    duration = day_plan.get("warmupDuration")
+                                    
+                                    # If parameters are missing or match defaults, re-randomize them
+                                    if likes is None or comments is None or duration is None or likes == 10 or comments == 5 or duration == 60:
+                                        logger.warning(f"[WEEKLY-WARMUP-DISCORD] Missing or default warmup params for {uname} Day {day_index}, re-randomizing...")
+                                        likes = random.randint(warmup_likes_range[0], warmup_likes_range[1])
+                                        comments = random.randint(warmup_comments_range[0], warmup_comments_range[1])
+                                        duration = random.randint(warmup_duration_range[0], warmup_duration_range[1])
+                                        # Update the day_plan so it's saved for future use
+                                        day_plan["maxLikes"] = likes
+                                        day_plan["maxComments"] = comments
+                                        day_plan["warmupDuration"] = duration
+                                    
                                     parts.append(
                                         f"{uname}: Warmup - {likes} likes, {comments} comments, {duration}min"
                                     )
@@ -3463,7 +3570,7 @@ async def send_command(
                     start_time_utc = start_time_local.astimezone(pytz.UTC)
                     end_time_utc = end_time_local.astimezone(pytz.UTC)
 
-                    job_id = f"cmd_{uuid.uuid4()}"
+                    job_id = f"weekly_{task_id}_{start_time_local.strftime('%Y-%m-%d')}"
                     
                     # Deep copy command to prevent shared object references between jobs
                     job_command = copy.deepcopy(command)
