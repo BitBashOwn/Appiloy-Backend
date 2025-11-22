@@ -3889,7 +3889,7 @@ async def send_command(
                                     "$push": {"activeJobs": job_instance},
                                 },
                             )
-                            first_job_scheduled = True
+                            # Don't set first_job_scheduled = True here - it will be set after the reminder is sent
                         else:
                             # For subsequent jobs, only push to activeJobs
                             tasks_collection.update_one(
@@ -3925,11 +3925,34 @@ async def send_command(
                             f"[WEEKLY] 📅 Scheduling Day {day_index} ({actual_day_name} {start_time_local.strftime('%b %d')}): start={start_time_local.strftime('%H:%M')} end={end_time_local.strftime('%H:%M')} target={target_count} method={day_method} rest={is_rest}"
                         )
                         
-                        # Schedule daily schedule reminder
+                        # Schedule daily schedule reminder (one per day)
                         reminder_job_id = f"reminder_{job_id}"
                         schedule_lines_payload = daily_schedule_lines or [f"Device target: {target_count} {get_method_unit(day_method)}"]
-                        if test_mode:
-                            if not test_mode_instant_sent:
+                        
+                        # Send first day reminder immediately when weekly plan is created
+                        if not first_job_scheduled:
+                            try:
+                                send_weekly_reminder(
+                                    task_id,
+                                    actual_day_name,
+                                    start_time_local.strftime('%Y-%m-%d %H:%M'),
+                                    schedule_lines_payload,
+                                    time_zone,
+                                    False,
+                                    "Immediate (First Day Schedule)",
+                                )
+                                logger.info(f"[WEEKLY] ⏰ Sent immediate daily schedule reminder for first day (Day {day_index})")
+                            except Exception as reminder_err:
+                                logger.warning(f"[WEEKLY] Could not send immediate first day reminder: {reminder_err}")
+                            # Set flag AFTER reminder is sent to mark first job as complete
+                            first_job_scheduled = True
+                        else:
+                            # For other days, send reminder 5 hours before start, or immediately if less than 5 hours away
+                            reminder_time_utc = start_time_utc - timedelta(hours=5)
+                            now_utc = datetime.now(pytz.UTC)
+                            
+                            # If 5 hours before is in the past (less than 5 hours away), send immediately
+                            if reminder_time_utc <= now_utc:
                                 try:
                                     send_weekly_reminder(
                                         task_id,
@@ -3937,38 +3960,14 @@ async def send_command(
                                         start_time_local.strftime('%Y-%m-%d %H:%M'),
                                         schedule_lines_payload,
                                         time_zone,
-                                        True,
+                                        False,
+                                        "Immediate (Less than 5 hours away)",
                                     )
-                                    test_mode_instant_sent = True
-                                    logger.info(f"[WEEKLY] ⏰ Sent instant daily schedule for Day {day_index} (test mode)")
+                                    logger.info(f"[WEEKLY] ⏰ Sent immediate daily schedule reminder for Day {day_index} (less than 5 hours away)")
                                 except Exception as reminder_err:
-                                    logger.warning(f"[WEEKLY] Could not send instant reminder: {reminder_err}")
+                                    logger.warning(f"[WEEKLY] Could not send immediate reminder: {reminder_err}")
                             else:
-                                reminder_time_utc = start_time_utc - timedelta(minutes=2)
-                                if reminder_time_utc > datetime.now(pytz.UTC):
-                                    try:
-                                        scheduler.add_job(
-                                            send_weekly_reminder,
-                                            trigger=DateTrigger(run_date=reminder_time_utc, timezone=pytz.UTC),
-                                            args=[
-                                                task_id,
-                                                actual_day_name,
-                                                start_time_local.strftime('%Y-%m-%d %H:%M'),
-                                                schedule_lines_payload,
-                                                time_zone,
-                                                True,
-                                                "2 Minutes Before Start",
-                                            ],
-                                            id=reminder_job_id,
-                                            name=f"Reminder for day {day_index} of task {task_id}",
-                                            replace_existing=True,
-                                        )
-                                        logger.info(f"[WEEKLY] ⏰ Scheduled daily schedule reminder for Day {day_index}: 2 minutes before start (test mode)")
-                                    except Exception as reminder_err:
-                                        logger.warning(f"[WEEKLY] Could not schedule reminder: {reminder_err}")
-                        else:
-                            reminder_time_utc = start_time_utc - timedelta(hours=2)
-                            if reminder_time_utc > datetime.now(pytz.UTC):
+                                # Schedule for 5 hours before start
                                 try:
                                     scheduler.add_job(
                                         send_weekly_reminder,
@@ -3980,12 +3979,13 @@ async def send_command(
                                             schedule_lines_payload,
                                             time_zone,
                                             False,
+                                            "5 Hours Before Start",
                                         ],
                                         id=reminder_job_id,
                                         name=f"Reminder for day {day_index} of task {task_id}",
                                         replace_existing=True,
                                     )
-                                    logger.info(f"[WEEKLY] ⏰ Scheduled daily schedule reminder for Day {day_index}: 2 hours before start")
+                                    logger.info(f"[WEEKLY] ⏰ Scheduled daily schedule reminder for Day {day_index}: 5 hours before start")
                                 except Exception as reminder_err:
                                     logger.warning(f"[WEEKLY] Could not schedule reminder: {reminder_err}")
                     except Exception as e:
@@ -5149,9 +5149,11 @@ async def send_command_to_devices(device_ids, command):
                                             if not day.get("isOff", False)
                                         )
                                         last_index_new = scheduled_indices_new[-1] if scheduled_indices_new else None
+                                        first_index_new = scheduled_indices_new[0] if scheduled_indices_new else None
 
                                         # Track start times for renewal summary (only used for warmup-only rest day messaging)
                                         renewal_start_times = {}
+                                        first_renewal_job_scheduled = False
                                         for day in generated:
                                             day_index_new = int(day.get("dayIndex", 0))
                                             target_count = int(day.get("target", 0))
@@ -5263,33 +5265,70 @@ async def send_command_to_devices(device_ids, command):
                                                 actual_day_log = day_names_log[start_time_local.weekday()]
                                                 logger.info(f"[WEEKLY-RENEWAL] Scheduled Day {day_index_new} ({actual_day_log} {start_time_local.strftime('%b %d')}): {start_time_local.strftime('%H:%M')} (method {day_method})")
                                                 
-                                                # Schedule 2-hours-before reminder for renewed week (normal mode only)
-                                                reminder_time_utc_renewal = start_time_utc - timedelta(hours=2)
-                                                if reminder_time_utc_renewal > datetime.now(pytz.UTC):
-                                                    reminder_job_id_renewal = f"reminder_{job_id_new}"
-                                                    schedule_lines_payload_renewal = schedule_lines_renewal or [
-                                                        f"Device target: {target_count} {get_method_unit(day_method)}"
-                                                    ]
-                                                    
+                                                # Schedule reminder for renewed week
+                                                reminder_job_id_renewal = f"reminder_{job_id_new}"
+                                                schedule_lines_payload_renewal = schedule_lines_renewal or [
+                                                    f"Device target: {target_count} {get_method_unit(day_method)}"
+                                                ]
+                                                
+                                                # Send first day reminder immediately when renewed week is created
+                                                if day_index_new == first_index_new and not first_renewal_job_scheduled:
                                                     try:
-                                                        scheduler.add_job(
-                                                            send_weekly_reminder,
-                                                            trigger=DateTrigger(run_date=reminder_time_utc_renewal, timezone=pytz.UTC),
-                                                            args=[
+                                                        send_weekly_reminder(
+                                                            task_id,
+                                                            actual_day_log,
+                                                            start_time_local.strftime('%Y-%m-%d %H:%M'),
+                                                            schedule_lines_payload_renewal,
+                                                            time_zone,
+                                                            False,
+                                                            "Immediate (First Day Schedule)",
+                                                        )
+                                                        logger.info(f"[WEEKLY-RENEWAL] ⏰ Sent immediate daily schedule reminder for first day (Day {day_index_new})")
+                                                        first_renewal_job_scheduled = True
+                                                    except Exception as renewal_reminder_err:
+                                                        logger.warning(f"[WEEKLY-RENEWAL] Could not send immediate first day reminder: {renewal_reminder_err}")
+                                                else:
+                                                    # For other days, send reminder 5 hours before start, or immediately if less than 5 hours away
+                                                    reminder_time_utc_renewal = start_time_utc - timedelta(hours=5)
+                                                    now_utc_renewal = datetime.now(pytz.UTC)
+                                                    
+                                                    # If 5 hours before is in the past (less than 5 hours away), send immediately
+                                                    if reminder_time_utc_renewal <= now_utc_renewal:
+                                                        try:
+                                                            send_weekly_reminder(
                                                                 task_id,
                                                                 actual_day_log,
                                                                 start_time_local.strftime('%Y-%m-%d %H:%M'),
                                                                 schedule_lines_payload_renewal,
                                                                 time_zone,
                                                                 False,
-                                                            ],
-                                                            id=reminder_job_id_renewal,
-                                                            name=f"Reminder for renewed day {day_index_new} of task {task_id}",
-                                                            replace_existing=True,
-                                                        )
-                                                        logger.info(f"[WEEKLY-RENEWAL] ⏰ Scheduled reminder for renewed Day {day_index_new}: 2 hours before start")
-                                                    except Exception as renewal_reminder_err:
-                                                        logger.warning(f"[WEEKLY-RENEWAL] Could not schedule reminder: {renewal_reminder_err}")
+                                                                "Immediate (Less than 5 hours away)",
+                                                            )
+                                                            logger.info(f"[WEEKLY-RENEWAL] ⏰ Sent immediate daily schedule reminder for Day {day_index_new} (less than 5 hours away)")
+                                                        except Exception as renewal_reminder_err:
+                                                            logger.warning(f"[WEEKLY-RENEWAL] Could not send immediate reminder: {renewal_reminder_err}")
+                                                    else:
+                                                        # Schedule for 5 hours before start
+                                                        try:
+                                                            scheduler.add_job(
+                                                                send_weekly_reminder,
+                                                                trigger=DateTrigger(run_date=reminder_time_utc_renewal, timezone=pytz.UTC),
+                                                                args=[
+                                                                    task_id,
+                                                                    actual_day_log,
+                                                                    start_time_local.strftime('%Y-%m-%d %H:%M'),
+                                                                    schedule_lines_payload_renewal,
+                                                                    time_zone,
+                                                                    False,
+                                                                    "5 Hours Before Start",
+                                                                ],
+                                                                id=reminder_job_id_renewal,
+                                                                name=f"Reminder for renewed day {day_index_new} of task {task_id}",
+                                                                replace_existing=True,
+                                                            )
+                                                            logger.info(f"[WEEKLY-RENEWAL] ⏰ Scheduled reminder for renewed Day {day_index_new}: 5 hours before start")
+                                                        except Exception as renewal_reminder_err:
+                                                            logger.warning(f"[WEEKLY-RENEWAL] Could not schedule reminder: {renewal_reminder_err}")
                                         
                                         logger.info(f"[WEEKLY-RENEWAL] ✅ Next week auto-scheduled for task {task_id}")
                                         
