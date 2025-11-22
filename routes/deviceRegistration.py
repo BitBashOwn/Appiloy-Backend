@@ -2613,7 +2613,8 @@ async def send_command(
                                 preserved_warmup_duration = d.get("warmupDuration")
                                 
                                 # If warmup parameters are missing for a rest day, re-randomize them
-                                if is_rest or day_method == 9:
+                                # BUT skip if method is 0 (warmup was disabled due to active accounts)
+                                if (is_rest or day_method == 9) and day_method != 0:
                                     # Ensure method is set to 9 for rest days
                                     if is_rest and day_method != 9:
                                         d["method"] = 9
@@ -2903,7 +2904,8 @@ async def send_command(
                                         is_off = entry.get("isOff", False)
                                         
                                         # If it's a rest day (isRest=True or method=9), ensure warmup parameters exist
-                                        if (is_rest or method_val == 9) and not is_off:
+                                        # BUT skip if method is 0 (warmup was disabled due to active accounts)
+                                        if (is_rest or method_val == 9) and not is_off and method_val != 0:
                                             # Ensure method is set to 9 for rest days
                                             if is_rest and method_val != 9:
                                                 entry["method"] = 9
@@ -3069,7 +3071,7 @@ async def send_command(
                                 plan_method = int(day_plan.get("method", 0))
                                 if day_plan.get("isOff") or plan_method == 0:
                                     parts.append(f"{uname}: Off")
-                                elif day_plan.get("isRest") or plan_method == 9 or method_override_map.get(uname) == 9:
+                                elif (day_plan.get("isRest") or plan_method == 9 or method_override_map.get(uname) == 9) and plan_method != 0:
                                     likes = day_plan.get("maxLikes")
                                     comments = day_plan.get("maxComments")
                                     duration = day_plan.get("warmupDuration")

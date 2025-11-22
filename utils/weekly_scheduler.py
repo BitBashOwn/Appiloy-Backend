@@ -655,4 +655,35 @@ def generate_independent_schedules(
 
         all_schedules[username] = final_account_schedule
 
+    # Enforce rule: Warmup can only run if ALL accounts are on rest that day
+    # If ANY account is active on a day, convert ALL warmup accounts to rest with method 0
+    for day_index in range(7):
+        # Check if ANY account is active this day
+        has_active_account = False
+        for username, schedule in all_schedules.items():
+            day_data = schedule[day_index]
+            if not day_data.get("isRest") and not day_data.get("isOff"):
+                has_active_account = True
+                break
+        
+        # If any account is active, convert all warmup accounts to rest with method 0
+        if has_active_account:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"[WARMUP-FIX] Day {day_index}: Active account detected, converting warmup accounts to off")
+            for username, schedule in all_schedules.items():
+                day_data = schedule[day_index]
+                if day_data.get("isRest") and day_data.get("method") == 9:
+                    logger.info(f"[WARMUP-FIX] Day {day_index}: Converting {username} from warmup to off")
+                    # Keep as rest day but disable warmup (method 0, target 0)
+                    # This prevents validation errors from changing off day counts
+                    day_data["isRest"] = True
+                    day_data["isOff"] = False
+                    day_data["method"] = 0
+                    day_data["target"] = 0
+                    # Remove warmup parameters
+                    day_data.pop("maxLikes", None)
+                    day_data.pop("maxComments", None)
+                    day_data.pop("warmupDuration", None)
+
     return all_schedules
