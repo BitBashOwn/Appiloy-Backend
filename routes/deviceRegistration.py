@@ -95,6 +95,118 @@ redis_client = get_redis_client()
 main_event_loop = asyncio.get_event_loop()
 
 
+# Helper function to check if current worker is the scheduler leader
+def is_scheduler_leader():
+    """Check if current worker is the scheduler leader"""
+    SCHEDULER_LOCK_KEY = "appilot:scheduler:leader"
+    try:
+        current_leader = redis_client.get(SCHEDULER_LOCK_KEY)
+        current_leader_str = str(current_leader) if current_leader else None
+        return current_leader_str == str(WORKER_ID)
+    except Exception as e:
+        logger.error(f"[LEADER_CHECK] Failed to check leader status: {e}")
+        return False  # Assume follower if check fails
+
+
+def schedule_or_queue_job(job_id, trigger_time_utc, device_ids, command, job_name, job_type="command"):
+    """
+    Schedule a job immediately if this worker is the leader, otherwise queue it for the leader to process.
+    
+    Args:
+        job_id: Unique job identifier
+        trigger_time_utc: datetime object in UTC timezone
+        device_ids: List of device IDs (empty list for reminder jobs)
+        command: Command dict or reminder parameters
+        job_name: Human-readable job name
+        job_type: "command" for device commands, "weekly_reminder" for Discord reminders
+    """
+    try:
+        if is_scheduler_leader():
+            # Leader worker: Schedule immediately
+            from apscheduler.triggers.date import DateTrigger
+            
+            if job_type == "weekly_reminder":
+                # Reminder job - unpack command parameters
+                scheduler.add_job(
+                    send_weekly_reminder,
+                    trigger=DateTrigger(run_date=trigger_time_utc, timezone=pytz.UTC),
+                    args=[
+                        command.get("task_id"),
+                        command.get("day_name"),
+                        command.get("start_time"),
+                        command.get("schedule_lines"),
+                        command.get("time_zone"),
+                        False,
+                        "5 Hours Before Start",
+                    ],
+                    id=job_id,
+                    name=job_name,
+                    replace_existing=True,
+                )
+            else:
+                # Standard command job
+                scheduler.add_job(
+                    wrapper_for_send_command,
+                    trigger=DateTrigger(run_date=trigger_time_utc, timezone=pytz.UTC),
+                    args=[device_ids, command],
+                    id=job_id,
+                    name=job_name,
+                )
+            logger.info(f"[SCHEDULE] ✅ Leader scheduled job {job_id} for {trigger_time_utc}")
+        else:
+            # Follower worker: Queue for leader to process
+            QUEUE_KEY = "appilot:pending_schedules"
+            QUEUE_MAX_SIZE = 1000
+            
+            # Edge case: Check queue size to prevent overflow
+            try:
+                queue_size = redis_client.llen(QUEUE_KEY)
+                if queue_size >= QUEUE_MAX_SIZE:
+                    logger.error(f"[QUEUE] ❌ Queue overflow! Size: {queue_size}, max: {QUEUE_MAX_SIZE}. Dropping job {job_id}")
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"Job queue is full ({queue_size} items). Please try again later."
+                    )
+            except Exception as queue_check_err:
+                # If queue size check fails, log but continue (better to try queueing than fail immediately)
+                logger.warning(f"[QUEUE] ⚠️ Failed to check queue size: {queue_check_err}")
+            
+            # Create job request payload
+            job_request = {
+                "job_id": job_id,
+                "trigger_time_utc": trigger_time_utc.isoformat(),
+                "device_ids": device_ids,
+                "command": command,
+                "job_name": job_name,
+                "job_type": job_type,
+                "queued_at": datetime.now(pytz.UTC).isoformat(),
+                "queued_by_worker": str(WORKER_ID),
+            }
+            
+            import json
+            
+            # Edge case: Handle Redis connection failures
+            try:
+                redis_client.lpush(QUEUE_KEY, json.dumps(job_request))
+                redis_client.expire(QUEUE_KEY, 3600)  # 1 hour TTL
+                logger.info(f"[QUEUE] ✅ Follower queued job {job_id} for leader to process")
+            except Exception as redis_err:
+                logger.error(f"[QUEUE] ❌ Failed to queue job {job_id} to Redis: {redis_err}", exc_info=True)
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Failed to queue job due to Redis error: {str(redis_err)}"
+                )
+    except HTTPException:
+        # Re-raise HTTP exceptions (queue full, Redis unavailable)
+        raise
+    except Exception as e:
+        # Catch-all for unexpected errors
+        logger.error(f"[SCHEDULE] ❌ Unexpected error scheduling/queueing job {job_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to schedule job: {str(e)}"
+        )
+
 
 # MongoDB Connection
 
@@ -2022,13 +2134,18 @@ async def send_command(
                 job_command = copy.deepcopy(command)
                 job_command["job_id"] = job_id
                 job_command["runIndex"] = idx
-                scheduler.add_job(
-                    wrapper_for_send_command,
-                    trigger=DateTrigger(run_date=run_time_utc, timezone=pytz.UTC),
-                    args=[device_ids, job_command],
-                    id=job_id,
-                    name=f"MultipleRunTimes {idx+1} for devices {device_ids}",
+                
+                # Use helper function to schedule or queue
+                schedule_or_queue_job(
+                    job_id=job_id,
+                    trigger_time_utc=run_time_utc,
+                    device_ids=device_ids,
+                    command=job_command,
+                    job_name=f"MultipleRunTimes {idx+1} for devices {device_ids}",
+                    job_type="command"
                 )
+                logger.info(f"[MULTIPLE] 📌 Job {job_id} scheduled for {run_time_utc}")
+                
                 scheduled_job_ids.append(job_id)
                 job_instance = {
                     "job_id": job_id,
@@ -3912,21 +4029,17 @@ async def send_command(
 
                     # Add job to scheduler
                     try:
-                        # Note: Jobs are persisted to Redis even if scheduler isn't running on this worker
-                        # The leader worker's scheduler will pick them up automatically
-                        if not scheduler.running:
-                            logger.info(f"[WEEKLY] ℹ️ Scheduler not running on this worker (follower). Job {job_id} persisted to Redis - will be picked up by leader scheduler.")
-                        else:
-                            logger.info(f"[WEEKLY] ✅ Scheduler is running, scheduling job {job_id}")
-                        
-                        scheduler.add_job(
-                            wrapper_for_send_command,
-                            trigger=DateTrigger(run_date=start_time_utc, timezone=pytz.UTC),
-                            args=[device_ids, job_command],
-                            id=job_id,
-                            name=f"Weekly day {day_index} for devices {device_ids}",
+                        # Use helper function to schedule or queue
+                        schedule_or_queue_job(
+                            job_id=job_id,
+                            trigger_time_utc=start_time_utc,
+                            device_ids=device_ids,
+                            command=job_command,
+                            job_name=f"Weekly day {day_index} for devices {device_ids}",
+                            job_type="command"
                         )
                         logger.info(f"[WEEKLY] 📌 Job {job_id} scheduled for {start_time_utc} (UTC) / {start_time_local.strftime('%Y-%m-%d %H:%M:%S')} ({time_zone})")
+                        
                         scheduled_job_ids.append(job_id)
                         # Update DB activeJobs immediately
                         job_instance = {
@@ -4048,21 +4161,22 @@ async def send_command(
                             else:
                                 # Schedule for 5 hours before start
                                 try:
-                                    scheduler.add_job(
-                                        send_weekly_reminder,
-                                        trigger=DateTrigger(run_date=reminder_time_utc, timezone=pytz.UTC),
-                                        args=[
-                                            task_id,
-                                            actual_day_name,
-                                            start_time_local.strftime('%Y-%m-%d %H:%M'),
-                                            schedule_lines_payload,
-                                            time_zone,
-                                            False,
-                                            "5 Hours Before Start",
-                                        ],
-                                        id=reminder_job_id,
-                                        name=f"Reminder for day {day_index} of task {task_id}",
-                                        replace_existing=True,
+                                    # Use helper function to schedule or queue reminder
+                                    reminder_command = {
+                                        "reminder_type": "weekly_schedule",
+                                        "task_id": task_id,
+                                        "day_name": actual_day_name,
+                                        "start_time": start_time_local.strftime('%Y-%m-%d %H:%M'),
+                                        "schedule_lines": schedule_lines_payload,
+                                        "time_zone": time_zone,
+                                    }
+                                    schedule_or_queue_job(
+                                        job_id=reminder_job_id,
+                                        trigger_time_utc=reminder_time_utc,
+                                        device_ids=[],
+                                        command=reminder_command,
+                                        job_name=f"Reminder for day {day_index} of task {task_id}",
+                                        job_type="weekly_reminder"
                                     )
                                     logger.info(f"[WEEKLY] ⏰ Scheduled daily schedule reminder for Day {day_index}: 5 hours before start")
                                 except Exception as reminder_err:
@@ -5398,12 +5512,14 @@ async def send_command_to_devices(device_ids, command):
                                                     warmup_summary_text,
                                                 )
                                                 
-                                                scheduler.add_job(
-                                                    wrapper_for_send_command,
-                                                    trigger=DateTrigger(run_date=start_time_utc, timezone=pytz.UTC),
-                                                    args=[device_ids_for_renewal, job_command_new],
-                                                    id=job_id_new,
-                                                    name=f"Weekly day {day_index_new} for devices {device_ids_for_renewal}",
+                                                # Use helper function to schedule or queue
+                                                schedule_or_queue_job(
+                                                    job_id=job_id_new,
+                                                    trigger_time_utc=start_time_utc,
+                                                    device_ids=device_ids_for_renewal,
+                                                    command=job_command_new,
+                                                    job_name=f"Weekly day {day_index_new} for devices {device_ids_for_renewal}",
+                                                    job_type="command"
                                                 )
                                                 
                                                 job_instance = {
@@ -5487,21 +5603,22 @@ async def send_command_to_devices(device_ids, command):
                                                     else:
                                                         # Schedule for 5 hours before start
                                                         try:
-                                                            scheduler.add_job(
-                                                                send_weekly_reminder,
-                                                                trigger=DateTrigger(run_date=reminder_time_utc_renewal, timezone=pytz.UTC),
-                                                                args=[
-                                                                    task_id,
-                                                                    actual_day_log,
-                                                                    start_time_local.strftime('%Y-%m-%d %H:%M'),
-                                                                    schedule_lines_payload_renewal,
-                                                                    time_zone,
-                                                                    False,
-                                                                    "5 Hours Before Start",
-                                                                ],
-                                                                id=reminder_job_id_renewal,
-                                                                name=f"Reminder for renewed day {day_index_new} of task {task_id}",
-                                                                replace_existing=True,
+                                                            # Use helper function to schedule or queue reminder
+                                                            reminder_command = {
+                                                                "reminder_type": "weekly_schedule",
+                                                                "task_id": task_id,
+                                                                "day_name": actual_day_log,
+                                                                "start_time": start_time_local.strftime('%Y-%m-%d %H:%M'),
+                                                                "schedule_lines": schedule_lines_payload_renewal,
+                                                                "time_zone": time_zone,
+                                                            }
+                                                            schedule_or_queue_job(
+                                                                job_id=reminder_job_id_renewal,
+                                                                trigger_time_utc=reminder_time_utc_renewal,
+                                                                device_ids=[],
+                                                                command=reminder_command,
+                                                                job_name=f"Reminder for renewed day {day_index_new} of task {task_id}",
+                                                                job_type="weekly_reminder"
                                                             )
                                                             logger.info(f"[WEEKLY-RENEWAL] ⏰ Scheduled reminder for renewed Day {day_index_new}: 5 hours before start")
                                                         except Exception as renewal_reminder_err:
@@ -6081,23 +6198,14 @@ def schedule_split_jobs(
         modified_command = {**command, "duration": duration, "job_id": job_id}
 
         try:
-
-            scheduler.add_job(
-
-                wrapper_for_send_command,
-
-                trigger=DateTrigger(
-
-                    run_date=start_time.astimezone(pytz.UTC), timezone=pytz.UTC
-
-                ),
-
-                args=[device_ids, modified_command],
-
-                id=job_id,
-
-                name=f"Part {i + 1} of split command for devices {device_ids}",
-
+            # Use helper function to schedule or queue
+            schedule_or_queue_job(
+                job_id=job_id,
+                trigger_time_utc=start_time_utc,
+                device_ids=device_ids,
+                command=modified_command,
+                job_name=f"DurationWithTimeWindow {i+1} for devices {device_ids}",
+                job_type="command"
             )
 
             scheduled_jobs.append(job_id)
@@ -6505,22 +6613,15 @@ def schedule_recurring_job(
 
 
     try:
-
-        scheduler.add_job(
-
-            wrapper_for_send_command,
-
-            trigger=DateTrigger(run_date=start_time_utc, timezone=pytz.UTC),
-
-            args=[device_ids, modified_command],
-
-            id=new_job_id,
-
-            name=f"Recurring random-time command for devices {device_ids}",
-
+        # Use helper function to schedule or queue
+        schedule_or_queue_job(
+            job_id=new_job_id,
+            trigger_time_utc=start_time_utc,
+            device_ids=device_ids,
+            command=modified_command,
+            job_name=f"Recurring random-time command for devices {device_ids}",
+            job_type="command"
         )
-
-
 
         # First, get current task status
 
@@ -6707,23 +6808,14 @@ def schedule_single_job(
 
 
     try:
-
-        scheduler.add_job(
-
-            wrapper_for_send_command,
-
-            trigger=DateTrigger(
-
-                run_date=start_time.astimezone(pytz.UTC), timezone=pytz.UTC
-
-            ),
-
-            args=[device_ids, {**command, "duration": int(command.get("duration", 0))}],
-
-            id=job_id,
-
-            name=f"Single session command for devices {device_ids}",
-
+        # Use helper function to schedule or queue
+        schedule_or_queue_job(
+            job_id=job_id,
+            trigger_time_utc=start_time_utc,
+            device_ids=device_ids,
+            command={**command, "duration": int(command.get("duration", 0))},
+            job_name=f"Single session command for devices {device_ids}",
+            job_type="command"
         )
 
 

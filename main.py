@@ -230,6 +230,10 @@ async def lifespan(app: FastAPI):
                             renew_task = asyncio.create_task(keep_leadership_alive())
                             logger.info(f"[SCHEDULER] 🔄 Started leadership renewal task for promoted worker {WORKER_ID}")
                         
+                        # Start queue processor task
+                        queue_task = asyncio.create_task(process_pending_schedules())
+                        logger.info(f"[QUEUE] 🔄 Started queue processor task for promoted worker {WORKER_ID}")
+                        
                         # Stop monitoring since we're now the leader
                         break
                     else:
@@ -246,6 +250,166 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.error(f"[SCHEDULER] Error in monitor task: {e}", exc_info=True)
                 # Continue monitoring despite errors
+                await asyncio.sleep(5)
+    
+    async def process_pending_schedules():
+        """Leader task: Process pending job requests from Redis queue and schedule them"""
+        QUEUE_KEY = "appilot:pending_schedules"
+        QUEUE_MAX_SIZE = 1000
+        QUEUE_ITEM_TTL = 3600  # 1 hour
+        process_interval = 10  # Process queue every 10 seconds
+        
+        logger.info(f"[QUEUE] 🚀 Started queue processor on leader worker {WORKER_ID}")
+        
+        while True:
+            try:
+                await asyncio.sleep(process_interval)
+                
+                # Edge case: Handle Redis unavailable during leader check
+                try:
+                    # Verify we're still the leader before processing
+                    current_owner = await asyncio.to_thread(redis_client.get, SCHEDULER_LOCK_KEY)
+                    current_owner_str = str(current_owner) if current_owner else None
+                    
+                    if current_owner_str != str(WORKER_ID):
+                        logger.warning(f"[QUEUE] ⚠️ Worker {WORKER_ID} lost leadership, stopping queue processor")
+                        break
+                except Exception as redis_check_err:
+                    logger.error(f"[QUEUE] ❌ Redis unavailable during leader check: {redis_check_err}")
+                    # Wait before retrying to avoid hammering Redis
+                    await asyncio.sleep(5)
+                    continue
+                
+                # Get queue size for monitoring
+                try:
+                    queue_size = await asyncio.to_thread(redis_client.llen, QUEUE_KEY)
+                except Exception as queue_size_err:
+                    logger.error(f"[QUEUE] ❌ Failed to get queue size (Redis unavailable?): {queue_size_err}")
+                    await asyncio.sleep(5)
+                    continue
+                
+                if queue_size == 0:
+                    logger.debug(f"[QUEUE] 📭 Queue is empty, nothing to process")
+                    continue
+                
+                # Edge case: Warn if queue is growing too large
+                if queue_size > 500:
+                    logger.warning(f"[QUEUE] ⚠️ Queue size is large ({queue_size} items) - may indicate slow processing or high load")
+                
+                logger.info(f"[QUEUE] 📬 Processing {queue_size} pending job requests...")
+                
+                # Process all pending requests (batch processing)
+                processed_count = 0
+                failed_count = 0
+                
+                # Edge case: Limit batch size to prevent long processing cycles
+                MAX_BATCH_SIZE = 100
+                batch_count = 0
+                
+                while batch_count < MAX_BATCH_SIZE:
+                    batch_count += 1
+                    
+                    # Pop one item from the queue (right end - FIFO order)
+                    try:
+                        queue_item_raw = await asyncio.to_thread(redis_client.rpop, QUEUE_KEY)
+                    except Exception as redis_pop_err:
+                        logger.error(f"[QUEUE] ❌ Redis unavailable during pop: {redis_pop_err}")
+                        break  # Exit batch processing, will retry in next cycle
+                    
+                    if not queue_item_raw:
+                        # Queue is empty
+                        break
+                    
+                    try:
+                        # Parse the job request
+                        import json
+                        job_request = json.loads(queue_item_raw)
+                        
+                        # Validate job request structure
+                        required_fields = ["job_id", "trigger_time_utc", "job_name"]
+                        if not all(field in job_request for field in required_fields):
+                            logger.error(f"[QUEUE] ❌ Invalid job request (missing fields): {job_request.keys()}")
+                            failed_count += 1
+                            continue
+                        
+                        # Check if job already exists (avoid duplicates)
+                        existing_job = scheduler.get_job(job_request["job_id"])
+                        if existing_job:
+                            logger.warning(f"[QUEUE] ⚠️ Job {job_request['job_id']} already exists, skipping")
+                            processed_count += 1
+                            continue
+                        
+                        # Parse trigger time
+                        from datetime import datetime
+                        import pytz
+                        trigger_time = datetime.fromisoformat(job_request["trigger_time_utc"])
+                        if trigger_time.tzinfo is None:
+                            trigger_time = pytz.UTC.localize(trigger_time)
+                        
+                        # Check if trigger time is in the past (with 5-minute grace period)
+                        now_utc = datetime.now(pytz.UTC)
+                        if trigger_time < now_utc - timedelta(minutes=5):
+                            logger.warning(f"[QUEUE] ⏰ Job {job_request['job_id']} trigger time is in the past ({trigger_time}), skipping")
+                            failed_count += 1
+                            continue
+                        
+                        # Determine job type and schedule accordingly
+                        job_type = job_request.get("job_type", "command")
+                        
+                        from apscheduler.triggers.date import DateTrigger
+                        
+                        if job_type == "weekly_reminder":
+                            # Weekly reminder job - uses send_weekly_reminder function
+                            from routes.deviceRegistration import send_weekly_reminder
+                            
+                            cmd = job_request.get("command", {})
+                            scheduler.add_job(
+                                send_weekly_reminder,
+                                trigger=DateTrigger(run_date=trigger_time, timezone=pytz.UTC),
+                                args=[
+                                    cmd.get("task_id"),
+                                    cmd.get("day_name"),
+                                    cmd.get("start_time"),
+                                    cmd.get("schedule_lines"),
+                                    cmd.get("time_zone"),
+                                    False,
+                                    "5 Hours Before Start",
+                                ],
+                                id=job_request["job_id"],
+                                name=job_request["job_name"],
+                                replace_existing=True,
+                            )
+                            logger.info(f"[QUEUE] ✅ Scheduled reminder job {job_request['job_id']} for {trigger_time}")
+                        else:
+                            # Standard command job - uses wrapper_for_send_command
+                            from routes.deviceRegistration import wrapper_for_send_command
+                            
+                            scheduler.add_job(
+                                wrapper_for_send_command,
+                                trigger=DateTrigger(run_date=trigger_time, timezone=pytz.UTC),
+                                args=[job_request["device_ids"], job_request["command"]],
+                                id=job_request["job_id"],
+                                name=job_request["job_name"],
+                            )
+                            logger.info(f"[QUEUE] ✅ Scheduled command job {job_request['job_id']} for {trigger_time}")
+                        
+                        processed_count += 1
+                        
+                    except json.JSONDecodeError as json_err:
+                        logger.error(f"[QUEUE] ❌ Failed to parse job request JSON: {json_err}")
+                        failed_count += 1
+                    except Exception as job_err:
+                        logger.error(f"[QUEUE] ❌ Failed to schedule job from queue: {job_err}", exc_info=True)
+                        failed_count += 1
+                
+                logger.info(f"[QUEUE] 📊 Batch complete: {processed_count} scheduled, {failed_count} failed")
+                
+            except asyncio.CancelledError:
+                logger.info(f"[QUEUE] Queue processor task cancelled for worker {WORKER_ID}")
+                break
+            except Exception as e:
+                logger.error(f"[QUEUE] ❌ Error in queue processor: {e}", exc_info=True)
+                # Continue processing despite errors (wait before retrying)
                 await asyncio.sleep(5)
     
     # Add small random delay to prevent all workers from starting simultaneously
@@ -311,6 +475,9 @@ async def lifespan(app: FastAPI):
             # Start background task to keep leadership alive
             renew_task = asyncio.create_task(keep_leadership_alive())
             logger.info(f"[SCHEDULER] 🔄 Started leadership renewal task for worker {WORKER_ID}")
+            # Start background task to process pending job queue
+            queue_task = asyncio.create_task(process_pending_schedules())
+            logger.info(f"[QUEUE] 🔄 Started queue processor task for leader worker {WORKER_ID}")
         else:
             # ✅ FIXED: Wrap synchronous Redis call in to_thread to avoid blocking event loop
             try:
@@ -526,6 +693,7 @@ async def scheduler_health():
     
     redis_client = get_redis_client()
     SCHEDULER_LOCK_KEY = "appilot:scheduler:leader"
+    QUEUE_KEY = "appilot:pending_schedules"
     
     try:
         # Get current leader from Redis
@@ -534,6 +702,9 @@ async def scheduler_health():
         
         # Get TTL of the lock
         ttl = await asyncio.to_thread(redis_client.ttl, SCHEDULER_LOCK_KEY)
+        
+        # Get pending jobs count from queue
+        pending_jobs_count = await asyncio.to_thread(redis_client.llen, QUEUE_KEY)
         
         # Check if this worker is the leader
         is_current_leader = (current_leader_str == str(WORKER_ID))
@@ -544,9 +715,14 @@ async def scheduler_health():
             "current_leader": current_leader_str,
             "scheduler_running": scheduler.running,
             "lock_ttl_seconds": ttl if ttl > 0 else 0,
+            "pending_jobs_in_queue": pending_jobs_count,
             "status": "healthy" if current_leader_str else "NO_LEADER_DETECTED",
             "timestamp": datetime.now().isoformat()
         }
+        
+        # Add warning if queue is growing large
+        if pending_jobs_count > 100:
+            response_data["queue_warning"] = f"Queue has {pending_jobs_count} pending jobs (may indicate slow processing)"
         
         # Log warning if no leader exists
         if not current_leader_str:
