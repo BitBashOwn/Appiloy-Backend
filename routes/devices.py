@@ -8,6 +8,7 @@ from typing import Dict
 from connection_registry import is_device_connected
 from models.devices import devices_collection
 from logger import logger
+import asyncio
 
 devices_router = APIRouter()
 
@@ -49,9 +50,11 @@ def convert_object_id(data):
 @devices_router.get("/devices")
 async def get_devices(current_user: dict = Depends(get_current_user)):
 
-    # Query the devices for the current user from MongoDB
-    data = list(db["devices"].find(
-        {"email": current_user.get("email")}, {"_id": 0}))
+    # Query the devices for the current user from MongoDB (non-blocking)
+    data = await asyncio.to_thread(
+        lambda: list(db["devices"].find(
+            {"email": current_user.get("email")}, {"_id": 0}))
+    )
 
     # Convert ObjectId fields to strings for JSON serialization
     # data = convert_object_id(data)
@@ -64,8 +67,10 @@ async def delete_devices(devices: deleteRequest, current_user: dict = Depends(ge
     print("Devices to delete:", devices.devices)
     # object_ids = [ObjectId(device_id) for device_id in devices.devices]
     # result = devices_collection.delete_many({"_id": {"$in": object_ids}})
-    result = db["devices"].delete_many(
-        {"deviceId": {"$in": devices.devices}, "email": current_user.get("email")})
+    result = await asyncio.to_thread(
+        db["devices"].delete_many,
+        {"deviceId": {"$in": devices.devices}, "email": current_user.get("email")}
+    )
     print(result)
 
     return JSONResponse(content={"message": "Devices deleted successfully"}, status_code=200)
@@ -84,8 +89,11 @@ async def edit_devices(data: updateRequest, current_user: dict = Depends(get_cur
 
     update_query = {"$set": data.dataToUpdate}
 
-    result = db["devices"].update_many(
-        {"deviceId": {"$in": data.devices}, "email": current_user.get("email")}, update_query)
+    result = await asyncio.to_thread(
+        db["devices"].update_many,
+        {"deviceId": {"$in": data.devices}, "email": current_user.get("email")},
+        update_query
+    )
 
     if result.matched_count == 0:
         raise HTTPException(
@@ -120,13 +128,15 @@ async def update_status(data: updateStatusRequest, current_user: dict = Depends(
         not_connected_result = None
 
         if connected_devices:
-            connected_result = devices_collection.update_many(
+            connected_result = await asyncio.to_thread(
+                devices_collection.update_many,
                 {"deviceId": {"$in": connected_devices}, "email": current_user.get("email")},
                 {"$set": {"status": True}}
             )
 
         if not_connected_devices:
-            not_connected_result = devices_collection.update_many(
+            not_connected_result = await asyncio.to_thread(
+                devices_collection.update_many,
                 {"deviceId": {"$in": not_connected_devices}, "email": current_user.get("email")},
                 {"$set": {"status": False}}
             )

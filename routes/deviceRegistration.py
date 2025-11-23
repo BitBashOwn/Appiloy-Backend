@@ -271,7 +271,10 @@ def format_daily_schedule_lines(
 
 async def check_device_status(device_id: str):
 
-    device = device_collection.find_one({"deviceId": device_id})
+    device = await asyncio.to_thread(
+        device_collection.find_one,
+        {"deviceId": device_id}
+    )
 
     if not device:
 
@@ -287,13 +290,20 @@ async def check_device_status(device_id: str):
 
 async def update_device_status(device_id: str, status: bool):
 
-    device = device_collection.find_one({"deviceId": device_id})
+    device = await asyncio.to_thread(
+        device_collection.find_one,
+        {"deviceId": device_id}
+    )
 
     if not device:
 
         raise HTTPException(status_code=404, detail="Device not found")
 
-    device_collection.update_one({"deviceId": device_id}, {"$set": {"status": status}})
+    await asyncio.to_thread(
+        device_collection.update_one,
+        {"deviceId": device_id},
+        {"$set": {"status": status}}
+    )
 
     return {"message": f"Device {device_id} status updated to {status}"}
 
@@ -305,7 +315,10 @@ async def update_device_status(device_id: str, status: bool):
 
 async def check_device_registration(device_id: str):
 
-    device = device_collection.find_one({"deviceId": device_id})
+    device = await asyncio.to_thread(
+        device_collection.find_one,
+        {"deviceId": device_id}
+    )
 
     if not device:
 
@@ -315,7 +328,8 @@ async def check_device_registration(device_id: str):
 
     if not device["status"]:
 
-        device_collection.update_one(
+        await asyncio.to_thread(
+            device_collection.update_one,
 
             {"deviceId": device_id}, {"$set": {"status": True}}
 
@@ -368,8 +382,10 @@ async def stop_task(
 
 
         # Collect all tasks in a single query instead of querying one by one
-
-        tasks = list(tasks_collection.find({"id": {"$in": task_ids}}))
+        # ✅ FIXED: Run DB Query in Thread to avoid blocking event loop
+        tasks = await asyncio.to_thread(
+            lambda: list(tasks_collection.find({"id": {"$in": task_ids}}))
+        )
 
 
 
@@ -662,8 +678,10 @@ async def stop_task(
 
 
         # Get device info for all devices in a single query
-
-        devices = list(device_collection.find({"id": {"$in": list(all_device_ids)}}))
+        # ✅ FIXED: Run Device Query in Thread to avoid blocking event loop
+        devices = await asyncio.to_thread(
+            lambda: list(device_collection.find({"id": {"$in": list(all_device_ids)}}))
+        )
 
         device_names = {
 
@@ -776,9 +794,11 @@ async def stop_task(
 
 
         if bulk_operations:
-
-            result = tasks_collection.bulk_write(bulk_operations)
-
+            # ✅ FIXED: Run Bulk Write in Thread to avoid blocking event loop
+            result = await asyncio.to_thread(
+                tasks_collection.bulk_write,
+                bulk_operations
+            )
             print(f"[LOG] Updated {result.modified_count} tasks")
 
         else:
@@ -884,7 +904,9 @@ async def pause_task(
 
         # Collect all tasks in a single query
 
-        tasks = list(tasks_collection.find({"id": {"$in": task_ids}}))
+        tasks = await asyncio.to_thread(
+            lambda: list(tasks_collection.find({"id": {"$in": task_ids}}))
+        )
 
 
 
@@ -1139,7 +1161,9 @@ async def resume_task(
 
         # Collect all tasks in a single query
 
-        tasks = list(tasks_collection.find({"id": {"$in": task_ids}}))
+        tasks = await asyncio.to_thread(
+            lambda: list(tasks_collection.find({"id": {"$in": task_ids}}))
+        )
 
 
 
@@ -1676,7 +1700,10 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 
                     # Check if task is still active and update status
 
-                    task = tasks_collection.find_one({"id": task_id})
+                    task = await asyncio.to_thread(
+                        tasks_collection.find_one,
+                        {"id": task_id}
+                    )
 
                     if task:
 
@@ -1740,22 +1767,15 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                                     
                                     # Restore scheduledTime for next day
 
-                                    tasks_collection.update_one(
-
+                                    await asyncio.to_thread(
+                                        tasks_collection.update_one,
                                         {"id": task_id},
-
                                         {
-
                                             "$set": {
-
                                                 "status": "scheduled",
-
                                                 "scheduledTime": next_schedule.isoformat()
-
                                             }
-
                                         }
-
                                     )
 
                                     print(f"[SCHEDULE] Restored daily schedule for task {task_id} to {next_schedule}")
@@ -1810,20 +1830,20 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 
                                 # Fallback to normal status update
 
-                                tasks_collection.update_one(
-
-                                    {"id": task_id}, {"$set": {"status": status}}
-
+                                await asyncio.to_thread(
+                                    tasks_collection.update_one,
+                                    {"id": task_id},
+                                    {"$set": {"status": status}}
                                 )
 
                         else:
 
                             # Normal status update
 
-                            tasks_collection.update_one(
-
-                                {"id": task_id}, {"$set": {"status": status}}
-
+                            await asyncio.to_thread(
+                                tasks_collection.update_one,
+                                {"id": task_id},
+                                {"$set": {"status": status}}
                             )
 
 
@@ -1928,7 +1948,11 @@ async def send_command(
     if newSchedules is not None:
         update_fields["schedules"] = newSchedules
     if update_fields:
-        tasks_collection.update_one({"id": task_id}, {"$set": update_fields})
+        await asyncio.to_thread(
+            tasks_collection.update_one,
+            {"id": task_id},
+            {"$set": update_fields}
+        )
 
 
     try:
@@ -1943,7 +1967,11 @@ async def send_command(
         if durationType == "MultipleRunTimes":
             print(f"[LOG] MultipleRunTimes detected for task {task_id}")
             # Clear old scheduled jobs before scheduling new multiple run times
-            task = tasks_collection.find_one({"id": task_id}, {"activeJobs": 1})
+            task = await asyncio.to_thread(
+                tasks_collection.find_one,
+                {"id": task_id},
+                {"activeJobs": 1}
+            )
             if task and task.get("activeJobs"):
                 for old_job in task["activeJobs"]:
                     job_id_to_remove = old_job.get("job_id")
@@ -1953,7 +1981,11 @@ async def send_command(
                             print(f"[LOG] Removed old job {job_id_to_remove} from scheduler")
                         except Exception as e:
                             print(f"[LOG] Could not remove job {job_id_to_remove} from scheduler: {str(e)}")
-            tasks_collection.update_one({"id": task_id}, {"$set": {"activeJobs": []}})
+            await asyncio.to_thread(
+                tasks_collection.update_one,
+                {"id": task_id},
+                {"$set": {"activeJobs": []}}
+            )
             print(f"[LOG] Cleared activeJobs array for task {task_id}")
 
             # Extract MultipleRunTimes info from newSchecdules
@@ -2010,7 +2042,8 @@ async def send_command(
                     "durationType": durationType,
                 }
                 if not first_job_scheduled:
-                    tasks_collection.update_one(
+                    await asyncio.to_thread(
+                        tasks_collection.update_one,
                         {"id": task_id},
                         {
                             "$set": {
@@ -2023,7 +2056,8 @@ async def send_command(
                     )
                     first_job_scheduled = True
                 else:
-                    tasks_collection.update_one(
+                    await asyncio.to_thread(
+                        tasks_collection.update_one,
                         {"id": task_id},
                         {"$push": {"activeJobs": job_instance}},
                     )
@@ -2074,7 +2108,11 @@ async def send_command(
 
             print(f"[LOG] Clearing old fixed start time jobs for task {task_id}")
 
-            task = tasks_collection.find_one({"id": task_id}, {"activeJobs": 1})
+            task = await asyncio.to_thread(
+                tasks_collection.find_one,
+                {"id": task_id},
+                {"activeJobs": 1}
+            )
 
             if task and task.get("activeJobs"):
 
@@ -2100,10 +2138,9 @@ async def send_command(
 
             # Clear activeJobs array before scheduling new job
 
-            tasks_collection.update_one(
-
+            await asyncio.to_thread(
+                tasks_collection.update_one,
                 {"id": task_id},
-
                 {"$set": {"activeJobs": []}}
 
             )
@@ -2194,10 +2231,9 @@ async def send_command(
 
             # Clear activeJobs array before scheduling new job
 
-            tasks_collection.update_one(
-
+            await asyncio.to_thread(
+                tasks_collection.update_one,
                 {"id": task_id},
-
                 {"$set": {"activeJobs": []}}
 
             )
@@ -2284,7 +2320,11 @@ async def send_command(
 
             print(f"[LOG] Clearing old daily run jobs for task {task_id}")
 
-            task = tasks_collection.find_one({"id": task_id}, {"activeJobs": 1})
+            task = await asyncio.to_thread(
+                tasks_collection.find_one,
+                {"id": task_id},
+                {"activeJobs": 1}
+            )
 
             if task and task.get("activeJobs"):
 
@@ -2310,10 +2350,9 @@ async def send_command(
 
             # Clear activeJobs array before scheduling new job
 
-            tasks_collection.update_one(
-
+            await asyncio.to_thread(
+                tasks_collection.update_one,
                 {"id": task_id},
-
                 {"$set": {"activeJobs": []}}
 
             )
@@ -2333,7 +2372,10 @@ async def send_command(
                 logger.info("[WEEKLY] WeeklyRandomizedPlan detected; extracting weekly fields...")
 
                 # Fetch latest task for defaults and bot id
-                task_doc = tasks_collection.find_one({"id": task_id}) or {}
+                task_doc = await asyncio.to_thread(
+                    tasks_collection.find_one,
+                    {"id": task_id}
+                ) or {}
                 bot_id = task_doc.get("bot")
 
                 # Inputs: prefer newInputs, then inputs in command, then task/bot defaults
@@ -2358,7 +2400,11 @@ async def send_command(
                 if schedules_payload is None:
                     schedules_payload = task_doc.get("schedules")
                     if schedules_payload is None and bot_id:
-                        bot_doc = bots_collection.find_one({"id": bot_id}, {"schedules": 1}) or {}
+                        bot_doc = await asyncio.to_thread(
+                            bots_collection.find_one,
+                            {"id": bot_id},
+                            {"schedules": 1}
+                        ) or {}
                         schedules_payload = bot_doc.get("schedules", [])
 
                 # Parse weekly-specific fields from command-level
@@ -2832,8 +2878,10 @@ async def send_command(
                 server_id = None
                 channel_id = None
                 try:
-                    task_meta = tasks_collection.find_one(
-                        {"id": task_id}, {"_id": 0, "taskName": 1, "serverId": 1, "channelId": 1}
+                    task_meta = await asyncio.to_thread(
+                        tasks_collection.find_one,
+                        {"id": task_id},
+                        {"_id": 0, "taskName": 1, "serverId": 1, "channelId": 1}
                     ) or {}
 
                     server_id = task_meta.get("serverId")
@@ -3246,7 +3294,11 @@ async def send_command(
                         logger.info(f"[WEEKLY] Persisting inputs with sample block: name={sample_block.get('name')}, minDaily={sample_block.get('minFollowsDaily')}, maxDaily={sample_block.get('maxFollowsDaily')}")
                     except:
                         pass
-                tasks_collection.update_one({"id": task_id}, {"$set": persist_update})
+                await asyncio.to_thread(
+                    tasks_collection.update_one,
+                    {"id": task_id},
+                    {"$set": persist_update}
+                )
                 logger.info(f"[WEEKLY] Persisted to DB: inputs={new_inputs_from_command is not None}, schedules={schedules_payload is not None}")
 
                 # NOTE: Instant caps logic DISABLED - each job applies its own caps when it runs
@@ -3256,7 +3308,11 @@ async def send_command(
 
                 # Clear old WEEKLY jobs before scheduling weekly plan (preserve Fixed/Daily jobs)
                 print(f"[WEEKLY] Clearing old weekly jobs for task {task_id}")
-                task = tasks_collection.find_one({"id": task_id}, {"activeJobs": 1})
+                task = await asyncio.to_thread(
+                    tasks_collection.find_one,
+                    {"id": task_id},
+                    {"activeJobs": 1}
+                )
                 if task and task.get("activeJobs"):
                     for old_job in task["activeJobs"]:
                         try:
@@ -3276,7 +3332,8 @@ async def send_command(
                             pass
                 # Remove only weekly entries from activeJobs in DB
                 try:
-                    tasks_collection.update_one(
+                    await asyncio.to_thread(
+                        tasks_collection.update_one,
                         {"id": task_id},
                         {"$pull": {"activeJobs": {"durationType": "WeeklyRandomizedPlan"}}}
                     )
@@ -3572,7 +3629,8 @@ async def send_command(
                     start_time_utc = start_time_local.astimezone(pytz.UTC)
                     end_time_utc = end_time_local.astimezone(pytz.UTC)
 
-                    job_id = f"weekly_{task_id}_{start_time_local.strftime('%Y-%m-%d')}"
+                    # Include day_index in job_id to ensure uniqueness across all 7 days
+                    job_id = f"weekly_{task_id}_day{day_index}_{start_time_local.strftime('%Y-%m-%d')}"
                     
                     # Deep copy command to prevent shared object references between jobs
                     job_command = copy.deepcopy(command)
@@ -3854,6 +3912,13 @@ async def send_command(
 
                     # Add job to scheduler
                     try:
+                        # Note: Jobs are persisted to Redis even if scheduler isn't running on this worker
+                        # The leader worker's scheduler will pick them up automatically
+                        if not scheduler.running:
+                            logger.info(f"[WEEKLY] ℹ️ Scheduler not running on this worker (follower). Job {job_id} persisted to Redis - will be picked up by leader scheduler.")
+                        else:
+                            logger.info(f"[WEEKLY] ✅ Scheduler is running, scheduling job {job_id}")
+                        
                         scheduler.add_job(
                             wrapper_for_send_command,
                             trigger=DateTrigger(run_date=start_time_utc, timezone=pytz.UTC),
@@ -3861,6 +3926,7 @@ async def send_command(
                             id=job_id,
                             name=f"Weekly day {day_index} for devices {device_ids}",
                         )
+                        logger.info(f"[WEEKLY] 📌 Job {job_id} scheduled for {start_time_utc} (UTC) / {start_time_local.strftime('%Y-%m-%d %H:%M:%S')} ({time_zone})")
                         scheduled_job_ids.append(job_id)
                         # Update DB activeJobs immediately
                         job_instance = {
@@ -3877,8 +3943,10 @@ async def send_command(
                         }
                         
                         # Set nextRunTime only for the first scheduled job
+                        # Use asyncio.to_thread to prevent blocking the event loop
                         if not first_job_scheduled:
-                            tasks_collection.update_one(
+                            await asyncio.to_thread(
+                                tasks_collection.update_one,
                                 {"id": task_id},
                                 {
                                     "$set": {
@@ -3892,7 +3960,8 @@ async def send_command(
                             # Don't set first_job_scheduled = True here - it will be set after the reminder is sent
                         else:
                             # For subsequent jobs, only push to activeJobs
-                            tasks_collection.update_one(
+                            await asyncio.to_thread(
+                                tasks_collection.update_one,
                                 {"id": task_id},
                                 {
                                     "$push": {"activeJobs": job_instance},
@@ -3900,8 +3969,12 @@ async def send_command(
                             )
                         # Optional per-day notification (disabled by default for weekly plans)
                         if notify_daily:
-                            task_for_notify = tasks_collection.find_one({"id": task_id})
-                            device_docs = list(
+                            task_for_notify = await asyncio.to_thread(
+                                tasks_collection.find_one,
+                                {"id": task_id}
+                            )
+                            device_docs = await asyncio.to_thread(
+                                list,
                                 device_collection.find(
                                     {"deviceId": {"$in": device_ids}},
                                     {"deviceId": 1, "deviceName": 1, "_id": 0},
@@ -3929,43 +4002,49 @@ async def send_command(
                         reminder_job_id = f"reminder_{job_id}"
                         schedule_lines_payload = daily_schedule_lines or [f"Device target: {target_count} {get_method_unit(day_method)}"]
                         
-                        # Send first day reminder immediately when weekly plan is created
+                        # Send first day reminder immediately when weekly plan is created (async to avoid blocking)
                         if not first_job_scheduled:
                             try:
-                                send_weekly_reminder(
-                                    task_id,
-                                    actual_day_name,
-                                    start_time_local.strftime('%Y-%m-%d %H:%M'),
-                                    schedule_lines_payload,
-                                    time_zone,
-                                    False,
-                                    "Immediate (First Day Schedule)",
-                                )
-                                logger.info(f"[WEEKLY] ⏰ Sent immediate daily schedule reminder for first day (Day {day_index})")
-                            except Exception as reminder_err:
-                                logger.warning(f"[WEEKLY] Could not send immediate first day reminder: {reminder_err}")
-                            # Set flag AFTER reminder is sent to mark first job as complete
-                            first_job_scheduled = True
-                        else:
-                            # For other days, send reminder 5 hours before start, or immediately if less than 5 hours away
-                            reminder_time_utc = start_time_utc - timedelta(hours=5)
-                            now_utc = datetime.now(pytz.UTC)
-                            
-                            # If 5 hours before is in the past (less than 5 hours away), send immediately
-                            if reminder_time_utc <= now_utc:
-                                try:
-                                    send_weekly_reminder(
+                                # Call async version directly since we're in an async context
+                                asyncio.create_task(
+                                    _send_weekly_reminder_async(
                                         task_id,
                                         actual_day_name,
                                         start_time_local.strftime('%Y-%m-%d %H:%M'),
                                         schedule_lines_payload,
                                         time_zone,
                                         False,
-                                        "Immediate (Less than 5 hours away)",
+                                        "Immediate (First Day Schedule)",
                                     )
-                                    logger.info(f"[WEEKLY] ⏰ Sent immediate daily schedule reminder for Day {day_index} (less than 5 hours away)")
+                                )
+                                logger.info(f"[WEEKLY] ⏰ Queued immediate daily schedule reminder for first day (Day {day_index})")
+                            except Exception as reminder_err:
+                                logger.warning(f"[WEEKLY] Could not queue immediate first day reminder: {reminder_err}")
+                            # Set flag immediately since reminder is queued (not waiting for completion)
+                            first_job_scheduled = True
+                        else:
+                            # For other days, send reminder 5 hours before start, or immediately if less than 5 hours away
+                            reminder_time_utc = start_time_utc - timedelta(hours=5)
+                            now_utc = datetime.now(pytz.UTC)
+                            
+                            # If 5 hours before is in the past (less than 5 hours away), send immediately (async to avoid blocking)
+                            if reminder_time_utc <= now_utc:
+                                try:
+                                    # Call async version directly since we're in an async context
+                                    asyncio.create_task(
+                                        _send_weekly_reminder_async(
+                                            task_id,
+                                            actual_day_name,
+                                            start_time_local.strftime('%Y-%m-%d %H:%M'),
+                                            schedule_lines_payload,
+                                            time_zone,
+                                            False,
+                                            "Immediate (Less than 5 hours away)",
+                                        )
+                                    )
+                                    logger.info(f"[WEEKLY] ⏰ Queued immediate daily schedule reminder for Day {day_index} (less than 5 hours away)")
                                 except Exception as reminder_err:
-                                    logger.warning(f"[WEEKLY] Could not send immediate reminder: {reminder_err}")
+                                    logger.warning(f"[WEEKLY] Could not queue immediate reminder: {reminder_err}")
                             else:
                                 # Schedule for 5 hours before start
                                 try:
@@ -4071,7 +4150,9 @@ async def send_command(
 
                     if task_name:
 
-                        update_result = tasks_collection.update_one(
+                        update_result = await asyncio.to_thread(
+
+                            tasks_collection.update_one,
 
                             {"taskName": task_name, "email": current_user.get("email")},
 
@@ -4135,7 +4216,9 @@ async def send_command(
 
                             if task_id:
 
-                                update_result = tasks_collection.update_one(
+                                update_result = await asyncio.to_thread(
+
+                                    tasks_collection.update_one,
 
                                     {"id": task_id, "email": current_user.get("email")},
 
@@ -4245,7 +4328,7 @@ def register_device(device_data: DeviceRegistration):
 
 
 
-def send_weekly_reminder(
+async def _send_weekly_reminder_async(
     task_id,
     day_name,
     start_time_formatted,
@@ -4255,15 +4338,14 @@ def send_weekly_reminder(
     time_before_label: Optional[str] = None,
 ):
     """
-    Send a per-day schedule reminder before weekly tasks start.
-    Test mode: send immediately.
-    Normal mode: send 2 hours before the task window.
+    Async implementation of weekly reminder - runs non-blocking operations.
     """
     try:
         from Bot.discord_bot import get_bot_instance
         
-        # Fetch task details from database
-        task = tasks_collection.find_one(
+        # Fetch task details from database (async to avoid blocking)
+        task = await asyncio.to_thread(
+            tasks_collection.find_one,
             {"id": task_id},
             {"taskName": 1, "serverId": 1, "channelId": 1, "status": 1, "_id": 0}
         )
@@ -4292,9 +4374,9 @@ def send_weekly_reminder(
             f"\n**Accounts**:\n{schedule_body}"
         )
         
-        # Send via Discord bot
+        # Send via Discord bot (async to avoid blocking)
         bot = get_bot_instance()
-        bot.send_message_sync({
+        await bot.send_message({
             "message": message,
             "task_id": task_id,
             "job_id": f"reminder_{task_id}",
@@ -4309,65 +4391,152 @@ def send_weekly_reminder(
         logger.error(f"[WEEKLY-REMINDER] Failed to send reminder: {e}")
 
 
+def send_weekly_reminder(
+    task_id,
+    day_name,
+    start_time_formatted,
+    schedule_lines,
+    time_zone,
+    test_mode: bool = False,
+    time_before_label: Optional[str] = None,
+):
+    """
+    Thread-safe wrapper for sending weekly reminders.
+    When called from scheduler (threadpool), creates event loop and runs async version.
+    When called directly, runs async version in current context.
+    """
+    try:
+        # Check if we're already in an event loop
+        try:
+            current_loop = asyncio.get_event_loop()
+            if current_loop.is_running():
+                # We're in a running event loop (e.g., from API request), create new one
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    return loop.run_until_complete(
+                        _send_weekly_reminder_async(
+                            task_id,
+                            day_name,
+                            start_time_formatted,
+                            schedule_lines,
+                            time_zone,
+                            test_mode,
+                            time_before_label,
+                        )
+                    )
+                finally:
+                    loop.close()
+            else:
+                # We have a loop but it's not running, use it
+                return current_loop.run_until_complete(
+                    _send_weekly_reminder_async(
+                        task_id,
+                        day_name,
+                        start_time_formatted,
+                        schedule_lines,
+                        time_zone,
+                        test_mode,
+                        time_before_label,
+                    )
+                )
+        except RuntimeError:
+            # No event loop exists, create one (e.g., from scheduler threadpool)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                return loop.run_until_complete(
+                    _send_weekly_reminder_async(
+                        task_id,
+                        day_name,
+                        start_time_formatted,
+                        schedule_lines,
+                        time_zone,
+                        test_mode,
+                        time_before_label,
+                    )
+                )
+            finally:
+                loop.close()
+    except Exception as e:
+        logger.error(f"[WEEKLY-REMINDER] Wrapper failed: {e}")
+
+
 def wrapper_for_send_command(device_ids, command):
 
     """
 
-    Thread-safe wrapper for sending commands to devices
+    Thread-safe wrapper for sending commands to devices with distributed locking
+    
+    Uses Redis lock to ensure only ONE worker executes each job, even if multiple schedulers are running.
 
     """
 
+    job_id = command.get("job_id", "unknown")
+    task_id = command.get("task_id", "unknown")
+    
+    # Redis lock key for this job execution
+    lock_key = f"job_execution_lock:{job_id}"
+    lock_timeout = 300  # 5 minutes - enough time for job execution
+    
+    # Try to acquire distributed lock (only one worker can execute)
+    # Use SET with NX (only if not exists) and EX (expiration) for atomic lock acquisition
+    lock_acquired = redis_client.set(lock_key, WORKER_ID, nx=True, ex=lock_timeout)
+    
+    if not lock_acquired:
+        # Another worker is already executing this job
+        current_executor = redis_client.get(lock_key) or "unknown"
+        logger.info(f"[SCHEDULER-JOB] ⏭️ Skipping job {job_id} - already being executed by worker {current_executor}")
+        return None
+    
+    logger.info(f"[SCHEDULER-JOB] 🔒 Lock acquired for job {job_id} by worker {WORKER_ID}")
+    
     try:
+        # ✅ CRITICAL FIX: Use run_coroutine_threadsafe to execute on the MAIN event loop
+        # WebSockets (device_connections) were created on the Main Uvicorn Event Loop
+        # Creating a new loop with asyncio.run() would cause RuntimeError: Task attached to different loop
+        # This allows access to the existing WebSockets from the scheduler threadpool
+        
+        # Verify main_event_loop is available and running
+        if main_event_loop is None:
+            logger.error(f"[SCHEDULER-JOB] ❌ main_event_loop is None for job {job_id}")
+            raise RuntimeError("main_event_loop is not initialized. Cannot execute job.")
+        
+        if not main_event_loop.is_running():
+            logger.error(f"[SCHEDULER-JOB] ❌ main_event_loop is not running for job {job_id}")
+            raise RuntimeError("main_event_loop is not running. Cannot execute job.")
+        
+        # Execute the coroutine on the main event loop
+        # This ensures WebSocket operations work correctly
+        future = asyncio.run_coroutine_threadsafe(
+            send_command_to_devices(device_ids, command),
+            main_event_loop
+        )
+        
+        # Wait for the result (blocking this thread, which is fine for APScheduler threadpool)
+        # Timeout of 300 seconds (5 minutes) matches the lock timeout
+        result = future.result(timeout=300)
+        
+        logger.info(f"[SCHEDULER-JOB] ✅ Job {job_id} completed successfully")
+        return result
 
-        # No need to pass bot instance or manage event loops for messaging
-
-        # Check if we're already in an event loop for the command processing
-
-        try:
-
-            current_loop = asyncio.get_event_loop()
-
-            if current_loop.is_running():
-
-                # We're already in a running event loop, create a new one
-
-                loop = asyncio.new_event_loop()
-
-                asyncio.set_event_loop(loop)
-
-                return loop.run_until_complete(
-
-                    send_command_to_devices(device_ids, command)
-
-                )
-
-            else:
-
-                # We have a loop but it's not running, use it
-
-                return current_loop.run_until_complete(
-
-                    send_command_to_devices(device_ids, command)
-
-                )
-
-        except RuntimeError:
-
-            # No event loop exists, create one
-
-            loop = asyncio.new_event_loop()
-
-            asyncio.set_event_loop(loop)
-
-            return loop.run_until_complete(send_command_to_devices(device_ids, command))
-
+    except Exception as e:
+        logger.error(f"[SCHEDULER-JOB] ❌ Job {job_id} failed with error: {e}", exc_info=True)
+        import traceback
+        traceback.print_exc()
+        raise  # Re-raise to let APScheduler handle it
     finally:
-
-        # Only close the loop if we created a new one
-
-        if "loop" in locals() and loop is not asyncio.get_event_loop():
-
-            loop.close()
+        # Always release the lock after execution (or on error)
+        try:
+            # Only delete if we still own the lock (check value matches our worker ID)
+            current_lock_value = redis_client.get(lock_key)
+            if current_lock_value == WORKER_ID:
+                redis_client.delete(lock_key)
+                logger.info(f"[SCHEDULER-JOB] 🔓 Lock released for job {job_id}")
+            else:
+                logger.warning(f"[SCHEDULER-JOB] ⚠️ Lock for job {job_id} was already released or taken by another worker")
+        except Exception as lock_err:
+            logger.warning(f"[SCHEDULER-JOB] ⚠️ Failed to release lock for job {job_id}: {lock_err}")
 
 
 
@@ -5271,42 +5440,50 @@ async def send_command_to_devices(device_ids, command):
                                                     f"Device target: {target_count} {get_method_unit(day_method)}"
                                                 ]
                                                 
-                                                # Send first day reminder immediately when renewed week is created
+                                                # Send first day reminder immediately when renewed week is created (async to avoid blocking)
                                                 if day_index_new == first_index_new and not first_renewal_job_scheduled:
                                                     try:
-                                                        send_weekly_reminder(
-                                                            task_id,
-                                                            actual_day_log,
-                                                            start_time_local.strftime('%Y-%m-%d %H:%M'),
-                                                            schedule_lines_payload_renewal,
-                                                            time_zone,
-                                                            False,
-                                                            "Immediate (First Day Schedule)",
-                                                        )
-                                                        logger.info(f"[WEEKLY-RENEWAL] ⏰ Sent immediate daily schedule reminder for first day (Day {day_index_new})")
-                                                        first_renewal_job_scheduled = True
-                                                    except Exception as renewal_reminder_err:
-                                                        logger.warning(f"[WEEKLY-RENEWAL] Could not send immediate first day reminder: {renewal_reminder_err}")
-                                                else:
-                                                    # For other days, send reminder 5 hours before start, or immediately if less than 5 hours away
-                                                    reminder_time_utc_renewal = start_time_utc - timedelta(hours=5)
-                                                    now_utc_renewal = datetime.now(pytz.UTC)
-                                                    
-                                                    # If 5 hours before is in the past (less than 5 hours away), send immediately
-                                                    if reminder_time_utc_renewal <= now_utc_renewal:
-                                                        try:
-                                                            send_weekly_reminder(
+                                                        # Run reminder in background thread to avoid blocking the event loop
+                                                        # Call async version directly since we're in an async context
+                                                        asyncio.create_task(
+                                                            _send_weekly_reminder_async(
                                                                 task_id,
                                                                 actual_day_log,
                                                                 start_time_local.strftime('%Y-%m-%d %H:%M'),
                                                                 schedule_lines_payload_renewal,
                                                                 time_zone,
                                                                 False,
-                                                                "Immediate (Less than 5 hours away)",
+                                                                "Immediate (First Day Schedule)",
                                                             )
-                                                            logger.info(f"[WEEKLY-RENEWAL] ⏰ Sent immediate daily schedule reminder for Day {day_index_new} (less than 5 hours away)")
+                                                        )
+                                                        logger.info(f"[WEEKLY-RENEWAL] ⏰ Queued immediate daily schedule reminder for first day (Day {day_index_new})")
+                                                        first_renewal_job_scheduled = True
+                                                    except Exception as renewal_reminder_err:
+                                                        logger.warning(f"[WEEKLY-RENEWAL] Could not queue immediate first day reminder: {renewal_reminder_err}")
+                                                else:
+                                                    # For other days, send reminder 5 hours before start, or immediately if less than 5 hours away
+                                                    reminder_time_utc_renewal = start_time_utc - timedelta(hours=5)
+                                                    now_utc_renewal = datetime.now(pytz.UTC)
+                                                    
+                                                    # If 5 hours before is in the past (less than 5 hours away), send immediately (async to avoid blocking)
+                                                    if reminder_time_utc_renewal <= now_utc_renewal:
+                                                        try:
+                                                            # Run reminder in background thread to avoid blocking the event loop
+                                                            # Call async version directly since we're in an async context
+                                                            asyncio.create_task(
+                                                                _send_weekly_reminder_async(
+                                                                    task_id,
+                                                                    actual_day_log,
+                                                                    start_time_local.strftime('%Y-%m-%d %H:%M'),
+                                                                    schedule_lines_payload_renewal,
+                                                                    time_zone,
+                                                                    False,
+                                                                    "Immediate (Less than 5 hours away)",
+                                                                )
+                                                            )
+                                                            logger.info(f"[WEEKLY-RENEWAL] ⏰ Queued immediate daily schedule reminder for Day {day_index_new} (less than 5 hours away)")
                                                         except Exception as renewal_reminder_err:
-                                                            logger.warning(f"[WEEKLY-RENEWAL] Could not send immediate reminder: {renewal_reminder_err}")
+                                                            logger.warning(f"[WEEKLY-RENEWAL] Could not queue immediate reminder: {renewal_reminder_err}")
                                                     else:
                                                         # Schedule for 5 hours before start
                                                         try:
