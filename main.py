@@ -111,11 +111,14 @@ async def lifespan(app: FastAPI):
     
     # Background task to renew lock if we are leader
     renew_task = None
+    monitor_task = None
     
     async def keep_leadership_alive():
         """Continuously renew the scheduler leadership lock"""
         # Renew every 10 seconds (1/3 of TTL) to ensure we renew before expiration
         renewal_interval = 10  # seconds
+        consecutive_failures = 0
+        max_consecutive_failures = 3
         
         while True:
             try:
@@ -134,6 +137,7 @@ async def lifespan(app: FastAPI):
                         ex=SCHEDULER_LOCK_TTL
                     )
                     logger.debug(f"[SCHEDULER] 🔄 Worker {WORKER_ID} renewed scheduler leadership")
+                    consecutive_failures = 0  # Reset failure counter on success
                 elif current_owner_str is None:
                     # Lock expired - try to reclaim it
                     reclaimed = await asyncio.to_thread(
@@ -145,6 +149,7 @@ async def lifespan(app: FastAPI):
                     )
                     if reclaimed:
                         logger.info(f"[SCHEDULER] 🔄 Worker {WORKER_ID} reclaimed scheduler leadership (lock had expired)")
+                        consecutive_failures = 0
                     else:
                         # Another worker took it
                         new_owner = await asyncio.to_thread(redis_client.get, SCHEDULER_LOCK_KEY)
@@ -163,28 +168,123 @@ async def lifespan(app: FastAPI):
                 logger.info(f"[SCHEDULER] Leadership renewal task cancelled for worker {WORKER_ID}")
                 break
             except Exception as e:
-                logger.error(f"[SCHEDULER] Error renewing leadership: {e}", exc_info=True)
-                # Continue trying - don't break on transient errors
-                # But wait a bit longer before retrying to avoid hammering Redis
-                await asyncio.sleep(1)
+                consecutive_failures += 1
+                logger.error(f"[SCHEDULER] Error renewing leadership (failure {consecutive_failures}/{max_consecutive_failures}): {e}", exc_info=True)
+                
+                # If too many consecutive failures, assume we lost connection and give up leadership
+                if consecutive_failures >= max_consecutive_failures:
+                    logger.error(f"[SCHEDULER] ❌ Worker {WORKER_ID} giving up leadership after {consecutive_failures} consecutive failures")
+                    if scheduler.running:
+                        scheduler.shutdown(wait=False)
+                    break
+                
+                # Wait a bit longer before retrying to avoid hammering Redis
+                await asyncio.sleep(2)
+    
+    async def monitor_and_promote_if_orphaned():
+        """Follower task: Monitor for orphaned locks and promote self to leader if needed"""
+        check_interval = 15  # Check every 15 seconds
+        promotion_wait = 5  # Wait 5 seconds before attempting promotion to avoid race
+        
+        while True:
+            try:
+                await asyncio.sleep(check_interval)
+                
+                # Check if there's a current leader
+                current_owner = await asyncio.to_thread(redis_client.get, SCHEDULER_LOCK_KEY)
+                current_owner_str = str(current_owner) if current_owner else None
+                
+                if current_owner_str is None:
+                    # No leader exists - this is an ORPHANED state
+                    logger.warning(f"[SCHEDULER] ⚠️ Worker {WORKER_ID} detected ORPHANED lock (no leader). Waiting {promotion_wait}s before promotion attempt...")
+                    
+                    # Wait a bit to let other workers detect this too (avoid thundering herd)
+                    await asyncio.sleep(promotion_wait)
+                    
+                    # Try to become leader
+                    promoted = await asyncio.to_thread(
+                        redis_client.set,
+                        SCHEDULER_LOCK_KEY,
+                        str(WORKER_ID),
+                        nx=True,
+                        ex=SCHEDULER_LOCK_TTL
+                    )
+                    
+                    if promoted:
+                        logger.info(f"[SCHEDULER] 👑🚨 Worker {WORKER_ID} PROMOTED to leader after detecting orphaned lock!")
+                        
+                        # Start the scheduler if not running
+                        if not scheduler.running:
+                            try:
+                                scheduler.start()
+                                logger.info(f"[SCHEDULER] ✅ Scheduler started on promoted worker {WORKER_ID}")
+                            except Exception as start_err:
+                                logger.error(f"[SCHEDULER] ❌ Failed to start scheduler on promotion: {start_err}", exc_info=True)
+                                # Release the lock if we can't start the scheduler
+                                await asyncio.to_thread(redis_client.delete, SCHEDULER_LOCK_KEY)
+                                continue
+                        
+                        # Start renewal task
+                        nonlocal renew_task
+                        if renew_task is None or renew_task.done():
+                            renew_task = asyncio.create_task(keep_leadership_alive())
+                            logger.info(f"[SCHEDULER] 🔄 Started leadership renewal task for promoted worker {WORKER_ID}")
+                        
+                        # Stop monitoring since we're now the leader
+                        break
+                    else:
+                        # Another worker got promoted first
+                        new_owner = await asyncio.to_thread(redis_client.get, SCHEDULER_LOCK_KEY)
+                        logger.info(f"[SCHEDULER] ℹ️ Worker {WORKER_ID} promotion failed - another worker became leader: {new_owner}")
+                else:
+                    # Leader exists, continue monitoring
+                    logger.debug(f"[SCHEDULER] 👀 Worker {WORKER_ID} monitoring - current leader: {current_owner_str}")
+                    
+            except asyncio.CancelledError:
+                logger.info(f"[SCHEDULER] Monitor task cancelled for worker {WORKER_ID}")
+                break
+            except Exception as e:
+                logger.error(f"[SCHEDULER] Error in monitor task: {e}", exc_info=True)
+                # Continue monitoring despite errors
+                await asyncio.sleep(5)
+    
+    # Add small random delay to prevent all workers from starting simultaneously
+    # This helps avoid race conditions during leader election
+    import random
+    startup_delay = random.uniform(0.1, 1.0)
+    logger.info(f"[SCHEDULER] ⏱️ Worker {WORKER_ID} waiting {startup_delay:.2f}s before election (startup jitter)")
+    await asyncio.sleep(startup_delay)
     
     # Check if I should be the scheduler using leader election
     # Try to set the key. If it doesn't exist (nx=True), we win the election.
     # We set a short expiration so if this worker dies, another can take over.
     # ✅ FIXED: Wrap synchronous Redis call in to_thread to avoid blocking event loop
     logger.info(f"[SCHEDULER] 🔍 Attempting leader election for worker {WORKER_ID}...")
-    try:
-        is_leader = await asyncio.to_thread(
-            redis_client.set,
-            SCHEDULER_LOCK_KEY,
-            str(WORKER_ID),
-            nx=True,
-            ex=SCHEDULER_LOCK_TTL
-        )
-        logger.info(f"[SCHEDULER] 🔍 Leader election result: is_leader={is_leader} for worker {WORKER_ID}")
-    except Exception as election_err:
-        logger.error(f"[SCHEDULER] ❌ Leader election failed for worker {WORKER_ID}: {election_err}", exc_info=True)
-        is_leader = False
+    
+    is_leader = False
+    max_election_retries = 3
+    
+    for attempt in range(1, max_election_retries + 1):
+        try:
+            is_leader = await asyncio.to_thread(
+                redis_client.set,
+                SCHEDULER_LOCK_KEY,
+                str(WORKER_ID),
+                nx=True,
+                ex=SCHEDULER_LOCK_TTL
+            )
+            logger.info(f"[SCHEDULER] 🔍 Leader election result: is_leader={is_leader} for worker {WORKER_ID}")
+            break  # Success, exit retry loop
+        except Exception as election_err:
+            logger.error(f"[SCHEDULER] ❌ Leader election attempt {attempt}/{max_election_retries} failed for worker {WORKER_ID}: {election_err}", exc_info=True)
+            
+            if attempt < max_election_retries:
+                retry_delay = 2 * attempt  # Exponential backoff
+                logger.info(f"[SCHEDULER] 🔄 Retrying election in {retry_delay}s...")
+                await asyncio.sleep(retry_delay)
+            else:
+                logger.error(f"[SCHEDULER] ❌ All election attempts failed for worker {WORKER_ID}. Will rely on follower promotion if needed.")
+                is_leader = False
     
     enable_scheduler_env = os.getenv("ENABLE_SCHEDULER", "").lower()
     logger.info(f"[SCHEDULER] 🔍 ENABLE_SCHEDULER environment variable: '{enable_scheduler_env}' (worker {WORKER_ID})")
@@ -216,7 +316,16 @@ async def lifespan(app: FastAPI):
             try:
                 current_leader = await asyncio.to_thread(redis_client.get, SCHEDULER_LOCK_KEY)
                 current_leader_str = str(current_leader) if current_leader else "unknown"
-                logger.info(f"[SCHEDULER] 💤 Worker {WORKER_ID} is a follower (Leader: {current_leader_str})")
+                
+                if current_leader_str == "unknown" or current_leader_str is None or current_leader_str == "None":
+                    logger.warning(f"[SCHEDULER] ⚠️ Worker {WORKER_ID} is a follower but NO LEADER EXISTS (orphaned state detected at startup)!")
+                else:
+                    logger.info(f"[SCHEDULER] 💤 Worker {WORKER_ID} is a follower (Leader: {current_leader_str})")
+                
+                # Start monitor task for all followers to handle orphaned locks
+                monitor_task = asyncio.create_task(monitor_and_promote_if_orphaned())
+                logger.info(f"[SCHEDULER] 👀 Started follower monitor task for worker {WORKER_ID} (will auto-promote if leader fails)")
+                
             except Exception as leader_check_err:
                 logger.error(f"[SCHEDULER] ❌ Failed to check current leader: {leader_check_err}", exc_info=True)
             should_start_scheduler = False
@@ -344,6 +453,14 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
     
+    # Cancel monitor task if running
+    if 'monitor_task' in locals() and monitor_task and not monitor_task.done():
+        monitor_task.cancel()
+        try:
+            await monitor_task
+        except asyncio.CancelledError:
+            pass
+    
     # Release leadership lock if we held it
     try:
         # ✅ FIXED: Wrap synchronous Redis calls in to_thread to avoid blocking event loop
@@ -395,6 +512,61 @@ app.add_middleware(
 def index():
     logger.info("Health check endpoint hit")
     return JSONResponse(content={"message": "running"}, status_code=200)
+
+
+@app.get("/health/scheduler")
+async def scheduler_health():
+    """
+    Health check endpoint to verify scheduler leader status
+    Returns info about current worker and scheduler state
+    """
+    from redis_client import get_redis_client
+    from datetime import datetime
+    import asyncio
+    
+    redis_client = get_redis_client()
+    SCHEDULER_LOCK_KEY = "appilot:scheduler:leader"
+    
+    try:
+        # Get current leader from Redis
+        current_leader = await asyncio.to_thread(redis_client.get, SCHEDULER_LOCK_KEY)
+        current_leader_str = str(current_leader.decode('utf-8')) if current_leader else None
+        
+        # Get TTL of the lock
+        ttl = await asyncio.to_thread(redis_client.ttl, SCHEDULER_LOCK_KEY)
+        
+        # Check if this worker is the leader
+        is_current_leader = (current_leader_str == str(WORKER_ID))
+        
+        response_data = {
+            "worker_id": str(WORKER_ID),
+            "is_leader": is_current_leader,
+            "current_leader": current_leader_str,
+            "scheduler_running": scheduler.running,
+            "lock_ttl_seconds": ttl if ttl > 0 else 0,
+            "status": "healthy" if current_leader_str else "NO_LEADER_DETECTED",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Log warning if no leader exists
+        if not current_leader_str:
+            logger.warning("[SCHEDULER HEALTH] ⚠️ NO LEADER DETECTED - orphaned lock state!")
+            response_data["warning"] = "No scheduler leader currently elected"
+            return JSONResponse(content=response_data, status_code=503)  # Service Unavailable
+        
+        return JSONResponse(content=response_data, status_code=200)
+        
+    except Exception as e:
+        logger.error(f"[SCHEDULER HEALTH] Error checking scheduler health: {e}", exc_info=True)
+        return JSONResponse(
+            content={
+                "worker_id": str(WORKER_ID),
+                "error": str(e),
+                "status": "error",
+                "timestamp": datetime.now().isoformat()
+            },
+            status_code=500
+        )
 
 
 app.include_router(router, tags=["Signup endpoints"])
