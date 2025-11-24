@@ -2011,9 +2011,11 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 
 
 
-        # Clean up local connections
-
-        active_connections.remove(websocket)
+        # Clean up local connections safely (other tasks may have already removed them)
+        if websocket in active_connections:
+            active_connections.remove(websocket)
+        else:
+            logger.debug(f"[WEBSOCKET] Socket for {device_id} already removed from active_connections")
 
         device_connections.pop(device_id, None)
         connection_metadata.pop(device_id, None)
