@@ -89,7 +89,7 @@ from redis_client import get_redis_client
 async def lifespan(app: FastAPI):
     # Perform stale worker cleanup at startup of every worker
     logger.info(f"Starting application with worker ID: {WORKER_ID}")
-    cleanup_stale_workers()
+    await cleanup_stale_workers()
     
     # ✅ CRITICAL: Set the main event loop for use with run_coroutine_threadsafe
     # This allows scheduler jobs to execute on the main loop where WebSockets live
@@ -641,7 +641,7 @@ async def lifespan(app: FastAPI):
         logger.warning(f"[SCHEDULER] Error releasing leadership lock: {cleanup_err}")
     
     from connection_registry import cleanup_worker_devices
-    cleanup_worker_devices()
+    await cleanup_worker_devices()
 
 
 app = FastAPI(lifespan=lifespan)

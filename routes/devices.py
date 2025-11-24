@@ -119,7 +119,7 @@ async def update_status(data: updateStatusRequest, current_user: dict = Depends(
         not_connected_devices = []
 
         for device in data.devices:
-            if is_device_connected(device):
+            if await is_device_connected(device):
                 connected_devices.append(device)
             else:
                 not_connected_devices.append(device)

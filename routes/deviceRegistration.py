@@ -817,7 +817,7 @@ async def stop_task(
 
             # websocket = device_connections.get(device_id)
 
-            check = is_device_connected(device_id)
+            check = await is_device_connected(device_id)
 
             device_name = device_names.get(device_id, device_id)
 
@@ -1118,7 +1118,7 @@ async def pause_task(
 
         for device_id in all_device_ids:
 
-            check = is_device_connected(device_id)
+            check = await is_device_connected(device_id)
 
             device_name = device_names.get(device_id, device_id)
 
@@ -1369,7 +1369,7 @@ async def resume_task(
 
         for device_id in all_device_ids:
 
-            check = is_device_connected(device_id)
+            check = await is_device_connected(device_id)
 
             device_name = device_names.get(device_id, device_id)
 
@@ -1470,7 +1470,7 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
         {"_id": 0, "deviceName": 1, "email": 1, "status": 1},
     )
 
-    reconnection_count = track_reconnection(device_id)
+    reconnection_count = await track_reconnection(device_id)
 
     if reconnection_count > 10:
 
@@ -1495,7 +1495,7 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 
     # Register in Redis
 
-    register_device_connection(device_id)
+    await register_device_connection(device_id)
 
 
 
@@ -1511,7 +1511,7 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 
     print(f"Device {device_id} connected to worker {WORKER_ID}")
 
-    log_all_connected_devices()
+    await log_all_connected_devices()
 
     async def get_task_routing(task_id: str):
         if not task_id:
@@ -2003,7 +2003,7 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 
         # Unregister from Redis
 
-        unregister_device_connection(device_id)
+        await unregister_device_connection(device_id)
 
 
 

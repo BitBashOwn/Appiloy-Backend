@@ -1,6 +1,7 @@
 import time
 import uuid
 import os
+import asyncio
 from redis_client import get_redis_client
 from logger import logger
 
@@ -15,49 +16,49 @@ GLOBAL_COMMAND_CHANNEL = "device_commands"
 
 
 # In connection_registry.py
-def register_device_connection(device_id):
+async def register_device_connection(device_id):
     """Register which worker has this device connection"""
     # Store the worker ID in a hash
     timestamp = int(time.time())
-    redis_client.hset("device_connections", device_id, WORKER_ID)
+    await asyncio.to_thread(redis_client.hset, "device_connections", device_id, WORKER_ID)
     # Set device as online in a separate hash for quick status checks
-    redis_client.hset("device_status", device_id, "1")
-    redis_client.hset("device_timestamps", device_id, timestamp)
+    await asyncio.to_thread(redis_client.hset, "device_status", device_id, "1")
+    await asyncio.to_thread(redis_client.hset, "device_timestamps", device_id, timestamp)
     return True
 
 
-def unregister_device_connection(device_id):
+async def unregister_device_connection(device_id):
     """Remove a device connection"""
-    redis_client.hdel("device_connections", device_id)
-    redis_client.hdel("device_status", device_id)
+    await asyncio.to_thread(redis_client.hdel, "device_connections", device_id)
+    await asyncio.to_thread(redis_client.hdel, "device_status", device_id)
     return True
 
 
-def get_device_worker(device_id):
+async def get_device_worker(device_id):
     """Find which worker has this device connected"""
-    return redis_client.hget("device_connections", device_id)
+    return await asyncio.to_thread(redis_client.hget, "device_connections", device_id)
 
 
-def is_device_connected(device_id):
+async def is_device_connected(device_id):
     """Check if device is connected to any worker"""
-    return redis_client.hexists("device_status", device_id)
+    return await asyncio.to_thread(redis_client.hexists, "device_status", device_id)
 
 
-def get_connected_device_count():
+async def get_connected_device_count():
     """Get count of connected devices"""
-    return redis_client.hlen("device_status")
+    return await asyncio.to_thread(redis_client.hlen, "device_status")
 
 
-def track_reconnection(device_id):
+async def track_reconnection(device_id):
     """Track device reconnection attempts"""
     key = f"reconnections:{device_id}"
-    count = redis_client.incr(key)
+    count = await asyncio.to_thread(redis_client.incr, key)
     # Set expiry to reset count after 1 hour
-    redis_client.expire(key, 3600)
+    await asyncio.to_thread(redis_client.expire, key, 3600)
     return count
 
 
-def get_all_connected_devices():
+async def get_all_connected_devices():
     """
     Get a dictionary of all connected devices with their worker IDs and connection timestamps.
 
@@ -67,10 +68,10 @@ def get_all_connected_devices():
     result = {}
 
     # Get all device connections
-    all_connections = redis_client.hgetall("device_connections")
+    all_connections = await asyncio.to_thread(redis_client.hgetall, "device_connections")
 
     # Get all timestamps
-    all_timestamps = redis_client.hgetall("device_timestamps")
+    all_timestamps = await asyncio.to_thread(redis_client.hgetall, "device_timestamps")
 
     # Combine the information
     for device_id, worker_id in all_connections.items():
@@ -93,11 +94,11 @@ def get_all_connected_devices():
     return result
 
 
-def log_all_connected_devices():
+async def log_all_connected_devices():
     """
     Log all connected devices with their worker IDs and connection times.
     """
-    devices = get_all_connected_devices()
+    devices = await get_all_connected_devices()
     device_count = len(devices)
 
     print(f"===== {device_count} Connected Devices =====")
@@ -124,28 +125,28 @@ def log_all_connected_devices():
     return devices
 
 
-def cleanup_worker_devices():
+async def cleanup_worker_devices():
     """
     Remove all devices associated with the current worker from Redis.
     """
     print(f"Cleaning up devices for worker: {WORKER_ID}")
 
     # Get all device connections
-    all_connections = redis_client.hgetall("device_connections")
+    all_connections = await asyncio.to_thread(redis_client.hgetall, "device_connections")
 
     # Iterate over the connections and remove devices linked to the current worker
     for device_id, worker_id in all_connections.items():
         if worker_id == WORKER_ID:
             print(f"Removing device {device_id} from worker {WORKER_ID}")
-            unregister_device_connection(device_id)
+            await unregister_device_connection(device_id)
 
 
-def cleanup_stale_workers():
+async def cleanup_stale_workers():
     try:
         # Create a lock key with short TTL to ensure only one worker performs cleanup
         lock_key = "worker_cleanup_lock"
         # Try to acquire the lock with a 10-second expiry (in case the process crashes)
-        acquired = redis_client.set(lock_key, WORKER_ID, ex=10, nx=True)
+        acquired = await asyncio.to_thread(redis_client.set, lock_key, WORKER_ID, ex=10, nx=True)
 
         if acquired:
             logger.info(
@@ -154,10 +155,10 @@ def cleanup_stale_workers():
 
             # Log current state before cleanup
             logger.info("Current workers and devices before cleanup:")
-            log_all_connected_devices()
+            await log_all_connected_devices()
 
             # Get all device connections to identify worker IDs
-            all_connections = redis_client.hgetall("device_connections")
+            all_connections = await asyncio.to_thread(redis_client.hgetall, "device_connections")
 
             # Extract unique worker IDs
             worker_ids = set()
@@ -183,13 +184,13 @@ def cleanup_stale_workers():
                     logger.info(
                         f"Removing stale connection for device {device_id} from worker {worker_id}"
                     )
-                    redis_client.hdel("device_connections", device_id)
-                    redis_client.hdel("device_status", device_id)
-                    redis_client.hdel("device_timestamps", device_id)
+                    await asyncio.to_thread(redis_client.hdel, "device_connections", device_id)
+                    await asyncio.to_thread(redis_client.hdel, "device_status", device_id)
+                    await asyncio.to_thread(redis_client.hdel, "device_timestamps", device_id)
 
             # Log after cleanup
             logger.info("Workers and devices after cleanup:")
-            log_all_connected_devices()
+            await log_all_connected_devices()
 
             logger.info("Stale worker cleanup completed successfully")
         else:
