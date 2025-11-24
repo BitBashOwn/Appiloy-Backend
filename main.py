@@ -79,6 +79,8 @@ from routes.twofa import twofa_router
 from scheduler import scheduler
 import asyncio
 import os
+import json
+import time
 from connection_registry import WORKER_ID, cleanup_stale_workers
 from Bot.discord_bot import bot_instance
 from logger import logger
@@ -605,6 +607,99 @@ async def lifespan(app: FastAPI):
     else:
         logger.info(f"[SCHEDULER] Skipping scheduler startup on worker {WORKER_ID}")
 
+    # Background task for device health monitoring
+    health_monitor_task = None
+    
+    async def monitor_device_health():
+        """Periodically ping all connected devices and mark offline if no response"""
+        PING_INTERVAL = 30  # Send ping every 30 seconds
+        PING_TIMEOUT = 10   # Wait 10 seconds for pong response
+        
+        while True:
+            try:
+                await asyncio.sleep(PING_INTERVAL)
+                
+                # Get all devices connected to this worker
+                from connection_registry import get_devices_for_this_worker, mark_device_offline
+                from routes.deviceRegistration import device_connections, connection_metadata, active_connections
+                
+                device_ids = await get_devices_for_this_worker()
+                
+                if not device_ids:
+                    continue
+                
+                # Send ping to each device
+                ping_tasks = []
+                for device_id in device_ids:
+                    websocket = device_connections.get(device_id)
+                    if not websocket:
+                        continue
+                    
+                    # Check if device is still in connection_metadata
+                    if device_id not in connection_metadata:
+                        continue
+                    
+                    # Mark that we're sending a ping
+                    connection_metadata[device_id]["last_ping_sent"] = time.time()
+                    connection_metadata[device_id]["ping_response_pending"] = True
+                    
+                    async def send_ping(ws, dev_id):
+                        try:
+                            ping_message = {
+                                "type": "ping",
+                                "timestamp": int(time.time() * 1000),
+                            }
+                            await ws.send_text(json.dumps(ping_message))
+                            logger.debug(f"[HEALTH] Sent ping to device {dev_id}")
+                        except Exception as send_err:
+                            # If we cannot send the ping, log and skip marking offline
+                            logger.error(f"[HEALTH] Failed to send ping to device {dev_id}: {send_err}")
+                            if dev_id in connection_metadata:
+                                connection_metadata[dev_id]["ping_response_pending"] = False
+                            return
+                        
+                        # Wait for pong response
+                        await asyncio.sleep(PING_TIMEOUT)
+                        
+                        # Check if we got a response
+                        if dev_id in connection_metadata:
+                            metadata = connection_metadata[dev_id]
+                            last_activity = metadata.get("last_activity")
+                            if last_activity and (time.time() - last_activity) <= (PING_TIMEOUT * 2):
+                                # Device is still chatting (legacy clients may not answer server pings)
+                                metadata["ping_response_pending"] = False
+                                logger.debug(f"[HEALTH] Device {dev_id} skipped server ping but is still active; keeping online")
+                                return
+                            
+                            if metadata.get("ping_response_pending", False):
+                                # No pong received - mark as offline
+                                logger.warning(f"[HEALTH] Device {dev_id} did not respond to ping - marking offline")
+                                await mark_device_offline(dev_id)
+                                # Clean up local connection
+                                if dev_id in device_connections:
+                                    device_connections.pop(dev_id, None)
+                                if dev_id in connection_metadata:
+                                    connection_metadata.pop(dev_id, None)
+                                if ws in active_connections:
+                                    active_connections.remove(ws)
+                    
+                    ping_tasks.append(send_ping(websocket, device_id))
+                
+                # Send all pings concurrently
+                if ping_tasks:
+                    await asyncio.gather(*ping_tasks, return_exceptions=True)
+                    
+            except asyncio.CancelledError:
+                logger.info("[HEALTH] Device health monitor task cancelled")
+                break
+            except Exception as e:
+                logger.error(f"[HEALTH] Error in device health monitor: {e}")
+                await asyncio.sleep(5)  # Wait before retrying
+    
+    # Start health monitoring task
+    health_monitor_task = asyncio.create_task(monitor_device_health())
+    logger.info("[HEALTH] Device health monitoring task started")
+
     asyncio.create_task(bot_instance.start_bot())
 
     yield
@@ -625,6 +720,14 @@ async def lifespan(app: FastAPI):
         monitor_task.cancel()
         try:
             await monitor_task
+        except asyncio.CancelledError:
+            pass
+    
+    # Cancel health monitor task if running
+    if 'health_monitor_task' in locals() and health_monitor_task and not health_monitor_task.done():
+        health_monitor_task.cancel()
+        try:
+            await health_monitor_task
         except asyncio.CancelledError:
             pass
     

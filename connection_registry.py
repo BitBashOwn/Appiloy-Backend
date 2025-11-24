@@ -58,6 +58,48 @@ async def track_reconnection(device_id):
     return count
 
 
+async def update_device_timestamp(device_id):
+    """Update the last activity timestamp for a device"""
+    timestamp = int(time.time())
+    await asyncio.to_thread(redis_client.hset, "device_timestamps", device_id, timestamp)
+    return True
+
+
+async def mark_device_offline(device_id):
+    """Mark a device as offline in MongoDB and Redis"""
+    from models.devices import device_collection
+    
+    # Update MongoDB status
+    await asyncio.to_thread(
+        device_collection.update_one,
+        {"deviceId": device_id},
+        {"$set": {"status": False}},
+    )
+    
+    # Unregister from Redis
+    await unregister_device_connection(device_id)
+    
+    logger.info(f"[HEALTH] Marked device {device_id} as offline due to health check failure")
+    return True
+
+
+async def get_devices_for_this_worker():
+    """Get all device IDs connected to this worker"""
+    all_connections = await asyncio.to_thread(redis_client.hgetall, "device_connections")
+    device_ids = []
+    for device_id, worker_id in all_connections.items():
+        # Redis returns bytes, so decode before comparing
+        decoded_worker = (
+            worker_id.decode("utf-8") if isinstance(worker_id, (bytes, bytearray)) else worker_id
+        )
+        decoded_device = (
+            device_id.decode("utf-8") if isinstance(device_id, (bytes, bytearray)) else device_id
+        )
+        if decoded_worker == WORKER_ID:
+            device_ids.append(decoded_device)
+    return device_ids
+
+
 async def get_all_connected_devices():
     """
     Get a dictionary of all connected devices with their worker IDs and connection timestamps.

@@ -8,7 +8,7 @@ from pymongo import MongoClient, UpdateOne
 
 from pydantic import BaseModel
 
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 import random
 
@@ -58,6 +58,8 @@ from connection_registry import (
     is_device_connected,
 
     log_all_connected_devices,
+
+    update_device_timestamp,
 
     WORKER_ID,
 
@@ -1489,6 +1491,9 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
     connection_metadata[device_id] = {
         "device_info": device_info or {},
         "task_cache": {},
+        "last_ping_sent": None,
+        "ping_response_pending": False,
+        "last_activity": time.time(),
     }
 
 
@@ -1534,9 +1539,15 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 
         while True:
 
-            # Receive JSON message from client
-
-            data = await websocket.receive_text()
+            # Receive JSON message from client with timeout detection
+            try:
+                # 60 second timeout to detect stale connections
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=60.0)
+            except asyncio.TimeoutError:
+                # Connection is stale - no message received within timeout
+                print(f"[HEALTH] Device {device_id} connection timeout - no message received in 60 seconds")
+                # Break the loop to trigger disconnect handling
+                break
 
             print(f"Message from {device_id}: {data}")
 
@@ -1563,6 +1574,11 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 
 
                 device_state = connection_metadata.get(device_id, {})
+                now_ts = time.time()
+                if device_state:
+                    device_state["last_activity"] = now_ts
+                else:
+                    connection_metadata[device_id] = {"last_activity": now_ts}
 
                 cached_device = device_state.get("device_info", {})
 
@@ -1582,19 +1598,22 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 
 
 
-                if message_type == "ping":
+                if message_type in ("ping", "pong"):
+                    # Update last activity timestamp on any heartbeat
+                    await update_device_timestamp(device_id)
+                    
+                    if device_id in connection_metadata:
+                        connection_metadata[device_id]["ping_response_pending"] = False
+                        connection_metadata[device_id]["last_activity"] = time.time()
 
-                    pong_response = {
-
-                        "type": "pong",
-
-                        "timestamp": payload.get("timestamp", int(time.time() * 1000)),
-
-                    }
-
-                    await websocket.send_text(json.dumps(pong_response))
-
-                    print(f"Sent pong response to ({device_id})")
+                    if message_type == "ping":
+                        # Only echo pong if device pinged us first
+                        pong_response = {
+                            "type": "pong",
+                            "timestamp": payload.get("timestamp", int(time.time() * 1000)),
+                        }
+                        await websocket.send_text(json.dumps(pong_response))
+                        print(f"Sent pong response to ({device_id})")
 
                     continue
 
@@ -2181,8 +2200,10 @@ async def send_command(
                 print(f"[LOG] Scheduled MultipleRunTimes job {job_id} at {run_time_utc}")
             # --- Send Discord notification after scheduling ---
             try:
-                task_meta = tasks_collection.find_one(
-                    {"id": task_id}, {"_id": 0, "taskName": 1, "serverId": 1, "channelId": 1}
+                task_meta = await asyncio.to_thread(
+                    tasks_collection.find_one,
+                    {"id": task_id},
+                    {"_id": 0, "taskName": 1, "serverId": 1, "channelId": 1},
                 ) or {}
                 server_id = task_meta.get("serverId")
                 channel_id = task_meta.get("channelId")
@@ -2423,7 +2444,7 @@ async def send_command(
 
                 )
 
-                schedule_split_jobs(
+                await schedule_split_jobs(
 
                     start_times, random_durations, device_ids, command, task_id
 
@@ -2480,7 +2501,7 @@ async def send_command(
             
             # Now schedule the new daily recurring job
 
-            schedule_recurring_job(command, device_ids)
+            await schedule_recurring_job(command, device_ids)
 
 
 
@@ -2747,6 +2768,8 @@ async def send_command(
                     previous_active_days_map = None
 
                 # Generate INDEPENDENT schedules for each account
+                day_windows: Dict[int, Tuple[datetime, datetime]] = {}
+
                 if account_usernames_for_caps:
                     schedules_map = generate_independent_schedules(
                         accounts=account_usernames_for_caps,
@@ -2876,6 +2899,38 @@ async def send_command(
                     )
                     schedules_map = {} # Empty map means fallback behavior
 
+                if schedules_map:
+                    def _coerce_datetime(value):
+                        if isinstance(value, datetime):
+                            return value
+                        if isinstance(value, str):
+                            try:
+                                return datetime.fromisoformat(value)
+                            except ValueError:
+                                return None
+                        return None
+
+                    for day_idx in range(7):
+                        starts = []
+                        ends = []
+                        for sched in schedules_map.values():
+                            if not isinstance(sched, list):
+                                continue
+                            entry = next(
+                                (d for d in sched if d.get("dayIndex") == day_idx),
+                                None,
+                            )
+                            if not entry or entry.get("isOff"):
+                                continue
+                            start_dt = _coerce_datetime(entry.get("start_local"))
+                            if start_dt:
+                                starts.append(start_dt)
+                            end_dt = _coerce_datetime(entry.get("end_local"))
+                            if end_dt:
+                                ends.append(end_dt)
+                        if starts:
+                            day_windows[day_idx] = (min(starts), max(ends))
+
                 # Ensure newInputs enabled flags reflect which accounts actually have scheduled activity
                 if schedules_map:
                     accounts_with_activity: Set[str] = set()
@@ -2984,6 +3039,9 @@ async def send_command(
                         "start_local": start_time_local,
                         "end_local": end_time_local,
                     }
+                    window = day_windows.get(idx)
+                    if window:
+                        entry["start_local"], entry["end_local"] = window
                     if is_rest:
                         entry["maxLikes"] = int(d.get("maxLikes", 10))
                         entry["maxComments"] = int(d.get("maxComments", 5))
@@ -4188,7 +4246,11 @@ async def send_command(
                                 scheduler.remove_job(jid)
                             except Exception:
                                 pass
-                        tasks_collection.update_one({"id": task_id}, {"$set": {"activeJobs": []}})
+                        await asyncio.to_thread(
+                            tasks_collection.update_one,
+                            {"id": task_id},
+                            {"$set": {"activeJobs": []}},
+                        )
                         raise HTTPException(status_code=500, detail=f"Failed to schedule weekly job: {str(e)}")
 
                 logger.info(
@@ -6098,16 +6160,7 @@ async def send_command_to_devices(device_ids, command):
         if is_recurring:
 
             logger.info(f"Scheduling recurring job for task {task_id}.")
-
-            # Use executor to run blocking code
-
-            loop = asyncio.get_event_loop()
-
-            await loop.run_in_executor(
-
-                None, schedule_recurring_job, command, device_ids
-
-            )
+            await schedule_recurring_job(command, device_ids)
 
 
 
@@ -6143,7 +6196,7 @@ async def send_command_to_devices(device_ids, command):
 
 
 
-def schedule_split_jobs(
+async def schedule_split_jobs(
 
     start_times: List[datetime],
 
@@ -6247,21 +6300,16 @@ def schedule_split_jobs(
         
         # Update status only if it's not 'running'
 
-        tasks_collection.update_one(
-
+        await asyncio.to_thread(
+            tasks_collection.update_one,
             {"id": task_id, "status": {"$ne": "running"}},
-
             {
-
                 "$set": {
                     "status": "scheduled",
                     "nextRunTime": earliest_start_time.isoformat()  # Add next run time
                 },
-
                 "$unset": {"scheduledTime": ""}  # Clear old scheduledTime
-
             },
-
         )
 
         
@@ -6274,12 +6322,10 @@ def schedule_split_jobs(
 
             # Get user email from the task
 
-            task_info = tasks_collection.find_one(
-
+            task_info = await asyncio.to_thread(
+                tasks_collection.find_one,
                 {"id": task_id},
-
                 {"email": 1}
-
             )
 
             if task_info and task_info.get("email"):
@@ -6294,11 +6340,17 @@ def schedule_split_jobs(
                 
                 # Also clear specific endpoint caches for immediate refresh
 
-                redis_client.delete(f"tasks:list:{user_email}:*")
+                await asyncio.to_thread(
+                    redis_client.delete, f"tasks:list:{user_email}:*"
+                )
 
-                redis_client.delete(f"tasks:scheduled:{user_email}")
+                await asyncio.to_thread(
+                    redis_client.delete, f"tasks:scheduled:{user_email}"
+                )
 
-                redis_client.delete(f"tasks:running:{user_email}")
+                await asyncio.to_thread(
+                    redis_client.delete, f"tasks:running:{user_email}"
+                )
 
                 
                 
@@ -6498,10 +6550,8 @@ async def send_schedule_notification(
 
 
 
-def schedule_recurring_job(
-
+async def schedule_recurring_job(
     command: dict, device_ids: List[str], main_loop=None
-
 ) -> None:
 
     """Schedule the next day's task within the specified time window"""
@@ -6625,7 +6675,9 @@ def schedule_recurring_job(
 
         # First, get current task status
 
-        task = tasks_collection.find_one({"id": task_id}, {"status": 1})
+        task = await asyncio.to_thread(
+            tasks_collection.find_one, {"id": task_id}, {"status": 1}
+        )
 
 
 
@@ -6663,7 +6715,9 @@ def schedule_recurring_job(
 
         # Update the task in the database
 
-        tasks_collection.update_one({"id": task_id}, update_operation)
+        await asyncio.to_thread(
+            tasks_collection.update_one, {"id": task_id}, update_operation
+        )
 
         
         
@@ -6675,12 +6729,10 @@ def schedule_recurring_job(
 
             # Get user email from the task
 
-            task_info = tasks_collection.find_one(
-
+            task_info = await asyncio.to_thread(
+                tasks_collection.find_one,
                 {"id": task_id},
-
-                {"email": 1}
-
+                {"email": 1},
             )
 
             if task_info and task_info.get("email"):
@@ -6713,16 +6765,13 @@ def schedule_recurring_job(
 
         # Get device names for notification
 
-        device_docs = list(
-
-            device_collection.find(
-
-                {"deviceId": {"$in": device_ids}},
-
-                {"deviceId": 1, "deviceName": 1, "_id": 0},
-
+        device_docs = await asyncio.to_thread(
+            lambda: list(
+                device_collection.find(
+                    {"deviceId": {"$in": device_ids}},
+                    {"deviceId": 1, "deviceName": 1, "_id": 0},
+                )
             )
-
         )
 
         device_names = [doc.get("deviceName", "Unknown Device") for doc in device_docs]
@@ -6731,7 +6780,7 @@ def schedule_recurring_job(
 
         # Get updated task details for notification
 
-        task = tasks_collection.find_one({"id": task_id})
+        task = await asyncio.to_thread(tasks_collection.find_one, {"id": task_id})
 
         # asyncio.create_task(
 

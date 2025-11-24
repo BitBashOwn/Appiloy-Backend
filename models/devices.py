@@ -14,4 +14,6 @@ class User(BaseModel):
     activationDate: datetime
 
 
-devices_collection = db['devices']
+devices_collection = db["devices"]
+# Temporary alias for legacy imports that still expect `device_collection`
+device_collection = devices_collection
