@@ -2818,46 +2818,48 @@ async def send_command(
                 if test_mode:
                     # In test mode, use 20-minute gaps between scheduled days
                     gap_minutes = 20
-                                    start_time_local = local_dt + timedelta(minutes=idx * gap_minutes)
-                                    # For warmup-only, keep session short placeholder end; device manages day plan
-                                    end_time_local = start_time_local + (timedelta(minutes=1) if warmup_only_flag else timedelta(hours=11))
-                                else:
-                                    day_local = local_dt + timedelta(days=idx)
-                                    if warmup_only_flag:
-                                        # Trigger morning window 09:10–12:00 to align device day window
-                                        start_window_start = day_local.replace(hour=9, minute=10, second=0, microsecond=0)
-                                        start_window_end = day_local.replace(hour=12, minute=0, second=0, microsecond=0)
-                                    else:
-                                        start_window_start = day_local.replace(hour=11, minute=0, second=0, microsecond=0)
-                                        start_window_end = day_local.replace(hour=22, minute=0, second=0, microsecond=0)
-                                    window_minutes = int((start_window_end - start_window_start).total_seconds() // 60)
-                                    if window_minutes > 0:
-                                        random_offset = random.randint(0, window_minutes - 1)
-                                        start_time_local = start_window_start + timedelta(minutes=random_offset)
-                                        end_time_local = (start_time_local + timedelta(minutes=1)) if warmup_only_flag else start_window_end
-                                    else:
-                                        # Invalid window, skip timestamps for this entry but preserve warmup params
-                                        if is_rest or day_method == 9:
-                                            if preserved_max_likes is not None:
-                                                d["maxLikes"] = preserved_max_likes
-                                            if preserved_max_comments is not None:
-                                                d["maxComments"] = preserved_max_comments
-                                            if preserved_warmup_duration is not None:
-                                                d["warmupDuration"] = preserved_warmup_duration
-                                        continue
-                                
-                                # Add timestamps to the day entry as ISO strings (for JSON serialization)
-                                d["start_local"] = start_time_local.isoformat()
-                                d["end_local"] = end_time_local.isoformat()
-                                
-                                # Restore warmup parameters after adding timestamps (in case they were lost)
-                                if is_rest or day_method == 9:
-                                    if preserved_max_likes is not None:
-                                        d["maxLikes"] = preserved_max_likes
-                                    if preserved_max_comments is not None:
-                                        d["maxComments"] = preserved_max_comments
-                                    if preserved_warmup_duration is not None:
-                                        d["warmupDuration"] = preserved_warmup_duration
+                    start_time_local = local_dt + timedelta(minutes=idx * gap_minutes)
+                    # For warmup-only, keep session short placeholder end; device manages day plan
+                    end_time_local = start_time_local + (timedelta(minutes=1) if warmup_only_flag else timedelta(hours=11))
+                else:
+                    day_local = local_dt + timedelta(days=idx)
+                    if warmup_only_flag:
+                        # Trigger morning window 09:10–12:00 to align device day window
+                        start_window_start = day_local.replace(hour=9, minute=10, second=0, microsecond=0)
+                        start_window_end = day_local.replace(hour=12, minute=0, second=0, microsecond=0)
+                    else:
+                        start_window_start = day_local.replace(hour=11, minute=0, second=0, microsecond=0)
+                        start_window_end = day_local.replace(hour=22, minute=0, second=0, microsecond=0)
+                    window_minutes = int((start_window_end - start_window_start).total_seconds() // 60)
+                    if window_minutes > 0:
+                        random_offset = random.randint(0, window_minutes - 1)
+                        start_time_local = start_window_start + timedelta(minutes=random_offset)
+                        end_time_local = (start_time_local + timedelta(minutes=1)) if warmup_only_flag else start_window_end
+                    else:
+                        # Invalid window, skip timestamps for this entry but preserve warmup params
+                        if is_rest or day_method == 9:
+                            if preserved_max_likes is not None:
+                                d["maxLikes"] = preserved_max_likes
+                            if preserved_max_comments is not None:
+                                d["maxComments"] = preserved_max_comments
+                            if preserved_warmup_duration is not None:
+                                d["warmupDuration"] = preserved_warmup_duration
+                        start_time_local = None
+                        end_time_local = None
+
+                if start_time_local and end_time_local:
+                    # Add timestamps to the day entry as ISO strings (for JSON serialization)
+                    d["start_local"] = start_time_local.isoformat()
+                    d["end_local"] = end_time_local.isoformat()
+
+                    # Restore warmup parameters after adding timestamps (in case they were lost)
+                    if is_rest or day_method == 9:
+                        if preserved_max_likes is not None:
+                            d["maxLikes"] = preserved_max_likes
+                        if preserved_max_comments is not None:
+                            d["maxComments"] = preserved_max_comments
+                        if preserved_warmup_duration is not None:
+                            d["warmupDuration"] = preserved_warmup_duration
                     
                     # Ensure no warmups occur on days where any account is active
                     if schedules_map:
