@@ -2815,9 +2815,9 @@ async def send_command(
                                         d["maxComments"] = preserved_max_comments
                                         d["warmupDuration"] = preserved_warmup_duration
                                 
-                                if test_mode:
-                                    # In test mode, use 5-minute gaps between scheduled days
-                                    gap_minutes = 5
+                if test_mode:
+                    # In test mode, use 20-minute gaps between scheduled days
+                    gap_minutes = 20
                                     start_time_local = local_dt + timedelta(minutes=idx * gap_minutes)
                                     # For warmup-only, keep session short placeholder end; device manages day plan
                                     end_time_local = start_time_local + (timedelta(minutes=1) if warmup_only_flag else timedelta(hours=11))
@@ -3008,8 +3008,8 @@ async def send_command(
                     day_method = int(d.get("method", 0 if is_off else (9 if is_rest else 1)))
                     
                     if test_mode:
-                        # In test mode, use 5-minute gaps between scheduled days
-                        gap_minutes = 5
+                        # In test mode, use 20-minute gaps between scheduled days
+                        gap_minutes = 20
                         start_time_local = local_dt + timedelta(minutes=idx * gap_minutes)
                         # For warmup-only, keep session short placeholder end; device manages day plan
                         end_time_local = start_time_local + (timedelta(minutes=1) if is_warmup_only else timedelta(hours=11))
