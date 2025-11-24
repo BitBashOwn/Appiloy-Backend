@@ -11,6 +11,9 @@ redis_client = get_redis_client()
 # Generate a unique worker ID
 WORKER_ID = os.getenv("WORKER_ID", f"worker-{uuid.uuid4().hex[:8]}")
 
+# Threshold (in seconds) before a device connection is considered stale
+DEVICE_STALE_THRESHOLD_SECONDS = int(os.getenv("DEVICE_STALE_THRESHOLD_SECONDS", "300"))
+
 # Channel for all workers to listen on
 GLOBAL_COMMAND_CHANNEL = "device_commands"
 
@@ -201,34 +204,66 @@ async def cleanup_stale_workers():
 
             # Get all device connections to identify worker IDs
             all_connections = await asyncio.to_thread(redis_client.hgetall, "device_connections")
+            all_timestamps = await asyncio.to_thread(redis_client.hgetall, "device_timestamps")
+            now_ts = int(time.time())
 
             # Extract unique worker IDs
             worker_ids = set()
             for device_id, worker_id in all_connections.items():
-                worker_ids.add(worker_id)
+                decoded_worker = (
+                    worker_id.decode("utf-8") if isinstance(worker_id, (bytes, bytearray)) else worker_id
+                )
+                worker_ids.add(decoded_worker)
 
-            # For each worker, check if it's active (we'll consider all as stale during startup)
+            # For each worker, check if it's active based on device heartbeat timestamps
             for worker_id in worker_ids:
                 # Skip current worker
                 if worker_id == WORKER_ID:
                     continue
 
-                logger.info(f"Cleaning up stale worker: {worker_id}")
+                logger.info(f"Cleaning up potentially stale connections for worker: {worker_id}")
 
                 # Find all devices connected to this worker
-                devices_to_remove = []
                 for device_id, w_id in all_connections.items():
-                    if w_id == worker_id:
-                        devices_to_remove.append(device_id)
-
-                # Remove each device
-                for device_id in devices_to_remove:
-                    logger.info(
-                        f"Removing stale connection for device {device_id} from worker {worker_id}"
+                    decoded_device = (
+                        device_id.decode("utf-8") if isinstance(device_id, (bytes, bytearray)) else device_id
                     )
-                    await asyncio.to_thread(redis_client.hdel, "device_connections", device_id)
-                    await asyncio.to_thread(redis_client.hdel, "device_status", device_id)
-                    await asyncio.to_thread(redis_client.hdel, "device_timestamps", device_id)
+                    decoded_wid = (
+                        w_id.decode("utf-8") if isinstance(w_id, (bytes, bytearray)) else w_id
+                    )
+
+                    if decoded_wid != worker_id:
+                        continue
+
+                    timestamp_raw = all_timestamps.get(device_id)
+                    is_stale = True
+                    last_seen = "unknown"
+
+                    if timestamp_raw:
+                        try:
+                            decoded_timestamp = (
+                                timestamp_raw.decode("utf-8") if isinstance(timestamp_raw, (bytes, bytearray)) else timestamp_raw
+                            )
+                            ts_val = int(decoded_timestamp)
+                            last_seen = ts_val
+                            is_stale = (now_ts - ts_val) > DEVICE_STALE_THRESHOLD_SECONDS
+                        except (ValueError, TypeError):
+                            is_stale = True
+
+                    if not is_stale:
+                        logger.info(
+                            f"[CLEANUP] Skipping active device {decoded_device} on worker {worker_id} "
+                            f"(last activity {(now_ts - last_seen) if isinstance(last_seen, int) else 'recent'} seconds ago)"
+                        )
+                        continue
+
+                    logger.info(
+                        f"Removing stale connection for device {decoded_device} from worker {worker_id} "
+                        f"(last activity {last_seen})."
+                    )
+                    await asyncio.to_thread(redis_client.hdel, "device_connections", decoded_device)
+                    await asyncio.to_thread(redis_client.hdel, "device_status", decoded_device)
+                    await asyncio.to_thread(redis_client.hdel, "device_timestamps", decoded_device)
 
             # Log after cleanup
             logger.info("Workers and devices after cleanup:")
