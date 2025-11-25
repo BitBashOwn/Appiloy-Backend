@@ -2,6 +2,7 @@ import time
 import uuid
 import os
 import asyncio
+import json
 from redis_client import get_redis_client
 from logger import logger
 
@@ -277,3 +278,78 @@ async def cleanup_stale_workers():
 
     except Exception as e:
         logger.error(f"Error during stale worker cleanup: {str(e)}")
+
+
+# Connection stability tracking functions
+async def track_connection_stability(device_id: str, event: str):
+    """
+    Track connection stability events for a device.
+    Events: 'connect', 'disconnect', 'ping_success', 'ping_failure'
+    """
+    key = f"stability:{device_id}"
+    timestamp = int(time.time())
+    event_data = f"{timestamp}:{event}"
+    
+    # Add event to a list with TTL
+    await asyncio.to_thread(redis_client.lpush, key, event_data)
+    await asyncio.to_thread(redis_client.ltrim, key, 0, 99)  # Keep last 100 events
+    await asyncio.to_thread(redis_client.expire, key, 86400)  # 24-hour TTL
+
+
+async def get_connection_stability_score(device_id: str) -> dict:
+    """
+    Calculate connection stability score for a device.
+    Returns dict with score (0-100) and recent events.
+    """
+    key = f"stability:{device_id}"
+    events = await asyncio.to_thread(redis_client.lrange, key, 0, -1)
+    
+    if not events:
+        return {"score": 100, "events": [], "disconnects_last_hour": 0}
+    
+    now = int(time.time())
+    hour_ago = now - 3600
+    
+    disconnects_last_hour = 0
+    ping_failures = 0
+    ping_successes = 0
+    
+    for event_raw in events:
+        event_str = event_raw.decode() if isinstance(event_raw, bytes) else event_raw
+        try:
+            ts, event_type = event_str.split(":", 1)
+            ts = int(ts)
+            
+            if ts > hour_ago:
+                if event_type == "disconnect":
+                    disconnects_last_hour += 1
+                elif event_type == "ping_failure":
+                    ping_failures += 1
+                elif event_type == "ping_success":
+                    ping_successes += 1
+        except (ValueError, TypeError):
+            continue
+    
+    # Calculate score (100 = perfect, 0 = very unstable)
+    score = 100
+    score -= disconnects_last_hour * 15  # -15 per disconnect
+    score -= ping_failures * 5  # -5 per ping failure
+    score = max(0, min(100, score))
+    
+    return {
+        "score": score,
+        "disconnects_last_hour": disconnects_last_hour,
+        "ping_failures": ping_failures,
+        "ping_successes": ping_successes
+    }
+
+
+async def should_be_lenient_with_device(device_id: str) -> bool:
+    """
+    Determine if we should be more lenient with disconnection for this device.
+    Returns True if device has been stable and deserves grace period.
+    """
+    stability = await get_connection_stability_score(device_id)
+    
+    # Be lenient if device has good stability score
+    return stability["score"] >= 70

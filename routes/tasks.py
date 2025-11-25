@@ -636,9 +636,18 @@ async def get_running_tasks(current_user: dict = Depends(get_current_user)):
 
 @tasks_router.delete("/delete-tasks")
 async def delete_tasks(tasks: deleteRequest, current_user: dict = Depends(get_current_user)):
-    # print("Devices to delete:", tasks.tasks)
-    # object_ids = [ObjectId(device_id) for device_id in devices.devices]
-    # result = devices_collection.delete_many({"_id": {"$in": tasks.tasks}})
+    # Clean up scheduler jobs BEFORE deleting tasks from database
+    from routes.deviceRegistration import cleanup_task_jobs
+    
+    total_jobs_removed = 0
+    for task_id in tasks.tasks:
+        jobs_removed = await cleanup_task_jobs(task_id)
+        total_jobs_removed += jobs_removed
+    
+    if total_jobs_removed > 0:
+        print(f"[CLEANUP] Removed {total_jobs_removed} orphaned scheduler jobs before deleting {len(tasks.tasks)} tasks")
+    
+    # Delete tasks from database
     result = await asyncio.to_thread(
         tasks_collection.delete_many,
         {"id": {"$in": tasks.tasks}, "email": current_user.get("email")})

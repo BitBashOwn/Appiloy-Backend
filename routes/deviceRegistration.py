@@ -48,6 +48,7 @@ from Bot.discord_bot import bot_instance
 from scheduler import scheduler
 
 from connection_registry import (
+    track_connection_stability,
 
     register_device_connection,
 
@@ -97,7 +98,137 @@ redis_client = get_redis_client()
 main_event_loop = asyncio.get_event_loop()
 
 
+# Database helper functions to ensure all DB calls are non-blocking
+async def db_find_one(collection, query, projection=None):
+    """Non-blocking wrapper for collection.find_one()"""
+    if projection:
+        return await asyncio.to_thread(collection.find_one, query, projection)
+    return await asyncio.to_thread(collection.find_one, query)
+
+
+async def db_update_one(collection, query, update):
+    """Non-blocking wrapper for collection.update_one()"""
+    return await asyncio.to_thread(collection.update_one, query, update)
+
+
+async def db_find(collection, query, projection=None):
+    """Non-blocking wrapper for collection.find() - returns list"""
+    if projection:
+        return await asyncio.to_thread(lambda: list(collection.find(query, projection)))
+    return await asyncio.to_thread(lambda: list(collection.find(query)))
+
+
+async def db_bulk_write(collection, operations):
+    """Non-blocking wrapper for collection.bulk_write()"""
+    return await asyncio.to_thread(collection.bulk_write, operations)
+
+
+# Task cache for frequently accessed data
+class TaskCache:
+    """Simple TTL-based cache for task lookups"""
+    def __init__(self, ttl_seconds=30):
+        self._cache = {}
+        self._ttl = ttl_seconds
+    
+    async def get_task(self, task_id: str, projection=None) -> dict:
+        """Get task from cache or database"""
+        now = time.time()
+        
+        # Check cache
+        if task_id in self._cache:
+            cached, timestamp = self._cache[task_id]
+            if now - timestamp < self._ttl:
+                return cached
+        
+        # Fetch from database
+        task = await db_find_one(tasks_collection, {"id": task_id}, projection)
+        
+        if task:
+            self._cache[task_id] = (task, now)
+        
+        return task
+    
+    def invalidate(self, task_id: str):
+        """Invalidate cache entry for a task"""
+        self._cache.pop(task_id, None)
+    
+    def clear(self):
+        """Clear entire cache"""
+        self._cache.clear()
+
+
+# Global task cache instance
+task_cache = TaskCache(ttl_seconds=30)
+
+
 # Helper function to check if current worker is the scheduler leader
+async def cleanup_task_jobs(task_id: str):
+    """
+    Remove all scheduler jobs associated with a task.
+    This includes weekly jobs, reminder jobs, and command jobs.
+    """
+    if not is_scheduler_leader():
+        logger.debug(f"[CLEANUP] Not scheduler leader, skipping job cleanup for task {task_id}")
+        return 0
+    
+    jobs_to_remove = []
+    
+    try:
+        # Wrap scheduler.get_jobs() in to_thread to avoid blocking
+        all_jobs = await asyncio.to_thread(scheduler.get_jobs)
+        
+        for job in all_jobs:
+            job_id = job.id
+            
+            # Check weekly job pattern: weekly_{task_id}_day{day_index}_{date}
+            if job_id.startswith(f"weekly_{task_id}_"):
+                jobs_to_remove.append(job_id)
+                # Also check for associated reminder job
+                reminder_id = f"reminder_{job_id}"
+                reminder_job = await asyncio.to_thread(scheduler.get_job, reminder_id)
+                if reminder_job:
+                    jobs_to_remove.append(reminder_id)
+                continue
+            
+            # Check reminder job pattern: reminder_{job_id}
+            if job_id.startswith(f"reminder_weekly_{task_id}_"):
+                jobs_to_remove.append(job_id)
+                continue
+            
+            # Check command jobs by examining job args
+            if hasattr(job, 'args') and job.args:
+                # Command jobs have args: [device_ids, command_dict]
+                if len(job.args) >= 2:
+                    job_command = job.args[1] if isinstance(job.args[1], dict) else {}
+                    if isinstance(job_command, dict) and job_command.get("task_id") == task_id:
+                        jobs_to_remove.append(job_id)
+                        # Also check for associated reminder job
+                        reminder_id = f"reminder_{job_id}"
+                        reminder_job = await asyncio.to_thread(scheduler.get_job, reminder_id)
+                        if reminder_job:
+                            jobs_to_remove.append(reminder_id)
+                        continue
+        
+        # Remove all identified jobs
+        removed_count = 0
+        for job_id in jobs_to_remove:
+            try:
+                await asyncio.to_thread(scheduler.remove_job, job_id)
+                logger.info(f"[CLEANUP] Removed orphaned job {job_id} for deleted task {task_id}")
+                removed_count += 1
+            except Exception as e:
+                logger.warning(f"[CLEANUP] Failed to remove job {job_id}: {e}")
+        
+        if removed_count > 0:
+            logger.info(f"[CLEANUP] Cleaned up {removed_count} jobs for deleted task {task_id}")
+        
+        return removed_count
+        
+    except Exception as e:
+        logger.error(f"[CLEANUP] Error cleaning up jobs for task {task_id}: {e}")
+        return 0
+
+
 def is_scheduler_leader():
     """Check if current worker is the scheduler leader"""
     SCHEDULER_LOCK_KEY = "appilot:scheduler:leader"
@@ -305,8 +436,7 @@ class ResumeTaskCommandRequest(BaseModel):
 @device_router.post("/register_device")
 
 async def register_device_endpoint(device_data: DeviceRegistration):
-
-    return register_device(device_data)
+    return await register_device(device_data)
 
 
 def chunk_text_for_discord(text: str, max_length: int = 900) -> List[str]:
@@ -1517,6 +1647,9 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
     print(f"Device {device_id} connected to worker {WORKER_ID}")
 
     await log_all_connected_devices()
+    
+    # Track connection event for stability monitoring
+    await track_connection_stability(device_id, "connect")
 
     async def get_task_routing(task_id: str):
         if not task_id:
@@ -1535,19 +1668,55 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
         cache[task_id] = task_data or {}
         return cache[task_id]
 
+    # Track consecutive failures for graceful degradation
+    consecutive_receive_failures = 0
+    MAX_CONSECUTIVE_FAILURES = 3
+    
     try:
 
         while True:
+            # Check if device was removed by health monitor (race condition protection)
+            if device_id not in device_connections:
+                logger.info(f"[WEBSOCKET] Device {device_id} was removed by health monitor, closing connection")
+                break
 
             # Receive JSON message from client with timeout detection
             try:
-                # 60 second timeout to detect stale connections
-                data = await asyncio.wait_for(websocket.receive_text(), timeout=60.0)
+                # INCREASED: 300 seconds (5 minutes) to handle long automation tasks
+                # This should be longer than the health monitor's activity threshold
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=300.0)
+                consecutive_receive_failures = 0  # Reset on successful receive
+                
             except asyncio.TimeoutError:
-                # Connection is stale - no message received within timeout
-                print(f"[HEALTH] Device {device_id} connection timeout - no message received in 60 seconds")
-                # Break the loop to trigger disconnect handling
-                break
+                consecutive_receive_failures += 1
+                
+                # Check again if device was removed by health monitor during the timeout
+                if device_id not in device_connections:
+                    logger.info(f"[WEBSOCKET] Device {device_id} was removed by health monitor during timeout")
+                    break
+                
+                # Check last activity before disconnecting
+                device_state = connection_metadata.get(device_id, {})
+                last_activity = device_state.get("last_activity", 0)
+                time_since_activity = time.time() - last_activity
+                
+                # If recent activity exists (within 5 minutes), send a ping instead of disconnecting
+                if time_since_activity < 300:
+                    logger.debug(f"[WEBSOCKET] Device {device_id} timeout but has recent activity ({time_since_activity:.0f}s ago), sending ping")
+                    try:
+                        ping_msg = {"type": "ping", "timestamp": int(time.time() * 1000)}
+                        await websocket.send_text(json.dumps(ping_msg))
+                        continue  # Continue loop, don't disconnect
+                    except Exception as ping_err:
+                        logger.warning(f"[WEBSOCKET] Failed to send ping to {device_id}: {ping_err}")
+                        # Fall through to disconnect logic
+                
+                if consecutive_receive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    logger.warning(f"[WEBSOCKET] Device {device_id} - {MAX_CONSECUTIVE_FAILURES} consecutive timeouts, disconnecting")
+                    break
+                else:
+                    logger.debug(f"[WEBSOCKET] Device {device_id} timeout ({consecutive_receive_failures}/{MAX_CONSECUTIVE_FAILURES}), continuing")
+                    continue
 
             print(f"Message from {device_id}: {data}")
 
@@ -1614,6 +1783,9 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                         }
                         await websocket.send_text(json.dumps(pong_response))
                         print(f"Sent pong response to ({device_id})")
+                    
+                    # Track successful ping/pong for stability monitoring
+                    await track_connection_stability(device_id, "ping_success")
 
                     continue
 
@@ -1821,10 +1993,10 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 
 
 
-                    tasks_collection.update_one(
-
-                        {"id": task_id}, {"$pull": {"activeJobs": {"job_id": job_id}}}
-
+                    await db_update_one(
+                        tasks_collection,
+                        {"id": task_id}, 
+                        {"$pull": {"activeJobs": {"job_id": job_id}}}
                     )
 
 
@@ -1999,7 +2171,8 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 
         print(f"Device {device_id} disconnected from worker {WORKER_ID}")
 
-
+        # Track disconnection event for stability monitoring
+        await track_connection_stability(device_id, "disconnect")
 
         # Update MongoDB
 
@@ -2321,20 +2494,13 @@ async def send_command(
 
             command["job_id"] = job_id
 
-            schedule_single_job(
-
+            await schedule_single_job(
                 target_time_utc,
-
                 target_end_time_utc,
-
                 device_ids,
-
                 command,
-
                 job_id,
-
                 task_id,
-
             )
 
 
@@ -2428,10 +2594,8 @@ async def send_command(
 
                 command["job_id"] = job_id
 
-                schedule_single_job(
-
+                await schedule_single_job(
                     start_time, end_time, device_ids, command, job_id, task_id
-
                 )
 
             else:
@@ -3473,11 +3637,15 @@ async def send_command(
                         logger.info(f"[WEEKLY] Persisting inputs with sample block: name={sample_block.get('name')}, minDaily={sample_block.get('minFollowsDaily')}, maxDaily={sample_block.get('maxFollowsDaily')}")
                     except:
                         pass
-                await asyncio.to_thread(
-                    tasks_collection.update_one,
+                await db_update_one(
+                    tasks_collection,
                     {"id": task_id},
                     {"$set": persist_update}
                 )
+                
+                # Invalidate cache after update
+                task_cache.invalidate(task_id)
+                
                 logger.info(f"[WEEKLY] Persisted to DB: inputs={new_inputs_from_command is not None}, schedules={schedules_payload is not None}")
 
                 # NOTE: Instant caps logic DISABLED - each job applies its own caps when it runs
@@ -4486,15 +4654,13 @@ async def send_command(
 
 
 
-def register_device(device_data: DeviceRegistration):
-
-    device = device_collection.find_one({"deviceId": device_data.deviceId})
+async def register_device(device_data: DeviceRegistration):
+    device = await db_find_one(device_collection, {"deviceId": device_data.deviceId})
 
     if device:
-
         raise HTTPException(status_code=400, detail="Device already registered")
 
-    device_collection.insert_one(device_data.dict())
+    await asyncio.to_thread(device_collection.insert_one, device_data.dict())
 
     return {
 
@@ -6368,10 +6534,10 @@ async def schedule_split_jobs(
 
         # Always update activeJobs - push ALL job instances, not just one
 
-        tasks_collection.update_one(
-
-            {"id": task_id}, {"$push": {"activeJobs": {"$each": job_instances}}}
-
+        await db_update_one(
+            tasks_collection,
+            {"id": task_id}, 
+            {"$push": {"activeJobs": {"$each": job_instances}}}
         )
 
 
@@ -6784,7 +6950,8 @@ async def schedule_recurring_job(
 
         # Get updated task details for notification
 
-        task = await asyncio.to_thread(tasks_collection.find_one, {"id": task_id})
+        # Use cache for frequently accessed task data
+        task = await task_cache.get_task(task_id)
 
         # asyncio.create_task(
 
@@ -6826,7 +6993,7 @@ async def schedule_recurring_job(
 
 
 
-def schedule_single_job(
+async def schedule_single_job(
 
     start_time, end_time, device_ids, command, job_id: str, task_id: str
 
@@ -6875,21 +7042,16 @@ def schedule_single_job(
 
         # Update status only if it's not 'running' AND clear scheduledTime
 
-        tasks_collection.update_one(
-
+        await db_update_one(
+            tasks_collection,
             {"id": task_id, "status": {"$ne": "running"}},
-
             {
-
                 "$set": {
                     "status": "scheduled",
                     "nextRunTime": start_time_utc.isoformat()  # Add next run time
                 },
-
                 "$unset": {"scheduledTime": ""}  # Clear old scheduledTime
-
-            },
-
+            }
         )
 
         
@@ -6902,12 +7064,10 @@ def schedule_single_job(
 
             # Get user email from the task
 
-            task_info = tasks_collection.find_one(
-
+            task_info = await db_find_one(
+                tasks_collection,
                 {"id": task_id},
-
                 {"email": 1}
-
             )
 
             if task_info and task_info.get("email"):
@@ -6940,10 +7100,10 @@ def schedule_single_job(
 
         # Always update activeJobs
 
-        tasks_collection.update_one(
-
-            {"id": task_id}, {"$push": {"activeJobs": jobInstance}}
-
+        await db_update_one(
+            tasks_collection,
+            {"id": task_id}, 
+            {"$push": {"activeJobs": jobInstance}}
         )
 
 

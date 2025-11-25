@@ -613,14 +613,19 @@ async def lifespan(app: FastAPI):
     async def monitor_device_health():
         """Periodically ping all connected devices and mark offline if no response"""
         PING_INTERVAL = 30  # Send ping every 30 seconds
-        PING_TIMEOUT = 10   # Wait 10 seconds for pong response
+        PING_TIMEOUT = 15   # INCREASED: Wait 15 seconds for pong response
+        MAX_MISSED_PONGS = 3  # NEW: Allow 3 missed pongs before marking offline
+        ACTIVITY_GRACE_PERIOD = 180  # NEW: 3 minutes of no activity before considering stale
+        
+        # Track missed pongs per device
+        missed_pong_count = {}
         
         while True:
             try:
                 await asyncio.sleep(PING_INTERVAL)
                 
                 # Get all devices connected to this worker
-                from connection_registry import get_devices_for_this_worker, mark_device_offline
+                from connection_registry import get_devices_for_this_worker, mark_device_offline, track_connection_stability
                 from routes.deviceRegistration import device_connections, connection_metadata, active_connections
                 
                 device_ids = await get_devices_for_this_worker()
@@ -632,16 +637,24 @@ async def lifespan(app: FastAPI):
                 ping_tasks = []
                 for device_id in device_ids:
                     websocket = device_connections.get(device_id)
-                    if not websocket:
+                    if not websocket or device_id not in connection_metadata:
                         continue
                     
-                    # Check if device is still in connection_metadata
-                    if device_id not in connection_metadata:
+                    metadata = connection_metadata[device_id]
+                    last_activity = metadata.get("last_activity", 0)
+                    time_since_activity = time.time() - last_activity
+                    
+                    # NEW: Check if device has recent activity before sending ping
+                    if time_since_activity < ACTIVITY_GRACE_PERIOD:
+                        # Device is active, reset missed pong count
+                        missed_pong_count[device_id] = 0
+                        metadata["ping_response_pending"] = False
+                        logger.debug(f"[HEALTH] Device {device_id} has recent activity ({time_since_activity:.0f}s), skipping ping")
                         continue
                     
-                    # Mark that we're sending a ping
-                    connection_metadata[device_id]["last_ping_sent"] = time.time()
-                    connection_metadata[device_id]["ping_response_pending"] = True
+                    # Send ping
+                    metadata["last_ping_sent"] = time.time()
+                    metadata["ping_response_pending"] = True
                     
                     async def send_ping(ws, dev_id):
                         try:
@@ -656,6 +669,8 @@ async def lifespan(app: FastAPI):
                             logger.error(f"[HEALTH] Failed to send ping to device {dev_id}: {send_err}")
                             if dev_id in connection_metadata:
                                 connection_metadata[dev_id]["ping_response_pending"] = False
+                            # Increment missed count but don't mark offline immediately
+                            missed_pong_count[dev_id] = missed_pong_count.get(dev_id, 0) + 1
                             return
                         
                         # Wait for pong response
@@ -664,24 +679,48 @@ async def lifespan(app: FastAPI):
                         # Check if we got a response
                         if dev_id in connection_metadata:
                             metadata = connection_metadata[dev_id]
-                            last_activity = metadata.get("last_activity")
-                            if last_activity and (time.time() - last_activity) <= (PING_TIMEOUT * 2):
-                                # Device is still chatting (legacy clients may not answer server pings)
+                            
+                            # If the websocket listener already cleared the flag, treat as success
+                            if not metadata.get("ping_response_pending", False):
+                                missed_pong_count[dev_id] = 0
+                                logger.debug(f"[HEALTH] Device {dev_id} answered ping (flag cleared)")
+                                return
+                            
+                            current_activity = metadata.get("last_activity", 0)
+                            last_ping_sent = metadata.get("last_ping_sent", 0)
+                            
+                            # Check if there was ANY activity since we sent the ping
+                            if current_activity > last_ping_sent:
+                                # Device communicated, consider it alive
                                 metadata["ping_response_pending"] = False
-                                logger.debug(f"[HEALTH] Device {dev_id} skipped server ping but is still active; keeping online")
+                                missed_pong_count[dev_id] = 0
+                                logger.debug(f"[HEALTH] Device {dev_id} showed activity after ping")
                                 return
                             
                             if metadata.get("ping_response_pending", False):
-                                # No pong received - mark as offline
-                                logger.warning(f"[HEALTH] Device {dev_id} did not respond to ping - marking offline")
-                                await mark_device_offline(dev_id)
-                                # Clean up local connection
-                                if dev_id in device_connections:
+                                # No response to ping
+                                missed_pong_count[dev_id] = missed_pong_count.get(dev_id, 0) + 1
+                                count = missed_pong_count[dev_id]
+                                
+                                # Track ping failure for stability monitoring
+                                await track_connection_stability(dev_id, "ping_failure")
+                                
+                                if count >= MAX_MISSED_PONGS:
+                                    logger.warning(f"[HEALTH] Device {dev_id} missed {count} pongs - marking offline")
+                                    await mark_device_offline(dev_id)
                                     device_connections.pop(dev_id, None)
-                                if dev_id in connection_metadata:
                                     connection_metadata.pop(dev_id, None)
-                                if ws in active_connections:
-                                    active_connections.remove(ws)
+                                    if ws in active_connections:
+                                        active_connections.remove(ws)
+                                    try:
+                                        await ws.close(code=1000, reason="Health check failed - no ping response")
+                                        logger.debug(f"[HEALTH] Closed WebSocket for device {dev_id}")
+                                    except Exception as close_err:
+                                        logger.warning(f"[HEALTH] Error closing WebSocket for {dev_id}: {close_err}")
+                                    missed_pong_count.pop(dev_id, None)
+                                else:
+                                    logger.info(f"[HEALTH] Device {dev_id} missed pong ({count}/{MAX_MISSED_PONGS})")
+                                    metadata["ping_response_pending"] = False  # Reset for next cycle
                     
                     ping_tasks.append(send_ping(websocket, device_id))
                 
