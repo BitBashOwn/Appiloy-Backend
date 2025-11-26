@@ -3,6 +3,9 @@ import uuid
 import os
 import asyncio
 import json
+import random
+from enum import IntEnum
+from typing import List, Tuple
 from redis_client import get_redis_client
 from logger import logger
 
@@ -18,6 +21,17 @@ DEVICE_STALE_THRESHOLD_SECONDS = int(os.getenv("DEVICE_STALE_THRESHOLD_SECONDS",
 # Channel for all workers to listen on
 GLOBAL_COMMAND_CHANNEL = "device_commands"
 
+# Channel for device reconnection notifications
+RECONNECTION_CHANNEL = "device:reconnection"
+
+
+class CommandPriority(IntEnum):
+    """Command priority levels for queue processing"""
+    CRITICAL = 0   # stop, pause - process immediately
+    HIGH = 1       # resume, config changes
+    NORMAL = 2     # scheduled tasks (default)
+    LOW = 3        # analytics, optional updates
+
 
 # In connection_registry.py
 async def register_device_connection(device_id):
@@ -28,6 +42,19 @@ async def register_device_connection(device_id):
     # Set device as online in a separate hash for quick status checks
     await asyncio.to_thread(redis_client.hset, "device_status", device_id, "1")
     await asyncio.to_thread(redis_client.hset, "device_timestamps", device_id, timestamp)
+    
+    # Publish reconnection event to notify interested parties
+    reconnection_event = {
+        "device_id": device_id,
+        "worker_id": WORKER_ID,
+        "timestamp": timestamp
+    }
+    await asyncio.to_thread(
+        redis_client.publish,
+        RECONNECTION_CHANNEL,
+        json.dumps(reconnection_event)
+    )
+    
     return True
 
 
@@ -353,3 +380,456 @@ async def should_be_lenient_with_device(device_id: str) -> bool:
     
     # Be lenient if device has good stability score
     return stability["score"] >= 70
+
+
+# ========== Enhanced Reconnection and Retry System ==========
+
+async def wait_for_device_reconnection_pubsub(
+    device_id: str, 
+    max_wait_seconds: int = 30
+) -> bool:
+    """
+    Wait for device reconnection using Pub/Sub (more efficient than polling).
+    
+    Args:
+        device_id: The device ID to wait for
+        max_wait_seconds: Maximum time to wait (default 30 seconds)
+    
+    Returns:
+        True if device reconnected within timeout, False otherwise
+    """
+    # Check current state first
+    if await is_device_connected(device_id):
+        return True
+    
+    pubsub = redis_client.pubsub()
+    await asyncio.to_thread(pubsub.subscribe, RECONNECTION_CHANNEL)
+    
+    start_time = time.time()
+    try:
+        while (time.time() - start_time) < max_wait_seconds:
+            # Check current state again
+            if await is_device_connected(device_id):
+                return True
+            
+            # Wait for message with timeout
+            message = await asyncio.to_thread(
+                pubsub.get_message,
+                ignore_subscribe_messages=True,
+                timeout=2.0
+            )
+            
+            if message and message.get("type") == "message":
+                try:
+                    data = json.loads(message["data"])
+                    if data.get("device_id") == device_id:
+                        logger.info(f"[RECONNECT] Device {device_id} reconnected via Pub/Sub")
+                        return True
+                except (json.JSONDecodeError, KeyError):
+                    continue
+        
+        return False
+    finally:
+        await asyncio.to_thread(pubsub.unsubscribe, RECONNECTION_CHANNEL)
+        await asyncio.to_thread(pubsub.close)
+
+
+async def wait_for_device_reconnection_batch(
+    device_ids: List[str], 
+    max_wait_seconds: int = 10,
+    check_interval: float = 2.0
+) -> Tuple[List[str], List[str]]:
+    """
+    Wait for multiple devices to reconnect concurrently.
+    
+    Args:
+        device_ids: List of device IDs to wait for
+        max_wait_seconds: Maximum time to wait (default 10 seconds)
+        check_interval: How often to check for reconnection (default 2 seconds)
+    
+    Returns:
+        Tuple of (reconnected_devices, still_disconnected_devices)
+    """
+    if not device_ids:
+        return [], []
+    
+    start_time = time.time()
+    reconnected = set()
+    pending = set(device_ids)
+    
+    logger.info(f"[RECONNECT] Waiting for {len(pending)} device(s) to reconnect (max {max_wait_seconds}s)")
+    
+    # Set up Pub/Sub listener for instant notifications
+    pubsub = redis_client.pubsub()
+    await asyncio.to_thread(pubsub.subscribe, RECONNECTION_CHANNEL)
+    
+    try:
+        while pending and (time.time() - start_time) < max_wait_seconds:
+            # Check all pending devices concurrently
+            check_tasks = [is_device_connected(did) for did in pending]
+            results = await asyncio.gather(*check_tasks)
+            
+            # Process results
+            for device_id, is_connected in zip(list(pending), results):
+                if is_connected:
+                    reconnected.add(device_id)
+                    pending.discard(device_id)
+                    elapsed = time.time() - start_time
+                    logger.info(f"[RECONNECT] Device {device_id} reconnected after {elapsed:.1f}s")
+            
+            # Check Pub/Sub for instant notifications
+            if pending:
+                message = await asyncio.to_thread(
+                    pubsub.get_message,
+                    ignore_subscribe_messages=True,
+                    timeout=check_interval
+                )
+                
+                if message and message.get("type") == "message":
+                    try:
+                        data = json.loads(message["data"])
+                        reconnected_id = data.get("device_id")
+                        if reconnected_id in pending:
+                            reconnected.add(reconnected_id)
+                            pending.discard(reconnected_id)
+                            elapsed = time.time() - start_time
+                            logger.info(f"[RECONNECT] Device {reconnected_id} reconnected via Pub/Sub after {elapsed:.1f}s")
+                    except (json.JSONDecodeError, KeyError):
+                        pass
+                else:
+                    # No message, sleep for check_interval
+                    await asyncio.sleep(check_interval)
+    
+    finally:
+        await asyncio.to_thread(pubsub.unsubscribe, RECONNECTION_CHANNEL)
+        await asyncio.to_thread(pubsub.close)
+    
+    if pending:
+        logger.warning(f"[RECONNECT] {len(pending)} device(s) did not reconnect within {max_wait_seconds}s")
+    
+    return list(reconnected), list(pending)
+
+
+def calculate_next_retry_delay(retry_count: int, base_delay: int = 30) -> int:
+    """
+    Calculate delay with exponential backoff + jitter.
+    
+    Args:
+        retry_count: Current retry attempt number (0-indexed)
+        base_delay: Base delay in seconds (default 30)
+    
+    Returns:
+        Delay in seconds with jitter
+    """
+    delay = base_delay * (2 ** retry_count)
+    jitter = random.uniform(0.8, 1.2)
+    return int(delay * jitter)
+
+
+async def queue_pending_command_with_priority(
+    device_id: str, 
+    command: dict, 
+    priority: int = CommandPriority.NORMAL,
+    max_retries: int = 5,
+    expiry_seconds: int = 3600,
+    base_delay_seconds: int = 30
+) -> bool:
+    """
+    Queue a command for a disconnected device with priority support and deduplication.
+    
+    Args:
+        device_id: Device ID that should receive the command
+        command: The command to queue
+        priority: Command priority (CommandPriority enum value)
+        max_retries: Maximum number of retry attempts
+        expiry_seconds: How long to keep the command in queue (default 1 hour)
+        base_delay_seconds: Initial delay before first retry
+    
+    Returns:
+        True if command was queued, False if already exists (deduplication)
+    """
+    job_id = command.get("job_id") or str(uuid.uuid4())
+    dedup_key = f"pending_cmd_dedup:{device_id}:{job_id}"
+    
+    # Atomic check-and-set for deduplication
+    is_new = await asyncio.to_thread(
+        redis_client.set,
+        dedup_key,
+        "1",
+        nx=True,
+        ex=expiry_seconds
+    )
+    
+    if not is_new:
+        logger.debug(f"[QUEUE] Command {job_id} already queued for device {device_id}, skipping duplicate")
+        return False
+    
+    queue_key = f"pending_commands_priority:{device_id}"
+    
+    # Calculate score: priority first (lower = higher priority), then timestamp
+    score = (priority * 1_000_000_000) + time.time()
+    
+    command_data = {
+        "command": command,
+        "priority": priority,
+        "queued_at": int(time.time()),
+        "retry_count": 0,
+        "max_retries": max_retries,
+        "expiry": int(time.time()) + expiry_seconds,
+        "base_delay": base_delay_seconds,
+        "next_retry_after": int(time.time()),  # Can retry immediately on first reconnect
+        "job_id": job_id,
+    }
+    
+    # Add to sorted set
+    await asyncio.to_thread(
+        redis_client.zadd,
+        queue_key,
+        {json.dumps(command_data): score}
+    )
+    
+    # Set expiry on the queue key
+    await asyncio.to_thread(redis_client.expire, queue_key, expiry_seconds + 60)
+    
+    logger.info(f"[QUEUE] Queued command for device {device_id} (priority: {priority}, job_id: {job_id})")
+    return True
+
+
+async def _process_pending_commands_internal(device_id: str) -> int:
+    """
+    Internal function to process queued commands in priority order.
+    Must be called with distributed lock already acquired.
+    
+    Returns:
+        Number of successfully processed commands
+    """
+    queue_key = f"pending_commands_priority:{device_id}"
+    processed_count = 0
+    now = time.time()
+    
+    try:
+        # Get all commands in priority order (lowest score = highest priority)
+        commands_raw = await asyncio.to_thread(redis_client.zrange, queue_key, 0, -1, withscores=True)
+        
+        if not commands_raw:
+            return 0
+        
+        commands_to_process = []
+        commands_to_remove = []
+        
+        for cmd_json, score in commands_raw:
+            try:
+                command_data = json.loads(cmd_json)
+                
+                # Check if command expired
+                expiry = command_data.get("expiry", 0)
+                if now > expiry:
+                    commands_to_remove.append((cmd_json, command_data))
+                    logger.info(f"[QUEUE] Skipping expired command for device {device_id}")
+                    continue
+                
+                # Check if it's time to retry (respect exponential backoff)
+                next_retry_after = command_data.get("next_retry_after", 0)
+                if now < next_retry_after:
+                    # Not time to retry yet, skip
+                    continue
+                
+                # Check retry limit
+                retry_count = command_data.get("retry_count", 0)
+                max_retries = command_data.get("max_retries", 5)
+                
+                if retry_count >= max_retries:
+                    commands_to_remove.append((cmd_json, command_data))
+                    logger.warning(f"[QUEUE] Command exceeded max retries ({max_retries}) for device {device_id}")
+                    continue
+                
+                commands_to_process.append((command_data, cmd_json))
+                
+            except json.JSONDecodeError:
+                commands_to_remove.append((cmd_json, {}))
+                logger.error(f"[QUEUE] Invalid JSON in queued command for device {device_id}")
+            except Exception as e:
+                commands_to_remove.append((cmd_json, {}))
+                logger.error(f"[QUEUE] Error parsing queued command for device {device_id}: {e}")
+        
+        # Remove expired/exceeded commands
+        if commands_to_remove:
+            for cmd_json, command_data in commands_to_remove:
+                await asyncio.to_thread(redis_client.zrem, queue_key, cmd_json)
+                # Remove deduplication key
+                job_id = (command_data or {}).get("command", {}).get("job_id")
+                if job_id:
+                    dedup_key = f"pending_cmd_dedup:{device_id}:{job_id}"
+                    await asyncio.to_thread(redis_client.delete, dedup_key)
+        
+        # Process commands in priority order
+        for command_data, cmd_json in commands_to_process:
+            try:
+                command = command_data.get("command", {})
+                retry_count = command_data.get("retry_count", 0)
+                
+                # Import here to avoid circular imports
+                from routes.command_router import send_commands_to_devices
+                
+                # Retry sending the command
+                logger.info(f"[QUEUE] Retrying command for device {device_id} (attempt {retry_count + 1}/{command_data.get('max_retries', 5)})")
+                results = await send_commands_to_devices([device_id], command)
+                
+                # Remove from queue (will be re-added if failed)
+                await asyncio.to_thread(redis_client.zrem, queue_key, cmd_json)
+                
+                if device_id in results.get("success", []):
+                    logger.info(f"[QUEUE] Successfully delivered queued command to device {device_id}")
+                    processed_count += 1
+                    
+                    # Remove deduplication key on successful delivery
+                    job_id = command.get("job_id")
+                    if job_id:
+                        dedup_key = f"pending_cmd_dedup:{device_id}:{job_id}"
+                        await asyncio.to_thread(redis_client.delete, dedup_key)
+                else:
+                    # Increment retry count and re-queue if under limit
+                    new_retry_count = retry_count + 1
+                    if new_retry_count < command_data.get("max_retries", 5):
+                        # Calculate next retry delay
+                        base_delay = command_data.get("base_delay", 30)
+                        delay_seconds = calculate_next_retry_delay(new_retry_count, base_delay)
+                        
+                        command_data["retry_count"] = new_retry_count
+                        command_data["next_retry_after"] = int(now + delay_seconds)
+                        
+                        # Re-queue with updated metadata
+                        priority = command_data.get("priority", CommandPriority.NORMAL)
+                        new_score = (priority * 1_000_000_000) + now
+                        
+                        await asyncio.to_thread(
+                            redis_client.zadd,
+                            queue_key,
+                            {json.dumps(command_data): new_score}
+                        )
+                        logger.info(f"[QUEUE] Re-queued command for device {device_id} (retry {new_retry_count}/{command_data.get('max_retries', 5)}, next retry in {delay_seconds}s)")
+                    else:
+                        logger.warning(f"[QUEUE] Command failed after {new_retry_count} retries for device {device_id}")
+                        # Remove deduplication key when max retries exceeded
+                        job_id = command.get("job_id")
+                        if job_id:
+                            dedup_key = f"pending_cmd_dedup:{device_id}:{job_id}"
+                            await asyncio.to_thread(redis_client.delete, dedup_key)
+                        
+            except Exception as e:
+                logger.error(f"[QUEUE] Error processing queued command for device {device_id}: {e}")
+                # Remove failed command from queue
+                await asyncio.to_thread(redis_client.zrem, queue_key, cmd_json)
+                # Remove deduplication key on error
+                try:
+                    job_id = command_data.get("command", {}).get("job_id")
+                    if job_id:
+                        dedup_key = f"pending_cmd_dedup:{device_id}:{job_id}"
+                        await asyncio.to_thread(redis_client.delete, dedup_key)
+                except Exception:
+                    pass
+        
+    except Exception as e:
+        logger.error(f"[QUEUE] Error processing pending commands for device {device_id}: {e}")
+    
+    if processed_count > 0:
+        logger.info(f"[QUEUE] Processed {processed_count} pending commands for device {device_id}")
+    
+    return processed_count
+
+
+async def process_pending_commands_for_device(device_id: str) -> int:
+    """
+    Process pending commands for a device that just reconnected.
+    Uses distributed locking to prevent duplicate processing.
+    
+    Returns:
+        Number of commands processed
+    """
+    lock_key = f"pending_commands_lock:{device_id}"
+    lock_timeout = 60  # seconds
+    
+    # Try to acquire lock
+    lock_acquired = await asyncio.to_thread(
+        redis_client.set,
+        lock_key,
+        WORKER_ID,
+        nx=True,
+        ex=lock_timeout
+    )
+    
+    if not lock_acquired:
+        logger.debug(f"[QUEUE] Another worker is processing commands for device {device_id}")
+        return 0
+    
+    try:
+        return await _process_pending_commands_internal(device_id)
+    finally:
+        # Release lock (only if we still own it)
+        current_holder = await asyncio.to_thread(redis_client.get, lock_key)
+        current_holder_str = (
+            current_holder.decode("utf-8") if isinstance(current_holder, bytes) else str(current_holder) if current_holder else None
+        )
+        if current_holder_str == WORKER_ID:
+            await asyncio.to_thread(redis_client.delete, lock_key)
+
+
+async def cleanup_expired_commands_efficient() -> int:
+    """
+    Efficiently remove expired commands using ZREMRANGEBYSCORE (O(log N)).
+    
+    Returns:
+        Total number of expired commands removed
+    """
+    pattern = "pending_commands_priority:*"
+    keys = await asyncio.to_thread(redis_client.keys, pattern)
+    
+    now = time.time()
+    total_removed = 0
+    
+    for key in keys:
+        try:
+            # Remove all commands with expiry score < now
+            # Since score = (priority * 1_000_000_000) + timestamp, we need to check expiry field
+            # For efficiency, we'll use a different approach: get all and filter
+            
+            # Get all commands
+            commands_raw = await asyncio.to_thread(redis_client.zrange, key, 0, -1, withscores=True)
+            
+            expired_commands = []
+            # Extract device_id from key pattern: pending_commands_priority:{device_id}
+            device_id = key.replace("pending_commands_priority:", "")
+            
+            for cmd_json, score in commands_raw:
+                try:
+                    command_data = json.loads(cmd_json)
+                    expiry = command_data.get("expiry", 0)
+                    if now > expiry:
+                        expired_commands.append(cmd_json)
+                        # Remove deduplication key for expired commands
+                        job_id = command_data.get("command", {}).get("job_id")
+                        if job_id:
+                            dedup_key = f"pending_cmd_dedup:{device_id}:{job_id}"
+                            await asyncio.to_thread(redis_client.delete, dedup_key)
+                except (json.JSONDecodeError, KeyError):
+                    # Invalid command, remove it
+                    expired_commands.append(cmd_json)
+            
+            # Remove expired commands
+            if expired_commands:
+                for cmd_json in expired_commands:
+                    await asyncio.to_thread(redis_client.zrem, key, cmd_json)
+                total_removed += len(expired_commands)
+                
+                # If queue is empty, delete the key
+                remaining = await asyncio.to_thread(redis_client.zcard, key)
+                if remaining == 0:
+                    await asyncio.to_thread(redis_client.delete, key)
+                    
+        except Exception as e:
+            logger.error(f"[CLEANUP] Error cleaning queue {key}: {e}")
+    
+    if total_removed > 0:
+        logger.info(f"[CLEANUP] Removed {total_removed} expired commands")
+    
+    return total_removed

@@ -739,6 +739,77 @@ async def lifespan(app: FastAPI):
     health_monitor_task = asyncio.create_task(monitor_device_health())
     logger.info("[HEALTH] Device health monitoring task started")
 
+    # Background task for efficient cleanup of expired pending commands
+    async def cleanup_expired_commands_task():
+        """Periodically clean up expired pending commands"""
+        from connection_registry import cleanup_expired_commands_efficient
+        
+        while True:
+            try:
+                await asyncio.sleep(300)  # Run every 5 minutes
+                await cleanup_expired_commands_efficient()
+            except asyncio.CancelledError:
+                logger.info("[CLEANUP] Expired commands cleanup task cancelled")
+                break
+            except Exception as e:
+                logger.error(f"[CLEANUP] Error in expired commands cleanup: {e}")
+                await asyncio.sleep(60)  # Wait before retrying
+    
+    cleanup_task = asyncio.create_task(cleanup_expired_commands_task())
+    logger.info("[CLEANUP] Expired commands cleanup task started")
+    
+    # Background task to listen for reconnection events and process queued commands
+    async def reconnection_listener_task():
+        """Listen for device reconnection events and process queued commands"""
+        from connection_registry import (
+            RECONNECTION_CHANNEL,
+            process_pending_commands_for_device,
+            redis_client
+        )
+        import json
+        
+        pubsub = redis_client.pubsub()
+        await asyncio.to_thread(pubsub.subscribe, RECONNECTION_CHANNEL)
+        
+        logger.info("[RECONNECT] Reconnection listener task started")
+        
+        try:
+            while True:
+                try:
+                    message = await asyncio.to_thread(
+                        pubsub.get_message,
+                        ignore_subscribe_messages=True,
+                        timeout=1.0
+                    )
+                    
+                    if message and message.get("type") == "message":
+                        try:
+                            data = json.loads(message["data"])
+                            device_id = data.get("device_id")
+                            
+                            if device_id:
+                                # Process pending commands for reconnected device
+                                processed = await process_pending_commands_for_device(device_id)
+                                if processed > 0:
+                                    logger.info(f"[RECONNECT] Processed {processed} queued commands for device {device_id}")
+                        except (json.JSONDecodeError, KeyError) as e:
+                            logger.warning(f"[RECONNECT] Invalid reconnection message: {e}")
+                        except Exception as e:
+                            logger.error(f"[RECONNECT] Error processing reconnection event: {e}")
+                            
+                except Exception as e:
+                    logger.error(f"[RECONNECT] Error in reconnection listener: {e}")
+                    await asyncio.sleep(5)  # Wait before retrying
+                    
+        except asyncio.CancelledError:
+            logger.info("[RECONNECT] Reconnection listener task cancelled")
+        finally:
+            await asyncio.to_thread(pubsub.unsubscribe, RECONNECTION_CHANNEL)
+            await asyncio.to_thread(pubsub.close)
+    
+    reconnection_listener_task_instance = asyncio.create_task(reconnection_listener_task())
+    logger.info("[RECONNECT] Reconnection listener task started")
+
     asyncio.create_task(bot_instance.start_bot())
 
     yield
@@ -767,6 +838,22 @@ async def lifespan(app: FastAPI):
         health_monitor_task.cancel()
         try:
             await health_monitor_task
+        except asyncio.CancelledError:
+            pass
+    
+    # Cancel cleanup task if running
+    if 'cleanup_task' in locals() and cleanup_task and not cleanup_task.done():
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
+    
+    # Cancel reconnection listener task if running
+    if 'reconnection_listener_task_instance' in locals() and reconnection_listener_task_instance and not reconnection_listener_task_instance.done():
+        reconnection_listener_task_instance.cancel()
+        try:
+            await reconnection_listener_task_instance
         except asyncio.CancelledError:
             pass
     

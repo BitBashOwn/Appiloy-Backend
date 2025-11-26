@@ -3,10 +3,14 @@ import json
 import asyncio
 import threading
 import time
+import uuid
 from connection_registry import redis_client, WORKER_ID, GLOBAL_COMMAND_CHANNEL
 
 # Local connections managed by this worker
 device_connections = {}
+
+# ACK tracking infrastructure
+ack_responses = {}  # Maps ack_id -> {"event": asyncio.Event(), "response": dict}
 
 
 def set_device_connections(connections):
@@ -15,17 +19,65 @@ def set_device_connections(connections):
     device_connections = connections
 
 
-async def handle_local_command(device_id, command, request_id=None):
-    """Execute a command on a locally connected device"""
+async def handle_local_command(device_id, command, request_id=None, ack_timeout: float = 10.0):
+    """
+    Execute a command on a locally connected device with ACK tracking.
+    
+    Args:
+        device_id: Device ID to send command to
+        command: Command dictionary to send
+        request_id: Optional request ID for tracking
+        ack_timeout: Timeout in seconds to wait for ACK (default 10.0)
+    
+    Returns:
+        True if command sent and ACK received, False otherwise
+    """
     websocket = device_connections.get(device_id)
     result = {"success": False, "device_id": device_id, "request_id": request_id}
 
-    if websocket:
+    if not websocket:
+        if request_id:
+            redis_client.publish(f"command_response:{request_id}", json.dumps(result))
+        return False
+
+    # Generate ACK ID for tracking
+    ack_id = str(uuid.uuid4())
+    
+    # Add ack_id to command payload
+    command_with_ack = {**command, "ack_id": ack_id}
+    
+    # Create event for ACK response
+    ack_event = asyncio.Event()
+    ack_responses[ack_id] = {"event": ack_event, "response": None}
+    
+    try:
+        # Send command
+        await websocket.send_text(json.dumps(command_with_ack))
+        result["success"] = True
+        
+        # Wait for ACK with timeout
         try:
-            await websocket.send_text(json.dumps(command))
-            result["success"] = True
-        except Exception as e:
-            print(f"Error sending to device {device_id}: {str(e)}")
+            await asyncio.wait_for(ack_event.wait(), timeout=ack_timeout)
+            ack_response = ack_responses[ack_id].get("response")
+            
+            if ack_response:
+                result["success"] = ack_response.get("success", False)
+                if not result["success"]:
+                    error_msg = ack_response.get("error", "Unknown error")
+                    print(f"Device {device_id} ACK indicated failure: {error_msg}")
+            else:
+                # ACK event fired but no payload was supplied; treat as failure
+                result["success"] = False
+        except asyncio.TimeoutError:
+            print(f"ACK timeout for device {device_id} (ack_id: {ack_id})")
+            result["success"] = False
+        
+    except Exception as e:
+        print(f"Error sending to device {device_id}: {str(e)}")
+        result["success"] = False
+    finally:
+        # Clean up ACK tracking
+        ack_responses.pop(ack_id, None)
 
     # Send acknowledgment if request_id is provided
     if request_id:

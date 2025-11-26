@@ -1632,7 +1632,14 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 
     await register_device_connection(device_id)
 
-
+    # Process any pending commands for this device
+    from connection_registry import process_pending_commands_for_device
+    try:
+        processed = await process_pending_commands_for_device(device_id)
+        if processed > 0:
+            logger.info(f"[WEBSOCKET] Processed {processed} pending commands for reconnected device {device_id}")
+    except Exception as e:
+        logger.error(f"[WEBSOCKET] Error processing pending commands for {device_id}: {e}")
 
     # Update MongoDB status
 
@@ -1787,6 +1794,26 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                     # Track successful ping/pong for stability monitoring
                     await track_connection_stability(device_id, "ping_success")
 
+                    continue
+
+                # Handle command ACK messages (for all command types)
+                if message_type == "command_ack":
+                    ack_id = payload.get("ack_id")
+                    if ack_id:
+                        # Import ACK tracking from command_router
+                        from routes.command_router import ack_responses
+                        
+                        if ack_id in ack_responses:
+                            ack_responses[ack_id]["response"] = {
+                                "success": payload.get("success", False),
+                                "error": payload.get("error"),
+                                "task_id": payload.get("task_id"),
+                                "job_id": payload.get("job_id"),
+                            }
+                            ack_responses[ack_id]["event"].set()
+                            print(f"Received ACK for ack_id {ack_id} from device {device_id}")
+                        else:
+                            print(f"Received ACK for unknown ack_id {ack_id} from device {device_id}")
                     continue
 
 
@@ -4888,9 +4915,40 @@ def wrapper_for_send_command(device_ids, command):
 
 
 
-async def send_command_to_devices(device_ids, command):
+def determine_command_priority(command: dict) -> int:
+    """
+    Determine command priority based on command type/action.
+    
+    Args:
+        command: Command dictionary
+    
+    Returns:
+        Priority level (CommandPriority enum value)
+    """
+    from connection_registry import CommandPriority
+    
+    # Check for stop/pause commands (CRITICAL)
+    action = command.get("action", "").lower()
+    command_type = command.get("type", "").lower()
+    
+    if action in ("stop", "pause") or command_type in ("stop", "pause"):
+        return CommandPriority.CRITICAL
+    
+    # Check for resume/config changes (HIGH)
+    if action in ("resume", "config", "update_config") or command_type in ("resume", "config"):
+        return CommandPriority.HIGH
+    
+    # Check for analytics/optional updates (LOW)
+    if action in ("analytics", "stats", "report") or command_type in ("analytics", "stats"):
+        return CommandPriority.LOW
+    
+    # Default to NORMAL for scheduled tasks
+    return CommandPriority.NORMAL
 
-    """Send command to devices with improved async handling"""
+
+async def send_command_to_devices(device_ids, command, wait_for_reconnect: bool = False, max_wait_seconds: int = 10):
+
+    """Send command to devices with improved async handling, reconnection waiting, and queue fallback"""
 
     logger.info(f"Executing command for devices: {device_ids}")
 
@@ -5413,7 +5471,84 @@ async def send_command_to_devices(device_ids, command):
         logger.info(f"Sending commands to devices: {device_ids}")
         logger.info(f"[WEEKLY-DEBUG] Command about to send - method: {command.get('method')}, dailyTarget: {command.get('dailyTarget')}, dayIndex: {command.get('dayIndex')}")
 
-        results = await send_commands_to_devices(device_ids, command)
+        # Check connection status and handle reconnection/queueing
+        from connection_registry import (
+            is_device_connected,
+            wait_for_device_reconnection_batch,
+            queue_pending_command_with_priority,
+            CommandPriority
+        )
+        from routes.command_router import send_commands_to_devices as send_commands_router
+        
+        connected_device_ids = []
+        disconnected_device_ids = []
+        
+        # Quick initial connection check for all devices
+        check_tasks = [is_device_connected(did) for did in device_ids]
+        connection_results = await asyncio.gather(*check_tasks)
+        
+        for device_id, is_connected in zip(device_ids, connection_results):
+            if is_connected:
+                connected_device_ids.append(device_id)
+            else:
+                disconnected_device_ids.append(device_id)
+        
+        results = {"success": [], "failed": [], "queued": []}
+        
+        # Send to connected devices immediately
+        if connected_device_ids:
+            send_result = await send_commands_router(connected_device_ids, command)
+            results["success"].extend(send_result.get("success", []))
+            results["failed"].extend(send_result.get("failed", []))
+        
+        # For disconnected devices: wait for reconnection OR queue
+        if disconnected_device_ids:
+            logger.info(f"[RECONNECT] {len(disconnected_device_ids)} device(s) disconnected. Waiting for reconnection...")
+            
+            reconnected_devices: List[str] = []
+            still_disconnected = disconnected_device_ids
+
+            if wait_for_reconnect and max_wait_seconds > 0:
+                # Wait for devices to reconnect (concurrent)
+                reconnected_devices, still_disconnected = await wait_for_device_reconnection_batch(
+                    disconnected_device_ids,
+                    max_wait_seconds=max_wait_seconds
+                )
+                
+                # Send to reconnected devices
+                if reconnected_devices:
+                    logger.info(f"[RECONNECT] {len(reconnected_devices)} device(s) reconnected, sending command now")
+                    send_result = await send_commands_router(reconnected_devices, command)
+                    results["success"].extend(send_result.get("success", []))
+                    results["failed"].extend(send_result.get("failed", []))
+            else:
+                still_disconnected = disconnected_device_ids
+            
+            # Queue remaining disconnected devices
+            if still_disconnected:
+                priority = determine_command_priority(command)
+                logger.info(f"[QUEUE] Queueing commands for {len(still_disconnected)} device(s) that didn't reconnect (priority: {priority})")
+                
+                for device_id in still_disconnected:
+                    was_queued = await queue_pending_command_with_priority(
+                        device_id,
+                        command,
+                        priority=priority,
+                        max_retries=5,
+                        expiry_seconds=3600,
+                        base_delay_seconds=30
+                    )
+                    if was_queued:
+                        results["queued"].append(device_id)
+                    else:
+                        # Command was already queued (deduplication prevented duplicate)
+                        logger.debug(f"[QUEUE] Command already queued for device {device_id}, skipping duplicate")
+        
+        # Update results format to match expected structure
+        if not results.get("failed"):
+            results["failed"] = []
+        if not results.get("success"):
+            results["success"] = []
 
         # Update delivery status based on results
         job_id = command.get("job_id")
