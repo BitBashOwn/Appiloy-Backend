@@ -62,6 +62,8 @@ from connection_registry import (
 
     update_device_timestamp,
 
+    clear_queued_command_for_job,
+
     WORKER_ID,
 
 )
@@ -1814,6 +1816,15 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                             print(f"Received ACK for ack_id {ack_id} from device {device_id}")
                         else:
                             print(f"Received ACK for unknown ack_id {ack_id} from device {device_id}")
+                    
+                    if job_id:
+                        try:
+                            cleared = await clear_queued_command_for_job(device_id, job_id)
+                            if cleared:
+                                logger.info(f"[QUEUE] Cleared retries for job {job_id} after ACK from {device_id}")
+                        except Exception as ack_cleanup_error:
+                            logger.error(f"[QUEUE] Failed to clear queued retries for job {job_id} ({device_id}): {ack_cleanup_error}")
+                    
                     continue
 
 
@@ -5495,11 +5506,46 @@ async def send_command_to_devices(device_ids, command, wait_for_reconnect: bool 
         
         results = {"success": [], "failed": [], "queued": []}
         
+        async def queue_devices_with_priority(target_devices: List[str], log_reason: str) -> List[str]:
+            """Queue commands for the provided devices and return the subset successfully queued."""
+            if not target_devices:
+                return []
+            priority = determine_command_priority(command)
+            logger.info(f"[QUEUE] Queueing commands for {len(target_devices)} device(s) {log_reason} (priority: {priority})")
+            queued_devices: List[str] = []
+            for did in target_devices:
+                was_queued = await queue_pending_command_with_priority(
+                    did,
+                    command,
+                    priority=priority,
+                    max_retries=5,
+                    expiry_seconds=3600,
+                    base_delay_seconds=30
+                )
+                if was_queued:
+                    queued_devices.append(did)
+                else:
+                    logger.debug(f"[QUEUE] Command already queued for device {did}, skipping duplicate")
+            return queued_devices
+        
         # Send to connected devices immediately
         if connected_device_ids:
             send_result = await send_commands_router(connected_device_ids, command)
             results["success"].extend(send_result.get("success", []))
             results["failed"].extend(send_result.get("failed", []))
+            
+            # Devices that were online but failed mid-command should be retried via the queue
+            failed_connected_devices = [
+                device_id
+                for device_id in send_result.get("failed", [])
+                if device_id in connected_device_ids
+            ]
+            if failed_connected_devices:
+                queued_midrun = await queue_devices_with_priority(
+                    failed_connected_devices,
+                    "that disconnected or failed mid-command"
+                )
+                results["queued"].extend(queued_midrun)
         
         # For disconnected devices: wait for reconnection OR queue
         if disconnected_device_ids:
@@ -5526,23 +5572,11 @@ async def send_command_to_devices(device_ids, command, wait_for_reconnect: bool 
             
             # Queue remaining disconnected devices
             if still_disconnected:
-                priority = determine_command_priority(command)
-                logger.info(f"[QUEUE] Queueing commands for {len(still_disconnected)} device(s) that didn't reconnect (priority: {priority})")
-                
-                for device_id in still_disconnected:
-                    was_queued = await queue_pending_command_with_priority(
-                        device_id,
-                        command,
-                        priority=priority,
-                        max_retries=5,
-                        expiry_seconds=3600,
-                        base_delay_seconds=30
-                    )
-                    if was_queued:
-                        results["queued"].append(device_id)
-                    else:
-                        # Command was already queued (deduplication prevented duplicate)
-                        logger.debug(f"[QUEUE] Command already queued for device {device_id}, skipping duplicate")
+                queued_still_disconnected = await queue_devices_with_priority(
+                    still_disconnected,
+                    "that didn't reconnect"
+                )
+                results["queued"].extend(queued_still_disconnected)
         
         # Update results format to match expected structure
         if not results.get("failed"):

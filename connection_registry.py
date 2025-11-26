@@ -688,6 +688,15 @@ async def _process_pending_commands_internal(device_id: str) -> int:
                         dedup_key = f"pending_cmd_dedup:{device_id}:{job_id}"
                         await asyncio.to_thread(redis_client.delete, dedup_key)
                 else:
+                    job_id = command.get("job_id")
+                    if job_id:
+                        dedup_key = f"pending_cmd_dedup:{device_id}:{job_id}"
+                        dedup_exists = await asyncio.to_thread(redis_client.exists, dedup_key)
+                        if not dedup_exists:
+                            logger.info(f"[QUEUE] Skipping requeue for job {job_id} on device {device_id} because it was marked completed")
+                            processed_count += 1
+                            continue
+                    
                     # Increment retry count and re-queue if under limit
                     new_retry_count = retry_count + 1
                     if new_retry_count < command_data.get("max_retries", 5):
@@ -736,6 +745,66 @@ async def _process_pending_commands_internal(device_id: str) -> int:
         logger.info(f"[QUEUE] Processed {processed_count} pending commands for device {device_id}")
     
     return processed_count
+
+
+async def clear_queued_command_for_job(device_id: str, job_id: str) -> bool:
+    """
+    Remove any queued command (and its deduplication key) that matches the provided job ID.
+    Returns True if at least one queued entry was removed.
+    """
+    if not job_id:
+        return False
+    
+    queue_key = f"pending_commands_priority:{device_id}"
+    removed = False
+    
+    try:
+        commands_raw = await asyncio.to_thread(redis_client.zrange, queue_key, 0, -1)
+        if not commands_raw:
+            return await _cleanup_dedup_key(device_id, job_id, removed)
+        
+        for cmd_json in commands_raw:
+            cmd_str = (
+                cmd_json.decode("utf-8")
+                if isinstance(cmd_json, (bytes, bytearray))
+                else cmd_json
+            )
+            
+            try:
+                command_data = json.loads(cmd_str)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            
+            queued_job_id = (
+                command_data.get("command", {}).get("job_id")
+                or command_data.get("job_id")
+            )
+            
+            if queued_job_id == job_id:
+                await asyncio.to_thread(redis_client.zrem, queue_key, cmd_json)
+                removed = True
+        
+        if removed:
+            logger.info(f"[QUEUE] Cleared queued command {job_id} for device {device_id}")
+        else:
+            logger.debug(f"[QUEUE] No queued command matched job {job_id} for device {device_id}")
+    
+    except Exception as exc:
+        logger.error(f"[QUEUE] Failed to clear queued command {job_id} for device {device_id}: {exc}")
+    
+    return await _cleanup_dedup_key(device_id, job_id, removed)
+
+
+async def _cleanup_dedup_key(device_id: str, job_id: str, removed: bool) -> bool:
+    """
+    Helper to delete the deduplication key for a (device_id, job_id) pair.
+    """
+    dedup_key = f"pending_cmd_dedup:{device_id}:{job_id}"
+    try:
+        await asyncio.to_thread(redis_client.delete, dedup_key)
+    except Exception as exc:
+        logger.warning(f"[QUEUE] Failed to delete dedup key for {job_id} ({device_id}): {exc}")
+    return removed
 
 
 async def process_pending_commands_for_device(device_id: str) -> int:

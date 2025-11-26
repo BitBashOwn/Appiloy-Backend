@@ -4,6 +4,7 @@ import asyncio
 import threading
 import time
 import uuid
+import os
 from connection_registry import redis_client, WORKER_ID, GLOBAL_COMMAND_CHANNEL
 
 # Local connections managed by this worker
@@ -104,6 +105,9 @@ def publish_command(device_id, command):
     return request_id
 
 
+COMMAND_RESPONSE_TIMEOUT = float(os.getenv("COMMAND_RESPONSE_TIMEOUT", "12"))
+
+
 async def send_commands_to_devices(device_ids, command):
     """Send a command to multiple devices with confirmation tracking"""
     if not device_ids:
@@ -133,7 +137,7 @@ async def send_commands_to_devices(device_ids, command):
 
     # Wait for responses with timeout
     start_time = time.time()
-    timeout = 5.0  # 5 second timeout
+    timeout = COMMAND_RESPONSE_TIMEOUT
 
     while pending_devices and (time.time() - start_time) < timeout:
         message = pubsub.get_message(timeout=0.1)
