@@ -169,7 +169,7 @@ async def cleanup_task_jobs(task_id: str):
     Remove all scheduler jobs associated with a task.
     This includes weekly jobs, reminder jobs, and command jobs.
     """
-    if not is_scheduler_leader():
+    if not await is_scheduler_leader():
         logger.debug(f"[CLEANUP] Not scheduler leader, skipping job cleanup for task {task_id}")
         return 0
     
@@ -292,11 +292,11 @@ async def remove_jobs_for_duration(task_id: str, duration_types: Set[str]) -> in
     return len(job_ids_to_remove)
 
 
-def is_scheduler_leader():
-    """Check if current worker is the scheduler leader"""
+async def is_scheduler_leader():
+    """Check if current worker is the scheduler leader without blocking the loop"""
     SCHEDULER_LOCK_KEY = "appilot:scheduler:leader"
     try:
-        current_leader = redis_client.get(SCHEDULER_LOCK_KEY)
+        current_leader = await asyncio.to_thread(redis_client.get, SCHEDULER_LOCK_KEY)
         current_leader_str = str(current_leader) if current_leader else None
         return current_leader_str == str(WORKER_ID)
     except Exception as e:
@@ -304,7 +304,7 @@ def is_scheduler_leader():
         return False  # Assume follower if check fails
 
 
-def schedule_or_queue_job(job_id, trigger_time_utc, device_ids, command, job_name, job_type="command"):
+async def schedule_or_queue_job(job_id, trigger_time_utc, device_ids, command, job_name, job_type="command"):
     """
     Schedule a job immediately if this worker is the leader, otherwise queue it for the leader to process.
     
@@ -317,7 +317,7 @@ def schedule_or_queue_job(job_id, trigger_time_utc, device_ids, command, job_nam
         job_type: "command" for device commands, "weekly_reminder" for Discord reminders
     """
     try:
-        if is_scheduler_leader():
+        if await is_scheduler_leader():
             # Leader worker: Schedule immediately
             from apscheduler.triggers.date import DateTrigger
             
@@ -356,7 +356,7 @@ def schedule_or_queue_job(job_id, trigger_time_utc, device_ids, command, job_nam
             
             # Edge case: Check queue size to prevent overflow
             try:
-                queue_size = redis_client.llen(QUEUE_KEY)
+                queue_size = await asyncio.to_thread(redis_client.llen, QUEUE_KEY)
                 if queue_size >= QUEUE_MAX_SIZE:
                     logger.error(f"[QUEUE] ❌ Queue overflow! Size: {queue_size}, max: {QUEUE_MAX_SIZE}. Dropping job {job_id}")
                     raise HTTPException(
@@ -383,8 +383,8 @@ def schedule_or_queue_job(job_id, trigger_time_utc, device_ids, command, job_nam
             
             # Edge case: Handle Redis connection failures
             try:
-                redis_client.lpush(QUEUE_KEY, json.dumps(job_request))
-                redis_client.expire(QUEUE_KEY, 3600)  # 1 hour TTL
+                await asyncio.to_thread(redis_client.lpush, QUEUE_KEY, json.dumps(job_request))
+                await asyncio.to_thread(redis_client.expire, QUEUE_KEY, 3600)  # 1 hour TTL
                 logger.info(f"[QUEUE] ✅ Follower queued job {job_id} for leader to process")
             except Exception as redis_err:
                 logger.error(f"[QUEUE] ❌ Failed to queue job {job_id} to Redis: {redis_err}", exc_info=True)
@@ -2192,12 +2192,10 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 
                                         # Get user email from the task
 
-                                        task_user_info = tasks_collection.find_one(
-
+                                        task_user_info = await asyncio.to_thread(
+                                            tasks_collection.find_one,
                                             {"id": task_id},
-
                                             {"email": 1}
-
                                         )
 
                                         if task_user_info and task_user_info.get("email"):
@@ -2212,11 +2210,9 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                                             
                                             # Also clear specific endpoint caches for immediate refresh
 
-                                            redis_client.delete(f"tasks:list:{user_email}:*")
-
-                                            redis_client.delete(f"tasks:scheduled:{user_email}")
-
-                                            redis_client.delete(f"tasks:running:{user_email}")
+                                            await asyncio.to_thread(redis_client.delete, f"tasks:list:{user_email}:*")
+                                            await asyncio.to_thread(redis_client.delete, f"tasks:scheduled:{user_email}")
+                                            await asyncio.to_thread(redis_client.delete, f"tasks:running:{user_email}")
 
                                             
                                             
@@ -2411,7 +2407,7 @@ async def send_command(
                 job_command["runIndex"] = idx
                 
                 # Use helper function to schedule or queue
-                schedule_or_queue_job(
+                await schedule_or_queue_job(
                     job_id=job_id,
                     trigger_time_utc=run_time_utc,
                     device_ids=device_ids,
@@ -4206,7 +4202,7 @@ async def send_command(
                     # Add job to scheduler
                     try:
                         # Use helper function to schedule or queue
-                        schedule_or_queue_job(
+                        await schedule_or_queue_job(
                             job_id=job_id,
                             trigger_time_utc=start_time_utc,
                             device_ids=device_ids,
@@ -4346,7 +4342,7 @@ async def send_command(
                                         "schedule_lines": schedule_lines_payload,
                                         "time_zone": time_zone,
                                     }
-                                    schedule_or_queue_job(
+                                    await schedule_or_queue_job(
                                         job_id=reminder_job_id,
                                         trigger_time_utc=reminder_time_utc,
                                         device_ids=[],
@@ -5822,7 +5818,7 @@ async def send_command_to_devices(device_ids, command, wait_for_reconnect: bool 
                                                 )
                                                 
                                                 # Use helper function to schedule or queue
-                                                schedule_or_queue_job(
+                                                await schedule_or_queue_job(
                                                     job_id=job_id_new,
                                                     trigger_time_utc=start_time_utc,
                                                     device_ids=device_ids_for_renewal,
@@ -5921,7 +5917,7 @@ async def send_command_to_devices(device_ids, command, wait_for_reconnect: bool 
                                                                 "schedule_lines": schedule_lines_payload_renewal,
                                                                 "time_zone": time_zone,
                                                             }
-                                                            schedule_or_queue_job(
+                                                            await schedule_or_queue_job(
                                                                 job_id=reminder_job_id_renewal,
                                                                 trigger_time_utc=reminder_time_utc_renewal,
                                                                 device_ids=[],
@@ -6499,7 +6495,7 @@ async def schedule_split_jobs(
 
         try:
             # Use helper function to schedule or queue
-            schedule_or_queue_job(
+            await schedule_or_queue_job(
                 job_id=job_id,
                 trigger_time_utc=start_time_utc,
                 device_ids=device_ids,
@@ -6911,7 +6907,7 @@ async def schedule_recurring_job(
 
     try:
         # Use helper function to schedule or queue
-        schedule_or_queue_job(
+        await schedule_or_queue_job(
             job_id=new_job_id,
             trigger_time_utc=start_time_utc,
             device_ids=device_ids,
@@ -7106,7 +7102,7 @@ async def schedule_single_job(
 
     try:
         # Use helper function to schedule or queue
-        schedule_or_queue_job(
+        await schedule_or_queue_job(
             job_id=job_id,
             trigger_time_utc=start_time_utc,
             device_ids=device_ids,
