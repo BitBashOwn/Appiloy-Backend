@@ -231,6 +231,67 @@ async def cleanup_task_jobs(task_id: str):
         return 0
 
 
+async def remove_jobs_for_duration(task_id: str, duration_types: Set[str]) -> int:
+    """
+    Remove scheduler jobs for a task that match the provided duration types,
+    including their reminder jobs, and prune the corresponding entries from activeJobs.
+    """
+    if not duration_types:
+        return 0
+    
+    task = await asyncio.to_thread(
+        tasks_collection.find_one,
+        {"id": task_id},
+        {"activeJobs": 1}
+    )
+    if not task:
+        return 0
+    
+    active_jobs = task.get("activeJobs") or []
+    job_ids_to_remove: List[str] = []
+    
+    def _matches_duration(job: dict) -> bool:
+        job_duration = str(job.get("durationType") or "")
+        job_method = str(job.get("method") or "")
+        job_type = str(job.get("type") or "")
+        return (
+            (job_duration and job_duration in duration_types)
+            or (job_method and job_method in duration_types)
+            or (job_type and job_type in duration_types)
+        )
+    
+    for job in active_jobs:
+        if not isinstance(job, dict):
+            continue
+        job_id = job.get("job_id")
+        if not job_id:
+            continue
+        if not _matches_duration(job):
+            continue
+        job_ids_to_remove.append(job_id)
+        try:
+            scheduler.remove_job(job_id)
+        except Exception:
+            pass
+        try:
+            scheduler.remove_job(f"reminder_{job_id}")
+        except Exception:
+            pass
+    
+    if job_ids_to_remove:
+        await asyncio.to_thread(
+            tasks_collection.update_one,
+            {"id": task_id},
+            {"$pull": {"activeJobs": {"job_id": {"$in": job_ids_to_remove}}}}
+        )
+        logger.info(
+            f"[SCHEDULER] Removed {len(job_ids_to_remove)} job(s) for task {task_id} "
+            f"matching duration types {sorted(duration_types)}"
+        )
+    
+    return len(job_ids_to_remove)
+
+
 def is_scheduler_leader():
     """Check if current worker is the scheduler leader"""
     SCHEDULER_LOCK_KEY = "appilot:scheduler:leader"
@@ -2310,27 +2371,9 @@ async def send_command(
         # --- MultipleRunTimes scheduling ---
         if durationType == "MultipleRunTimes":
             print(f"[LOG] MultipleRunTimes detected for task {task_id}")
-            # Clear old scheduled jobs before scheduling new multiple run times
-            task = await asyncio.to_thread(
-                tasks_collection.find_one,
-                {"id": task_id},
-                {"activeJobs": 1}
-            )
-            if task and task.get("activeJobs"):
-                for old_job in task["activeJobs"]:
-                    job_id_to_remove = old_job.get("job_id")
-                    if job_id_to_remove:
-                        try:
-                            scheduler.remove_job(job_id_to_remove)
-                            print(f"[LOG] Removed old job {job_id_to_remove} from scheduler")
-                        except Exception as e:
-                            print(f"[LOG] Could not remove job {job_id_to_remove} from scheduler: {str(e)}")
-            await asyncio.to_thread(
-                tasks_collection.update_one,
-                {"id": task_id},
-                {"$set": {"activeJobs": []}}
-            )
-            print(f"[LOG] Cleared activeJobs array for task {task_id}")
+            removed_jobs = await remove_jobs_for_duration(task_id, {"MultipleRunTimes"})
+            if removed_jobs:
+                print(f"[LOG] Removed {removed_jobs} existing MultipleRunTimes jobs for task {task_id}")
 
             # Extract MultipleRunTimes info from newSchecdules
             multiple_schedule = None
@@ -2455,48 +2498,13 @@ async def send_command(
 
         if durationType in ["DurationWithExactStartTime", "ExactStartTime"]:
 
-            # Clear old scheduled jobs before scheduling new fixed start time
-
-            print(f"[LOG] Clearing old fixed start time jobs for task {task_id}")
-
-            task = await asyncio.to_thread(
-                tasks_collection.find_one,
-                {"id": task_id},
-                {"activeJobs": 1}
+            # Remove only fixed start time jobs before scheduling new one
+            removed_jobs = await remove_jobs_for_duration(
+                task_id,
+                {"DurationWithExactStartTime", "ExactStartTime"}
             )
-
-            if task and task.get("activeJobs"):
-
-                for old_job in task["activeJobs"]:
-
-                    job_id_to_remove = old_job.get("job_id")
-
-                    if job_id_to_remove:
-
-                        try:
-
-                            scheduler.remove_job(job_id_to_remove)
-
-                            print(f"[LOG] Removed old job {job_id_to_remove} from scheduler")
-
-                        except Exception as e:
-
-                            # Job might not exist in scheduler or already completed
-
-                            print(f"[LOG] Could not remove job {job_id_to_remove} from scheduler: {str(e)}")
-            
-            
-
-            # Clear activeJobs array before scheduling new job
-
-            await asyncio.to_thread(
-                tasks_collection.update_one,
-                {"id": task_id},
-                {"$set": {"activeJobs": []}}
-
-            )
-
-            print(f"[LOG] Cleared activeJobs array for task {task_id}")
+            if removed_jobs:
+                print(f"[LOG] Removed {removed_jobs} fixed start time job(s) for task {task_id}")
 
             
             
@@ -2545,44 +2553,10 @@ async def send_command(
 
         elif durationType == "DurationWithTimeWindow":
 
-            # Clear old scheduled jobs before scheduling new time window
-
-            print(f"[LOG] Clearing old time window jobs for task {task_id}")
-
-            task = tasks_collection.find_one({"id": task_id}, {"activeJobs": 1})
-
-            if task and task.get("activeJobs"):
-
-                for old_job in task["activeJobs"]:
-
-                    job_id_to_remove = old_job.get("job_id")
-
-                    if job_id_to_remove:
-
-                        try:
-
-                            scheduler.remove_job(job_id_to_remove)
-
-                            print(f"[LOG] Removed old job {job_id_to_remove} from scheduler")
-
-                        except Exception as e:
-
-                            # Job might not exist in scheduler or already completed
-
-                            print(f"[LOG] Could not remove job {job_id_to_remove} from scheduler: {str(e)}")
-            
-            
-
-            # Clear activeJobs array before scheduling new job
-
-            await asyncio.to_thread(
-                tasks_collection.update_one,
-                {"id": task_id},
-                {"$set": {"activeJobs": []}}
-
-            )
-
-            print(f"[LOG] Cleared activeJobs array for task {task_id}")
+            # Remove only time-window jobs before scheduling new one
+            removed_jobs = await remove_jobs_for_duration(task_id, {"DurationWithTimeWindow"})
+            if removed_jobs:
+                print(f"[LOG] Removed {removed_jobs} time window job(s) for task {task_id}")
 
             
             
@@ -2658,48 +2632,10 @@ async def send_command(
 
         elif durationType == "EveryDayAutomaticRun":
 
-            # Clear old scheduled jobs before scheduling new daily run
-
-            print(f"[LOG] Clearing old daily run jobs for task {task_id}")
-
-            task = await asyncio.to_thread(
-                tasks_collection.find_one,
-                {"id": task_id},
-                {"activeJobs": 1}
-            )
-
-            if task and task.get("activeJobs"):
-
-                for old_job in task["activeJobs"]:
-
-                    job_id = old_job.get("job_id")
-
-                    if job_id:
-
-                        try:
-
-                            scheduler.remove_job(job_id)
-
-                            print(f"[LOG] Removed old job {job_id} from scheduler")
-
-                        except Exception as e:
-
-                            # Job might not exist in scheduler or already completed
-
-                            print(f"[LOG] Could not remove job {job_id} from scheduler: {str(e)}")
-            
-            
-
-            # Clear activeJobs array before scheduling new job
-
-            await asyncio.to_thread(
-                tasks_collection.update_one,
-                {"id": task_id},
-                {"$set": {"activeJobs": []}}
-
-            )
-
-            print(f"[LOG] Cleared activeJobs array for task {task_id}")
+            # Remove only daily auto-run jobs before scheduling new one
+            removed_jobs = await remove_jobs_for_duration(task_id, {"EveryDayAutomaticRun"})
+            if removed_jobs:
+                print(f"[LOG] Removed {removed_jobs} daily auto-run job(s) for task {task_id}")
 
             
             
@@ -3693,37 +3629,9 @@ async def send_command(
 
                 # Clear old WEEKLY jobs before scheduling weekly plan (preserve Fixed/Daily jobs)
                 print(f"[WEEKLY] Clearing old weekly jobs for task {task_id}")
-                task = await asyncio.to_thread(
-                    tasks_collection.find_one,
-                    {"id": task_id},
-                    {"activeJobs": 1}
-                )
-                if task and task.get("activeJobs"):
-                    for old_job in task["activeJobs"]:
-                        try:
-                            if old_job.get("durationType") == "WeeklyRandomizedPlan":
-                                old_job_id = old_job.get("job_id")
-                                if old_job_id:
-                                    try:
-                                        scheduler.remove_job(old_job_id)
-                                    except Exception:
-                                        pass
-                                    # Also remove the reminder job for this weekly job if present
-                                    try:
-                                        scheduler.remove_job(f"reminder_{old_job_id}")
-                                    except Exception:
-                                        pass
-                        except Exception:
-                            pass
-                # Remove only weekly entries from activeJobs in DB
-                try:
-                    await asyncio.to_thread(
-                        tasks_collection.update_one,
-                        {"id": task_id},
-                        {"$pull": {"activeJobs": {"durationType": "WeeklyRandomizedPlan"}}}
-                    )
-                except Exception:
-                    pass
+                removed_weekly_jobs = await remove_jobs_for_duration(task_id, {"WeeklyRandomizedPlan"})
+                if removed_weekly_jobs:
+                    print(f"[WEEKLY] Removed {removed_weekly_jobs} existing weekly job(s) for task {task_id}")
 
                 # Schedule 7 jobs with random local start time 11:00–22:00, end at 22:00
                 # Also schedule "1 hour before" reminder notifications
