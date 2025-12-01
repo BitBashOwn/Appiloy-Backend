@@ -127,12 +127,10 @@ async def db_bulk_write(collection, operations):
 
 # Task cache for frequently accessed data
 class TaskCache:
-    """Simple TTL-based cache for task lookups with maximum size limit to prevent memory leaks"""
-    def __init__(self, ttl_seconds=30, max_size=1000):
+    """Simple TTL-based cache for task lookups"""
+    def __init__(self, ttl_seconds=30):
         self._cache = {}
         self._ttl = ttl_seconds
-        self._max_size = max_size
-        self._access_order = []  # Track access order for LRU eviction
     
     async def get_task(self, task_id: str, projection=None) -> dict:
         """Get task from cache or database"""
@@ -142,41 +140,23 @@ class TaskCache:
         if task_id in self._cache:
             cached, timestamp = self._cache[task_id]
             if now - timestamp < self._ttl:
-                # Update access order for LRU
-                if task_id in self._access_order:
-                    self._access_order.remove(task_id)
-                self._access_order.append(task_id)
                 return cached
-            else:
-                # Expired entry - remove it
-                self._cache.pop(task_id, None)
-                if task_id in self._access_order:
-                    self._access_order.remove(task_id)
         
         # Fetch from database
         task = await db_find_one(tasks_collection, {"id": task_id}, projection)
         
         if task:
-            # Evict oldest entries if cache is at max size
-            while len(self._cache) >= self._max_size and self._access_order:
-                oldest_task_id = self._access_order.pop(0)
-                self._cache.pop(oldest_task_id, None)
-            
             self._cache[task_id] = (task, now)
-            self._access_order.append(task_id)
         
         return task
     
     def invalidate(self, task_id: str):
         """Invalidate cache entry for a task"""
         self._cache.pop(task_id, None)
-        if task_id in self._access_order:
-            self._access_order.remove(task_id)
     
     def clear(self):
         """Clear entire cache"""
         self._cache.clear()
-        self._access_order.clear()
 
 
 # Global task cache instance
@@ -2289,39 +2269,30 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
         # Track disconnection event for stability monitoring
         await track_connection_stability(device_id, "disconnect")
 
-    except Exception as ws_error:
-        # Handle any other unexpected errors during WebSocket operation
-        logger.error(f"[WEBSOCKET] Unexpected error for device {device_id}: {ws_error}", exc_info=True)
-        # Track disconnection event for stability monitoring
-        await track_connection_stability(device_id, "disconnect_error")
-    
-    finally:
-        # Always perform cleanup regardless of how the connection ended
-        # This ensures resources are properly released even if an exception occurs mid-operation
-        try:
-            # Update MongoDB status
-            await asyncio.to_thread(
-                device_collection.update_one,
-                {"deviceId": device_id},
-                {"$set": {"status": False}},
-            )
+        # Update MongoDB
 
-            # Clean up local connections safely (other tasks may have already removed them)
-            if websocket in active_connections:
-                active_connections.remove(websocket)
-            else:
-                logger.debug(f"[WEBSOCKET] Socket for {device_id} already removed from active_connections")
+        await asyncio.to_thread(
+            device_collection.update_one,
+            {"deviceId": device_id},
+            {"$set": {"status": False}},
+        )
 
-            device_connections.pop(device_id, None)
-            connection_metadata.pop(device_id, None)
 
-            # Unregister from Redis
-            await unregister_device_connection(device_id)
-            
-            logger.info(f"[WEBSOCKET] Cleanup completed for device {device_id}")
-        except Exception as cleanup_error:
-            # Log cleanup errors but don't raise - we're already in cleanup
-            logger.error(f"[WEBSOCKET] Error during cleanup for device {device_id}: {cleanup_error}", exc_info=True)
+
+        # Clean up local connections safely (other tasks may have already removed them)
+        if websocket in active_connections:
+            active_connections.remove(websocket)
+        else:
+            logger.debug(f"[WEBSOCKET] Socket for {device_id} already removed from active_connections")
+
+        device_connections.pop(device_id, None)
+        connection_metadata.pop(device_id, None)
+
+
+
+        # Unregister from Redis
+
+        await unregister_device_connection(device_id)
 
 
 
@@ -4806,8 +4777,6 @@ def wrapper_for_send_command(device_ids, command):
         logger.info(f"[SCHEDULER-JOB] ⏭️ Skipping job {job_id} - already being executed by worker {current_executor}")
         return None
     
-    # Track that we successfully acquired the lock - only release if we own it
-    lock_owner = WORKER_ID
     logger.info(f"[SCHEDULER-JOB] 🔒 Lock acquired for job {job_id} by worker {WORKER_ID}")
     
     try:
@@ -4846,24 +4815,16 @@ def wrapper_for_send_command(device_ids, command):
         raise  # Re-raise to let APScheduler handle it
     finally:
         # Always release the lock after execution (or on error)
-        # Only attempt release if we actually acquired the lock
-        if lock_acquired and lock_owner == WORKER_ID:
-            try:
-                # Verify we still own the lock before releasing (defensive check)
-                current_lock_value = redis_client.get(lock_key)
-                # Handle both string and bytes return types from Redis
-                current_lock_value_str = (
-                    current_lock_value.decode("utf-8") if isinstance(current_lock_value, bytes)
-                    else str(current_lock_value) if current_lock_value else None
-                )
-                
-                if current_lock_value_str == str(WORKER_ID):
-                    redis_client.delete(lock_key)
-                    logger.info(f"[SCHEDULER-JOB] 🔓 Lock released for job {job_id} by worker {WORKER_ID}")
-                else:
-                    logger.warning(f"[SCHEDULER-JOB] ⚠️ Lock for job {job_id} was already released or taken by another worker (current owner: {current_lock_value_str})")
-            except Exception as lock_err:
-                logger.warning(f"[SCHEDULER-JOB] ⚠️ Failed to release lock for job {job_id}: {lock_err}", exc_info=True)
+        try:
+            # Only delete if we still own the lock (check value matches our worker ID)
+            current_lock_value = redis_client.get(lock_key)
+            if current_lock_value == WORKER_ID:
+                redis_client.delete(lock_key)
+                logger.info(f"[SCHEDULER-JOB] 🔓 Lock released for job {job_id}")
+            else:
+                logger.warning(f"[SCHEDULER-JOB] ⚠️ Lock for job {job_id} was already released or taken by another worker")
+        except Exception as lock_err:
+            logger.warning(f"[SCHEDULER-JOB] ⚠️ Failed to release lock for job {job_id}: {lock_err}")
 
 
 
