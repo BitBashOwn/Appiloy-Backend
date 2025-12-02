@@ -2355,13 +2355,10 @@ async def send_command(
             {"$set": update_fields}
         )
 
-
+    # Wrap all durationType scheduling branches in a single try/except
     try:
-
         user_tz = pytz.timezone(time_zone)
-
         now = datetime.now(user_tz)
-
         print(f"Current time in {time_zone}: {now}")
 
         # --- MultipleRunTimes scheduling ---
@@ -2642,44 +2639,47 @@ async def send_command(
 
 
         elif durationType == "WeeklyRandomizedPlan":
-            try:
-                logger.info("[WEEKLY] WeeklyRandomizedPlan detected; extracting weekly fields...")
+            logger.info("[WEEKLY] WeeklyRandomizedPlan detected; extracting weekly fields...")
 
-                # Fetch latest task for defaults and bot id
-                task_doc = await asyncio.to_thread(
-                    tasks_collection.find_one,
-                    {"id": task_id}
-                ) or {}
-                bot_id = task_doc.get("bot")
+            # Fetch latest task for defaults and bot id
+            task_doc = await asyncio.to_thread(
+                tasks_collection.find_one,
+                {"id": task_id}
+            ) or {}
+            bot_id = task_doc.get("bot")
 
-                # Inputs: prefer newInputs, then inputs in command, then task/bot defaults
-                inputs_payload = (
-                    request.command.get("newInputs")
-                    if request.command.get("newInputs") is not None
-                    else request.command.get("inputs")
-                )
-                if inputs_payload is None:
-                    # fallback: existing task inputs or bot defaults
-                    inputs_payload = task_doc.get("inputs")
-                    if inputs_payload is None and bot_id:
-                        bot_doc = bots_collection.find_one({"id": bot_id}, {"inputs": 1}) or {}
-                        inputs_payload = bot_doc.get("inputs", [])
+            # Inputs: prefer newInputs, then inputs in command, then task/bot defaults
+            inputs_payload = (
+                request.command.get("newInputs")
+                if request.command.get("newInputs") is not None
+                else request.command.get("inputs")
+            )
+            if inputs_payload is None:
+                # fallback: existing task inputs or bot defaults
+                inputs_payload = task_doc.get("inputs")
+                if inputs_payload is None and bot_id:
+                    bot_doc = await asyncio.to_thread(
+                        bots_collection.find_one,
+                        {"id": bot_id},
+                        {"inputs": 1},
+                    ) or {}
+                    inputs_payload = bot_doc.get("inputs", [])
 
-                # Schedules: prefer newSchecdules or schedules from command, else task/bot defaults
-                schedules_payload = (
-                    request.command.get("newSchecdules")
-                    if request.command.get("newSchecdules") is not None
-                    else request.command.get("schedules")
-                )
-                if schedules_payload is None:
-                    schedules_payload = task_doc.get("schedules")
-                    if schedules_payload is None and bot_id:
-                        bot_doc = await asyncio.to_thread(
-                            bots_collection.find_one,
-                            {"id": bot_id},
-                            {"schedules": 1}
-                        ) or {}
-                        schedules_payload = bot_doc.get("schedules", [])
+            # Schedules: prefer newSchecdules or schedules from command, else task/bot defaults
+            schedules_payload = (
+                request.command.get("newSchecdules")
+                if request.command.get("newSchecdules") is not None
+                else request.command.get("schedules")
+            )
+            if schedules_payload is None:
+                schedules_payload = task_doc.get("schedules")
+                if schedules_payload is None and bot_id:
+                    bot_doc = await asyncio.to_thread(
+                        bots_collection.find_one,
+                        {"id": bot_id},
+                        {"schedules": 1}
+                    ) or {}
+                    schedules_payload = bot_doc.get("schedules", [])
 
                 # Parse weekly-specific fields from command-level
                 week_start_raw = command.get("week_start")
@@ -3840,8 +3840,70 @@ async def send_command(
                 for day_index in range(7):
                     # Get the account map for this day
                     account_map = account_method_map_by_day.get(day_index)
+
+                    # Fallback: if no device-level account map exists but the Discord summary
+                    # shows at least one active account for this day, build a map from
+                    # account_day_lookup so that the "first day" logic matches the summary.
+                    if not account_map and 'account_day_lookup' in locals() and account_day_lookup:
+                        fallback_map = {}
+                        try:
+                            # Use the same accounts that were included in the summary, when available
+                            summary_accounts = []
+                            if 'accounts_for_summary' in locals() and accounts_for_summary:
+                                summary_accounts = list(accounts_for_summary)
+                            elif 'account_usernames_for_caps' in locals() and account_usernames_for_caps:
+                                summary_accounts = list(dict.fromkeys(account_usernames_for_caps))
+                            else:
+                                summary_accounts = list(account_day_lookup.keys())
+
+                            for uname in summary_accounts:
+                                days_for_user = account_day_lookup.get(uname) or {}
+                                day_plan = days_for_user.get(day_index)
+                                if not day_plan:
+                                    continue
+
+                                is_off_day = bool(day_plan.get("isOff"))
+                                is_rest_day = bool(day_plan.get("isRest"))
+                                try:
+                                    plan_method_val = int(day_plan.get("method", 0))
+                                except (TypeError, ValueError):
+                                    plan_method_val = 0
+
+                                # Off accounts stay off
+                                if is_off_day or plan_method_val == 0:
+                                    continue
+
+                                # Rest / warmup accounts
+                                if is_rest_day or plan_method_val == 9:
+                                    fallback_map[uname] = 9
+                                    continue
+
+                                # Active accounts – mirror the same method resolution as the main map
+                                chosen_method = None
+                                if 'account_methods_from_inputs' in locals():
+                                    chosen_method = account_methods_from_inputs.get(uname)
+                                if chosen_method is None:
+                                    if 'base_day_method' in locals():
+                                        chosen_method = base_day_method
+                                    else:
+                                        chosen_method = 1
+
+                                try:
+                                    fallback_map[uname] = int(chosen_method)
+                                except (TypeError, ValueError):
+                                    fallback_map[uname] = 1
+                        except Exception as e:
+                            logger.warning(f"[WEEKLY] Failed to build fallback account map for day {day_index}: {e}")
+                            fallback_map = {}
+
+                        if fallback_map:
+                            logger.info(
+                                f"[WEEKLY] Using fallback account map for day {day_index} based on Discord summary: "
+                                f"accounts={list(fallback_map.keys())}"
+                            )
+                            account_map = fallback_map
                     
-                    # If no accounts are active/warming up, skip this day
+                    # If no accounts are active/warming up (even after fallback), skip this day
                     if not account_map:
                         continue
                         
@@ -4404,12 +4466,6 @@ async def send_command(
                         logger.info(f"[WEEKLY] Cache cleared for user {user_email} after scheduling weekly plan")
                 except Exception as cache_error:
                     logger.warning(f"[WEEKLY] Cache invalidation failed: {cache_error}")
-
-            except HTTPException:
-                raise
-            except Exception as e:
-                logger.error(f"[WEEKLY] Error scheduling weekly plan: {e}")
-                raise HTTPException(status_code=500, detail=str(e))
 
         # Schedule persistence logic for schedule_task commands
 
