@@ -126,10 +126,33 @@ def generate_weekly_targets(
     - Apply 'no two high days' rule
     - Keep totals within weekly range
     - For rest days: assign method 9 (Warmup) with randomized likes/comments/duration ranges
-    - For active days: assign method 1 (70%) or 4 (30%) randomly
+    - For active days: assign method 1 (70%) or 4 (30%) randomly (method 6 mirrors method 1 with its own cap)
     - For off days: assign method 0 (No tasks)
     """
     min_week, max_week = follow_weekly_range
+    try:
+        selected_method = int(method)
+    except (TypeError, ValueError):
+        selected_method = 1
+
+    # Method 6 is another follow-heavy workflow; keep it inside a safe 40-80 window
+    if selected_method == 6:
+        min_week, max_week = 40, 80
+
+    if min_week > max_week:
+        min_week, max_week = max_week, min_week
+    follow_weekly_range = (min_week, max_week)
+
+    method_profiles: Dict[int, Tuple[List[int], List[int]]] = {
+        1: ([1, 4], [70, 30]),
+        6: ([6, 4], [70, 30]),
+        4: ([4, 1], [70, 30]),
+    }
+    if selected_method <= 0:
+        selected_method = 1
+    if selected_method not in method_profiles:
+        method_profiles[selected_method] = ([selected_method], [1])
+    active_method_choices, active_method_weights = method_profiles[selected_method]
     min_rest, max_rest = rest_days_range
     high_day_threshold, follow_threshold = no_two_high_rule
 
@@ -308,10 +331,10 @@ def generate_weekly_targets(
                 "warmupDuration": warmup_duration
             })
         else:
-            # Active day: randomly assign method 1 (70%) or 4 (30%)
+            # Active day: randomly assign method based on the selected strategy
             # Ensure this day gets a target (should always be in day_to_target)
             target_value = day_to_target.get(d, daily_min)
-            random_method = random.choices([1, 4], weights=[70, 30])[0]
+            random_method = random.choices(active_method_choices, weights=active_method_weights)[0]
             schedule.append({
                 "dayIndex": d, 
                 "target": target_value, 
@@ -588,6 +611,7 @@ def generate_independent_schedules(
     rest_day_likes_range: Tuple[int, int] = (0, 5),
     rest_day_comments_range: Tuple[int, int] = (0, 2),
     rest_day_duration_range: Tuple[int, int] = (30, 120),
+    active_method: int = 1,
 ) -> Dict[str, List[Dict]]:
     """
     Generates a completely independent schedule for each account.
@@ -605,14 +629,14 @@ def generate_independent_schedules(
             prev_active = previous_active_days_map.get(username)
 
         # 2. Generate a UNIQUE structure (Active/Rest/Off days) for this account
-        # We use method=1 as a placeholder; specific methods are assigned inside generate_weekly_targets
-        # but we might want to customize parameters per account here if needed.
+        # Use the requested active method to drive per-day randomization.
+        # Specific per-account overrides still happen downstream.
         base_schedule = generate_weekly_targets(
             week_start_dt=week_start_dt,
             follow_weekly_range=follow_weekly_range,
             rest_days_range=rest_days_range,
             no_two_high_rule=no_two_high_rule,
-            method=1, # Default method, will be randomized inside
+            method=active_method,
             off_days_range=off_days_range,
             previous_active_days=prev_active,
             rest_day_likes_range=rest_day_likes_range,

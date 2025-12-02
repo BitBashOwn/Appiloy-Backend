@@ -2719,6 +2719,11 @@ async def send_command(
                 if method < 1 or method > 10:
                     method = 1
                 logger.info(f"[WEEKLY] Using method: {method}")
+
+                if method == 6:
+                    follow_weekly_range = (40, 80)
+                    command["followWeeklyRange"] = list(follow_weekly_range)
+                    logger.info("[WEEKLY] Method 6 selected; clamping weekly follows to 40-80")
                 if test_mode:
                     logger.warning(f"[WEEKLY] ⚠️ TEST MODE ENABLED - Scheduling with 5-minute gaps starting NOW")
 
@@ -2917,7 +2922,8 @@ async def send_command(
                         previous_active_days_map=previous_active_days_map,
                         rest_day_likes_range=rest_day_likes_range,
                         rest_day_comments_range=rest_day_comments_range,
-                        rest_day_duration_range=rest_day_duration_range
+                        rest_day_duration_range=rest_day_duration_range,
+                        active_method=method
                     )
                     
                     # Add start_local and end_local timestamps to each day entry in schedules_map
@@ -2952,8 +2958,8 @@ async def send_command(
                                         d["warmupDuration"] = preserved_warmup_duration
                                 
                 if test_mode:
-                    # In test mode, use 20-minute gaps between scheduled days
-                    gap_minutes = 20
+                    # In test mode, use 2-minute gaps between scheduled days
+                    gap_minutes = 2
                     start_time_local = local_dt + timedelta(minutes=idx * gap_minutes)
                     # For warmup-only, keep session short placeholder end; device manages day plan
                     end_time_local = start_time_local + (timedelta(minutes=1) if warmup_only_flag else timedelta(hours=11))
@@ -3146,8 +3152,8 @@ async def send_command(
                     day_method = int(d.get("method", 0 if is_off else (9 if is_rest else 1)))
                     
                     if test_mode:
-                        # In test mode, use 20-minute gaps between scheduled days
-                        gap_minutes = 20
+                        # In test mode, use 2-minute gaps between scheduled days
+                        gap_minutes = 2
                         start_time_local = local_dt + timedelta(minutes=idx * gap_minutes)
                         # For warmup-only, keep session short placeholder end; device manages day plan
                         end_time_local = start_time_local + (timedelta(minutes=1) if is_warmup_only else timedelta(hours=11))
@@ -3206,6 +3212,7 @@ async def send_command(
                         method_names = {
                             0: "Off Day",
                             1: "Method 1",
+                            6: "Method 6",
                             4: "Method 4",
                             9: "Method 9"
                         }
@@ -3790,8 +3797,12 @@ async def send_command(
                             # Log distribution
                             m1 = sum(1 for v in method_map.values() if v == 1)
                             m4 = sum(1 for v in method_map.values() if v == 4)
+                            m6 = sum(1 for v in method_map.values() if v == 6)
                             warmups = sum(1 for v in method_map.values() if v == 9)
-                            logger.info(f"[WEEKLY-METHODS] Day {di} independent account method distribution: method1={m1}, method4={m4}, warmups={warmups}")
+                            logger.info(
+                                f"[WEEKLY-METHODS] Day {di} independent account method distribution: "
+                                f"method1={m1}, method4={m4}, method6={m6}, warmups={warmups}"
+                            )
 
                     else:
                         # Old logic (Device-Centric / Single Schedule)
@@ -3812,7 +3823,11 @@ async def send_command(
                             account_method_map_by_day[di] = method_map
                             m1 = sum(1 for v in method_map.values() if v == 1)
                             m4 = sum(1 for v in method_map.values() if v == 4)
-                            logger.info(f"[WEEKLY-METHODS] Day {di} account method distribution: method1={m1}, method4={m4}")
+                            m6 = sum(1 for v in method_map.values() if v == 6)
+                            logger.info(
+                                f"[WEEKLY-METHODS] Day {di} account method distribution: "
+                                f"method1={m1}, method4={m4}, method6={m6}"
+                            )
 
                 # (Merged per-account method details into the main summary above; no separate method map message)
 
@@ -3834,7 +3849,7 @@ async def send_command(
                     # If any account is active (1 or 4), the device runs in active mode.
                     # If all accounts are warming up (9), the device runs in warmup mode.
                     
-                    active_methods = [m for m in account_map.values() if m in (1, 4)]
+                    active_methods = [m for m in account_map.values() if m in (1, 4, 6)]
                     warmup_methods = [m for m in account_map.values() if m == 9]
                     
                     if active_methods:
@@ -4001,8 +4016,10 @@ async def send_command(
                             if account_method_map:
                                 method1_count = sum(1 for m in account_method_map.values() if m == 1)
                                 method4_count = sum(1 for m in account_method_map.values() if m == 4)
+                                method6_count = sum(1 for m in account_method_map.values() if m == 6)
                                 logger.info(
-                                    f"[WEEKLY-METHODS] Day {day_index} account method map attached: method1={method1_count}, method4={method4_count}"
+                                    f"[WEEKLY-METHODS] Day {day_index} account method map attached: "
+                                    f"method1={method1_count}, method4={method4_count}, method6={method6_count}"
                                 )
 
                             def compute_caps(target_value):
@@ -4075,7 +4092,7 @@ async def send_command(
                                                         blk.get("type") == "toggleAndUnFollowInputs"
                                                         or name.startswith("Unfollow Non-Followers")
                                                     )
-                                                    if chosen_method == 1:
+                                                    if chosen_method in (1, 6):
                                                         if name in follow_block_names:
                                                             set_follow_caps(blk, v)
                                                         elif is_unfollow_block:
@@ -4136,7 +4153,7 @@ async def send_command(
                                         if isinstance(blocks, list):
                                             unfollow_configured_legacy = False
                                             for blk in blocks:
-                                                if chosen_method_legacy == 1:
+                                                if chosen_method_legacy in (1, 6):
                                                     for follow_key in follow_block_names:
                                                         if follow_key in blk:
                                                             blk[follow_key] = True
