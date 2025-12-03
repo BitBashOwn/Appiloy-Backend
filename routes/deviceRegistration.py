@@ -2681,320 +2681,304 @@ async def send_command(
                     ) or {}
                     schedules_payload = bot_doc.get("schedules", [])
 
-                # Parse weekly-specific fields from command-level
-                week_start_raw = command.get("week_start")
-                follow_weekly_range = tuple(command.get("followWeeklyRange", []))
-                rest_days_range = tuple(command.get("restDaysRange", []))
-                off_days_range_raw = command.get("offDaysRange")
-                off_days_range = None
-                if isinstance(off_days_range_raw, (list, tuple)) and len(off_days_range_raw) == 2:
-                    try:
-                        off_days_range = (int(off_days_range_raw[0]), int(off_days_range_raw[1]))
-                    except Exception:
-                        off_days_range = None
-                no_two_high_rule_raw = command.get("noTwoHighRule")
-                test_mode = bool(command.get("testMode", False))  # Test mode: schedule with 2-min/5-min gaps
-                # Resolve method (prefer command-level, else schedules index 2, else default 1)
-                resolved_method = command.get("method")
+            # Parse weekly-specific fields from command-level
+            week_start_raw = command.get("week_start")
+            follow_weekly_range = tuple(command.get("followWeeklyRange", []))
+            rest_days_range = tuple(command.get("restDaysRange", []))
+            off_days_range_raw = command.get("offDaysRange")
+            off_days_range = None
+            if isinstance(off_days_range_raw, (list, tuple)) and len(off_days_range_raw) == 2:
                 try:
-                    method = int(resolved_method) if resolved_method is not None else None
+                    off_days_range = (int(off_days_range_raw[0]), int(off_days_range_raw[1]))
+                except Exception:
+                    off_days_range = None
+            no_two_high_rule_raw = command.get("noTwoHighRule")
+            test_mode = bool(command.get("testMode", False))  # Test mode: schedule with 2-min/5-min gaps
+            # Resolve method (prefer command-level, else schedules index 2, else default 1)
+            resolved_method = command.get("method")
+            try:
+                method = int(resolved_method) if resolved_method is not None else None
+            except Exception:
+                method = None
+            if method is None:
+                try:
+                    sched_inputs = None
+                    if isinstance(schedules_payload, dict) and isinstance(schedules_payload.get("inputs"), list):
+                        sched_inputs = schedules_payload.get("inputs")
+                    elif isinstance(schedules_payload, list):
+                        sched_inputs = schedules_payload
+                    if sched_inputs and len(sched_inputs) >= 3 and isinstance(sched_inputs[2], dict):
+                        maybe_method = sched_inputs[2].get("method")
+                        if maybe_method is not None and str(maybe_method).strip() != "":
+                            method = int(maybe_method)
                 except Exception:
                     method = None
-                if method is None:
-                    try:
-                        sched_inputs = None
-                        if isinstance(schedules_payload, dict) and isinstance(schedules_payload.get("inputs"), list):
-                            sched_inputs = schedules_payload.get("inputs")
-                        elif isinstance(schedules_payload, list):
-                            sched_inputs = schedules_payload
-                        if sched_inputs and len(sched_inputs) >= 3 and isinstance(sched_inputs[2], dict):
-                            maybe_method = sched_inputs[2].get("method")
-                            if maybe_method is not None and str(maybe_method).strip() != "":
-                                method = int(maybe_method)
-                    except Exception:
-                        method = None
-                if method is None:
-                    method = 1
-                # Clamp method to 1-10 range; rest days will use 9 automatically
-                if method < 1 or method > 10:
-                    method = 1
-                logger.info(f"[WEEKLY] Using method: {method}")
+            if method is None:
+                method = 1
+            # Clamp method to 1-10 range; rest days will use 9 automatically
+            if method < 1 or method > 10:
+                method = 1
+            logger.info(f"[WEEKLY] Using method: {method}")
 
-                if method == 6:
-                    follow_weekly_range = (40, 80)
-                    command["followWeeklyRange"] = list(follow_weekly_range)
-                    logger.info("[WEEKLY] Method 6 selected; clamping weekly follows to 40-80")
-                if test_mode:
-                    logger.warning(f"[WEEKLY] ⚠️ TEST MODE ENABLED - Scheduling with 5-minute gaps starting NOW")
+            if method == 6:
+                follow_weekly_range = (40, 80)
+                command["followWeeklyRange"] = list(follow_weekly_range)
+                logger.info("[WEEKLY] Method 6 selected; clamping weekly follows to 40-80")
+            if test_mode:
+                logger.warning(f"[WEEKLY] ⚠️ TEST MODE ENABLED - Scheduling with 5-minute gaps starting NOW")
 
-                # Warmup-only support: allow missing weekly ranges and week_start
-                warmup_only_flag = bool(command.get("warmupOnly", False))
-                # Default weekly warmup to TEST mode unless explicitly provided
-                # if warmup_only_flag and ("testMode" not in command):
-                #     test_mode = True
-                #     logger.warning("[WEEKLY] Defaulting to TEST MODE for warmup-only weekly plan")
-                if warmup_only_flag:
-                    # Provide safe defaults if missing
-                    if len(follow_weekly_range) != 2:
-                        follow_weekly_range = (0, 0)
-                    if len(rest_days_range) != 2:
-                        rest_days_range = (4, 4)
-                    if not off_days_range_raw:
-                        off_days_range_raw = (3, 3)
-                else:
-                    if not week_start_raw or len(follow_weekly_range) != 2 or len(rest_days_range) != 2:
-                        raise HTTPException(
-                            status_code=400,
-                            detail="Weekly data not found in schedules OR command-level fields",
-                        )
-
-                # Resolve no_two_high_rule (default if missing)
-                def _coerce_pair(val):
-                    try:
-                        a, b = val
-                        return (int(a), int(b))
-                    except Exception:
-                        return None
-                no_two_high_rule = _coerce_pair(no_two_high_rule_raw) if isinstance(no_two_high_rule_raw, (list, tuple)) else None
-                if not off_days_range:
-                    try:
-                        sched_inputs = None
-                        if isinstance(schedules_payload, dict) and isinstance(schedules_payload.get("inputs"), list):
-                            sched_inputs = schedules_payload.get("inputs")
-                        elif isinstance(schedules_payload, list):
-                            sched_inputs = schedules_payload
-                        if sched_inputs and len(sched_inputs) >= 3 and isinstance(sched_inputs[2], dict):
-                            existing_weekly = sched_inputs[2].get("weeklyData", {})
-                            off_pair = existing_weekly.get("offDaysRange")
-                            if isinstance(off_pair, (list, tuple)) and len(off_pair) == 2:
-                                try:
-                                    off_days_range = (int(off_pair[0]), int(off_pair[1]))
-                                except Exception:
-                                    off_days_range = None
-                    except Exception:
-                        off_days_range = None
-                if not off_days_range:
-                    off_days_range = (1, 1)
-
-                if not no_two_high_rule:
-                    # Try fallback from schedules payload index 2 if present
-                    try:
-                        sched_inputs = None
-                        if isinstance(schedules_payload, dict) and isinstance(schedules_payload.get("inputs"), list):
-                            sched_inputs = schedules_payload.get("inputs")
-                        elif isinstance(schedules_payload, list):
-                            sched_inputs = schedules_payload
-                        if sched_inputs and len(sched_inputs) >= 3 and isinstance(sched_inputs[2], dict):
-                            high_val = sched_inputs[2].get("noTwoHighHigh")
-                            follow_val = sched_inputs[2].get("noTwoHighFollow")
-                            if high_val not in (None, "") and follow_val not in (None, ""):
-                                no_two_high_rule = _coerce_pair([high_val, follow_val])
-                    except Exception:
-                        no_two_high_rule = None
-                if not no_two_high_rule:
-                    # Backend default
-                    no_two_high_rule = (27, 23)
-
-                # Parse week_start as local midnight
-                try:
-                    # Accept YYYY-MM-DD or ISO datetime
-                    if isinstance(week_start_raw, str):
-                        clean = week_start_raw.replace("Z", "+00:00")
-                        if "T" in clean or "+" in clean:
-                            local_dt = datetime.fromisoformat(clean)
-                        else:
-                            # Date-only string
-                            local_dt = datetime.fromisoformat(clean + "T00:00:00")
-                    else:
-                        # For warmup-only, allow missing week_start and use current time
-                        if warmup_only_flag:
-                            local_dt = datetime.now(pytz.timezone(time_zone))
-                        else:
-                            raise ValueError("Invalid week_start")
-
-                    user_tz = pytz.timezone(time_zone)
-                    if local_dt.tzinfo is None:
-                        local_dt = user_tz.localize(local_dt)
-                    else:
-                        local_dt = local_dt.astimezone(user_tz)
-
-                    logger.info(f"[WEEKLY] Parsing week_start: '{week_start_raw}' → '{local_dt.isoformat()}'")
-                except Exception:
-                    raise HTTPException(status_code=400, detail="Invalid week_start format")
-
-                # Test mode: override week_start to use current time for immediate scheduling
-                if test_mode:
-                    local_dt = datetime.now(user_tz)
-                    logger.warning(f"[WEEKLY] Test mode: Overriding week_start to NOW: {local_dt.isoformat()}")
-
-                # Calculate and log daily bounds
-                bounds = calculate_daily_bounds(
-                    (int(follow_weekly_range[0]), int(follow_weekly_range[1])),
-                    (int(rest_days_range[0]), int(rest_days_range[1])),
-                    (int(no_two_high_rule[0]), int(no_two_high_rule[1])),
-                    (int(off_days_range[0]), int(off_days_range[1])),
-                )
-                logger.info(
-                    f"[WEEKLY] Weekly Constraints: Total range: {follow_weekly_range[0]}-{follow_weekly_range[1]} follows/week | Rest days: {rest_days_range[0]}-{rest_days_range[1]} | NoTwoHighRule: {no_two_high_rule} | Calculated daily bounds: {bounds['daily_min']}-{bounds['daily_max']} follows/day"
-                )
-
-                # Generate and validate schedule
-                # Default ranges for rest day likes, comments, and duration (can be made configurable later)
-                rest_day_likes_range = (4, 10)  # 4-10 likes per rest day
-                rest_day_comments_range = (1, 3)  # 1-3 comments per rest day
-                rest_day_duration_range = (30, 120)  # 30-120 minutes per rest day
-                
-                previous_active_days_map: Optional[Dict[str, Set[int]]] = None
-                
-                # Extract account usernames for per-account scheduling
-                account_usernames_for_caps = []
-                try:
-                    new_inputs_obj_caps = command.get("newInputs")
-                    if isinstance(new_inputs_obj_caps, dict):
-                        wrapper_inputs_caps = new_inputs_obj_caps.get("inputs", [])
-                        for wrapper_entry_caps in (wrapper_inputs_caps or []):
-                            inner_inputs_caps = wrapper_entry_caps.get("inputs", [])
-                            for node_caps in (inner_inputs_caps or []):
-                                if isinstance(node_caps, dict) and node_caps.get("type") == "instagrmFollowerBotAcountWise":
-                                    for acc_caps in (node_caps.get("Accounts") or []):
-                                        uname_caps = acc_caps.get("username")
-                                        # Layer 1: Filter by frontend enabled flag - only enabled accounts get schedules
-                                        if isinstance(uname_caps, str) and acc_caps.get('enabled', True) is not False:
-                                            account_usernames_for_caps.append(uname_caps)
-                except Exception:
-                    account_usernames_for_caps = []
-
-                # Fallback: if no usernames found via newInputs, derive from legacy inputs
-                if not account_usernames_for_caps:
-                    try:
-                        legacy_inputs_arr = command.get("inputs")
-                        if isinstance(legacy_inputs_arr, list):
-                            for acct in legacy_inputs_arr:
-                                uname_legacy = acct.get("username")
-                                if isinstance(uname_legacy, str):
-                                    account_usernames_for_caps.append(uname_legacy)
-                    except Exception:
-                        pass
-                
-                # Get previous history for each account if available
-                try:
-                    sched_inputs_for_prev = None
-                    if isinstance(schedules_payload, dict) and isinstance(schedules_payload.get("inputs"), list):
-                        sched_inputs_for_prev = schedules_payload.get("inputs")
-                    elif isinstance(schedules_payload, list):
-                        sched_inputs_for_prev = schedules_payload
-                    
-                    if (
-                        sched_inputs_for_prev
-                        
-                        and len(sched_inputs_for_prev) >= 3
-                        and isinstance(sched_inputs_for_prev[2], dict)
-                    ):
-                        prev_generated_map = sched_inputs_for_prev[2].get("generatedSchedulesMap")
-                        if prev_generated_map and isinstance(prev_generated_map, dict):
-                            previous_active_days_map = {}
-                            for uname, sched in prev_generated_map.items():
-                                if isinstance(sched, list):
-                                    active_set = {
-                                        int(day.get("dayIndex"))
-                                        for day in sched
-                                        if isinstance(day, dict)
-                                        and not day.get("isRest")
-                                        and not day.get("isOff")
-                                        and day.get("dayIndex") is not None
-                                    }
-                                    if active_set:
-                                        previous_active_days_map[uname] = active_set
-                except Exception:
-                    previous_active_days_map = None
-
-                # Generate INDEPENDENT schedules for each account
-                day_windows: Dict[int, Tuple[datetime, datetime]] = {}
-
-                if account_usernames_for_caps:
-                    schedules_map = generate_independent_schedules(
-                        accounts=account_usernames_for_caps,
-                        week_start_dt=local_dt,
-                        follow_weekly_range=(int(follow_weekly_range[0]), int(follow_weekly_range[1])),
-                        rest_days_range=(int(rest_days_range[0]), int(rest_days_range[1])),
-                        no_two_high_rule=(int(no_two_high_rule[0]), int(no_two_high_rule[1])),
-                        off_days_range=(int(off_days_range[0]), int(off_days_range[1])),
-                        previous_active_days_map=previous_active_days_map,
-                        rest_day_likes_range=rest_day_likes_range,
-                        rest_day_comments_range=rest_day_comments_range,
-                        rest_day_duration_range=rest_day_duration_range,
-                        active_method=method
+            # Warmup-only support: allow missing weekly ranges and week_start
+            warmup_only_flag = bool(command.get("warmupOnly", False))
+            # Default weekly warmup to TEST mode unless explicitly provided
+            # if warmup_only_flag and ("testMode" not in command):
+            #     test_mode = True
+            #     logger.warning("[WEEKLY] Defaulting to TEST MODE for warmup-only weekly plan")
+            if warmup_only_flag:
+                # Provide safe defaults if missing
+                if len(follow_weekly_range) != 2:
+                    follow_weekly_range = (0, 0)
+                if len(rest_days_range) != 2:
+                    rest_days_range = (4, 4)
+                if not off_days_range_raw:
+                    off_days_range_raw = (3, 3)
+            else:
+                if not week_start_raw or len(follow_weekly_range) != 2 or len(rest_days_range) != 2:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Weekly data not found in schedules OR command-level fields",
                     )
-                    
-                    # Add start_local and end_local timestamps to each day entry in schedules_map
-                    if schedules_map:
-                        for uname, sched in schedules_map.items():
-                            for d in sched:
-                                idx = int(d.get("dayIndex", 0))
-                                is_rest = bool(d.get("isRest", False))
-                                is_off = bool(d.get("isOff", False))
-                                day_method = int(d.get("method", 0 if is_off else (9 if is_rest else 1)))
-                                
-                                # Preserve warmup parameters before any modifications
-                                preserved_max_likes = d.get("maxLikes")
-                                preserved_max_comments = d.get("maxComments")
-                                preserved_warmup_duration = d.get("warmupDuration")
-                                
-                                # If warmup parameters are missing for a rest day, re-randomize them
-                                # BUT skip if method is 0 (warmup was disabled due to active accounts)
-                                if (is_rest or day_method == 9) and day_method != 0:
-                                    # Ensure method is set to 9 for rest days
-                                    if is_rest and day_method != 9:
-                                        d["method"] = 9
-                                        day_method = 9
-                                    
-                                    if preserved_max_likes is None or preserved_max_comments is None or preserved_warmup_duration is None:
-                                        logger.warning(f"[WEEKLY-WARMUP] Missing warmup params for {uname} Day {idx}, re-randomizing...")
-                                        preserved_max_likes = random.randint(rest_day_likes_range[0], rest_day_likes_range[1])
-                                        preserved_max_comments = random.randint(rest_day_comments_range[0], rest_day_comments_range[1])
-                                        preserved_warmup_duration = random.randint(rest_day_duration_range[0], rest_day_duration_range[1])
-                                        d["maxLikes"] = preserved_max_likes
-                                        d["maxComments"] = preserved_max_comments
-                                        d["warmupDuration"] = preserved_warmup_duration
-                                
-                if test_mode:
-                    # In test mode, use 2-minute gaps between scheduled days
-                    gap_minutes = 2
-                    start_time_local = local_dt + timedelta(minutes=idx * gap_minutes)
-                    # For warmup-only, keep session short placeholder end; device manages day plan
-                    end_time_local = start_time_local + (timedelta(minutes=1) if warmup_only_flag else timedelta(hours=11))
+
+            # Resolve no_two_high_rule (default if missing)
+            def _coerce_pair(val):
+                try:
+                    a, b = val
+                    return (int(a), int(b))
+                except Exception:
+                    return None
+            no_two_high_rule = _coerce_pair(no_two_high_rule_raw) if isinstance(no_two_high_rule_raw, (list, tuple)) else None
+            if not off_days_range:
+                try:
+                    sched_inputs = None
+                    if isinstance(schedules_payload, dict) and isinstance(schedules_payload.get("inputs"), list):
+                        sched_inputs = schedules_payload.get("inputs")
+                    elif isinstance(schedules_payload, list):
+                        sched_inputs = schedules_payload
+                    if sched_inputs and len(sched_inputs) >= 3 and isinstance(sched_inputs[2], dict):
+                        existing_weekly = sched_inputs[2].get("weeklyData", {})
+                        off_pair = existing_weekly.get("offDaysRange")
+                        if isinstance(off_pair, (list, tuple)) and len(off_pair) == 2:
+                            try:
+                                off_days_range = (int(off_pair[0]), int(off_pair[1]))
+                            except Exception:
+                                off_days_range = None
+                except Exception:
+                    off_days_range = None
+            if not off_days_range:
+                off_days_range = (1, 1)
+
+            if not no_two_high_rule:
+                # Try fallback from schedules payload index 2 if present
+                try:
+                    sched_inputs = None
+                    if isinstance(schedules_payload, dict) and isinstance(schedules_payload.get("inputs"), list):
+                        sched_inputs = schedules_payload.get("inputs")
+                    elif isinstance(schedules_payload, list):
+                        sched_inputs = schedules_payload
+                    if sched_inputs and len(sched_inputs) >= 3 and isinstance(sched_inputs[2], dict):
+                        high_val = sched_inputs[2].get("noTwoHighHigh")
+                        follow_val = sched_inputs[2].get("noTwoHighFollow")
+                        if high_val not in (None, "") and follow_val not in (None, ""):
+                            no_two_high_rule = _coerce_pair([high_val, follow_val])
+                except Exception:
+                    no_two_high_rule = None
+            if not no_two_high_rule:
+                # Backend default
+                no_two_high_rule = (27, 23)
+
+            # Parse week_start as local midnight
+            try:
+                # Accept YYYY-MM-DD or ISO datetime
+                if isinstance(week_start_raw, str):
+                    clean = week_start_raw.replace("Z", "+00:00")
+                    if "T" in clean or "+" in clean:
+                        local_dt = datetime.fromisoformat(clean)
+                    else:
+                        # Date-only string
+                        local_dt = datetime.fromisoformat(clean + "T00:00:00")
                 else:
-                    day_local = local_dt + timedelta(days=idx)
+                    # For warmup-only, allow missing week_start and use current time
                     if warmup_only_flag:
-                        # Trigger morning window 09:10–12:00 to align device day window
-                        start_window_start = day_local.replace(hour=9, minute=10, second=0, microsecond=0)
-                        start_window_end = day_local.replace(hour=12, minute=0, second=0, microsecond=0)
+                        local_dt = datetime.now(pytz.timezone(time_zone))
                     else:
-                        start_window_start = day_local.replace(hour=11, minute=0, second=0, microsecond=0)
-                        start_window_end = day_local.replace(hour=22, minute=0, second=0, microsecond=0)
-                    window_minutes = int((start_window_end - start_window_start).total_seconds() // 60)
-                    if window_minutes > 0:
-                        random_offset = random.randint(0, window_minutes - 1)
-                        start_time_local = start_window_start + timedelta(minutes=random_offset)
-                        end_time_local = (start_time_local + timedelta(minutes=1)) if warmup_only_flag else start_window_end
-                    else:
-                        # Invalid window, skip timestamps for this entry but preserve warmup params
-                        if is_rest or day_method == 9:
-                            if preserved_max_likes is not None:
-                                d["maxLikes"] = preserved_max_likes
-                            if preserved_max_comments is not None:
-                                d["maxComments"] = preserved_max_comments
-                            if preserved_warmup_duration is not None:
-                                d["warmupDuration"] = preserved_warmup_duration
-                        start_time_local = None
-                        end_time_local = None
+                        raise ValueError("Invalid week_start")
 
-                if start_time_local and end_time_local:
-                    # Add timestamps to the day entry as ISO strings (for JSON serialization)
-                    d["start_local"] = start_time_local.isoformat()
-                    d["end_local"] = end_time_local.isoformat()
+                user_tz = pytz.timezone(time_zone)
+                if local_dt.tzinfo is None:
+                    local_dt = user_tz.localize(local_dt)
+                else:
+                    local_dt = local_dt.astimezone(user_tz)
 
-                    # Restore warmup parameters after adding timestamps (in case they were lost)
+                logger.info(f"[WEEKLY] Parsing week_start: '{week_start_raw}' → '{local_dt.isoformat()}'")
+            except Exception:
+                raise HTTPException(status_code=400, detail="Invalid week_start format")
+
+            # Test mode: override week_start to use current time for immediate scheduling
+            if test_mode:
+                local_dt = datetime.now(user_tz)
+                logger.warning(f"[WEEKLY] Test mode: Overriding week_start to NOW: {local_dt.isoformat()}")
+
+            # Calculate and log daily bounds
+            bounds = calculate_daily_bounds(
+                (int(follow_weekly_range[0]), int(follow_weekly_range[1])),
+                (int(rest_days_range[0]), int(rest_days_range[1])),
+                (int(no_two_high_rule[0]), int(no_two_high_rule[1])),
+                (int(off_days_range[0]), int(off_days_range[1])),
+            )
+            logger.info(
+                f"[WEEKLY] Weekly Constraints: Total range: {follow_weekly_range[0]}-{follow_weekly_range[1]} follows/week | Rest days: {rest_days_range[0]}-{rest_days_range[1]} | NoTwoHighRule: {no_two_high_rule} | Calculated daily bounds: {bounds['daily_min']}-{bounds['daily_max']} follows/day"
+            )
+
+            # Generate and validate schedule
+            # Default ranges for rest day likes, comments, and duration (can be made configurable later)
+            rest_day_likes_range = (4, 10)  # 4-10 likes per rest day
+            rest_day_comments_range = (1, 3)  # 1-3 comments per rest day
+            rest_day_duration_range = (30, 120)  # 30-120 minutes per rest day
+            
+            previous_active_days_map: Optional[Dict[str, Set[int]]] = None
+            
+            # Extract account usernames for per-account scheduling
+            account_usernames_for_caps = []
+            try:
+                new_inputs_obj_caps = command.get("newInputs")
+                if isinstance(new_inputs_obj_caps, dict):
+                    wrapper_inputs_caps = new_inputs_obj_caps.get("inputs", [])
+                    for wrapper_entry_caps in (wrapper_inputs_caps or []):
+                        inner_inputs_caps = wrapper_entry_caps.get("inputs", [])
+                        for node_caps in (inner_inputs_caps or []):
+                            if isinstance(node_caps, dict) and node_caps.get("type") == "instagrmFollowerBotAcountWise":
+                                for acc_caps in (node_caps.get("Accounts") or []):
+                                    uname_caps = acc_caps.get("username")
+                                    # Layer 1: Filter by frontend enabled flag - only enabled accounts get schedules
+                                    if isinstance(uname_caps, str) and acc_caps.get('enabled', True) is not False:
+                                        account_usernames_for_caps.append(uname_caps)
+            except Exception:
+                account_usernames_for_caps = []
+
+            # Fallback: if no usernames found via newInputs, derive from legacy inputs
+            if not account_usernames_for_caps:
+                try:
+                    legacy_inputs_arr = command.get("inputs")
+                    if isinstance(legacy_inputs_arr, list):
+                        for acct in legacy_inputs_arr:
+                            uname_legacy = acct.get("username")
+                            if isinstance(uname_legacy, str):
+                                account_usernames_for_caps.append(uname_legacy)
+                except Exception:
+                    pass
+            
+            # Get previous history for each account if available
+            try:
+                sched_inputs_for_prev = None
+                if isinstance(schedules_payload, dict) and isinstance(schedules_payload.get("inputs"), list):
+                    sched_inputs_for_prev = schedules_payload.get("inputs")
+                elif isinstance(schedules_payload, list):
+                    sched_inputs_for_prev = schedules_payload
+                
+                if (
+                    sched_inputs_for_prev
+                    
+                    and len(sched_inputs_for_prev) >= 3
+                    and isinstance(sched_inputs_for_prev[2], dict)
+                ):
+                    prev_generated_map = sched_inputs_for_prev[2].get("generatedSchedulesMap")
+                    if prev_generated_map and isinstance(prev_generated_map, dict):
+                        previous_active_days_map = {}
+                        for uname, sched in prev_generated_map.items():
+                            if isinstance(sched, list):
+                                active_set = {
+                                    int(day.get("dayIndex"))
+                                    for day in sched
+                                    if isinstance(day, dict)
+                                    and not day.get("isRest")
+                                    and not day.get("isOff")
+                                    and day.get("dayIndex") is not None
+                                }
+                                if active_set:
+                                    previous_active_days_map[uname] = active_set
+            except Exception:
+                previous_active_days_map = None
+
+            # Generate INDEPENDENT schedules for each account
+            day_windows: Dict[int, Tuple[datetime, datetime]] = {}
+
+            if account_usernames_for_caps:
+                schedules_map = generate_independent_schedules(
+                    accounts=account_usernames_for_caps,
+                    week_start_dt=local_dt,
+                    follow_weekly_range=(int(follow_weekly_range[0]), int(follow_weekly_range[1])),
+                    rest_days_range=(int(rest_days_range[0]), int(rest_days_range[1])),
+                    no_two_high_rule=(int(no_two_high_rule[0]), int(no_two_high_rule[1])),
+                    off_days_range=(int(off_days_range[0]), int(off_days_range[1])),
+                    previous_active_days_map=previous_active_days_map,
+                    rest_day_likes_range=rest_day_likes_range,
+                    rest_day_comments_range=rest_day_comments_range,
+                    rest_day_duration_range=rest_day_duration_range,
+                    active_method=method
+                )
+                
+                # Add start_local and end_local timestamps to each day entry in schedules_map
+                if schedules_map:
+                    for uname, sched in schedules_map.items():
+                        for d in sched:
+                            idx = int(d.get("dayIndex", 0))
+                            is_rest = bool(d.get("isRest", False))
+                            is_off = bool(d.get("isOff", False))
+                            day_method = int(d.get("method", 0 if is_off else (9 if is_rest else 1)))
+                            
+                            # Preserve warmup parameters before any modifications
+                            preserved_max_likes = d.get("maxLikes")
+                            preserved_max_comments = d.get("maxComments")
+                            preserved_warmup_duration = d.get("warmupDuration")
+                            
+                            # If warmup parameters are missing for a rest day, re-randomize them
+                            # BUT skip if method is 0 (warmup was disabled due to active accounts)
+                            if (is_rest or day_method == 9) and day_method != 0:
+                                # Ensure method is set to 9 for rest days
+                                if is_rest and day_method != 9:
+                                    d["method"] = 9
+                                    day_method = 9
+                                
+                                if preserved_max_likes is None or preserved_max_comments is None or preserved_warmup_duration is None:
+                                    logger.warning(f"[WEEKLY-WARMUP] Missing warmup params for {uname} Day {idx}, re-randomizing...")
+                                    preserved_max_likes = random.randint(rest_day_likes_range[0], rest_day_likes_range[1])
+                                    preserved_max_comments = random.randint(rest_day_comments_range[0], rest_day_comments_range[1])
+                                    preserved_warmup_duration = random.randint(rest_day_duration_range[0], rest_day_duration_range[1])
+                                    d["maxLikes"] = preserved_max_likes
+                                    d["maxComments"] = preserved_max_comments
+                                    d["warmupDuration"] = preserved_warmup_duration
+                            
+            if test_mode:
+                # In test mode, use 2-minute gaps between scheduled days
+                gap_minutes = 2
+                start_time_local = local_dt + timedelta(minutes=idx * gap_minutes)
+                # For warmup-only, keep session short placeholder end; device manages day plan
+                end_time_local = start_time_local + (timedelta(minutes=1) if warmup_only_flag else timedelta(hours=11))
+            else:
+                day_local = local_dt + timedelta(days=idx)
+                if warmup_only_flag:
+                    # Trigger morning window 09:10–12:00 to align device day window
+                    start_window_start = day_local.replace(hour=9, minute=10, second=0, microsecond=0)
+                    start_window_end = day_local.replace(hour=12, minute=0, second=0, microsecond=0)
+                else:
+                    start_window_start = day_local.replace(hour=11, minute=0, second=0, microsecond=0)
+                    start_window_end = day_local.replace(hour=22, minute=0, second=0, microsecond=0)
+                window_minutes = int((start_window_end - start_window_start).total_seconds() // 60)
+                if window_minutes > 0:
+                    random_offset = random.randint(0, window_minutes - 1)
+                    start_time_local = start_window_start + timedelta(minutes=random_offset)
+                    end_time_local = (start_time_local + timedelta(minutes=1)) if warmup_only_flag else start_window_end
+                else:
+                    # Invalid window, skip timestamps for this entry but preserve warmup params
                     if is_rest or day_method == 9:
                         if preserved_max_likes is not None:
                             d["maxLikes"] = preserved_max_likes
@@ -3002,103 +2986,119 @@ async def send_command(
                             d["maxComments"] = preserved_max_comments
                         if preserved_warmup_duration is not None:
                             d["warmupDuration"] = preserved_warmup_duration
-                    
-                    # Ensure no warmups occur on days where any account is active
-                    if schedules_map:
-                        for day_idx in range(7):
-                            has_active = False
-                            for sched in schedules_map.values():
-                                entry = next((d for d in sched if d.get("dayIndex") == day_idx), None)
-                                if entry and not entry.get("isRest") and not entry.get("isOff"):
-                                    has_active = True
-                                    break
-                            if not has_active:
-                                continue
-                            for sched in schedules_map.values():
-                                entry = next((d for d in sched if d.get("dayIndex") == day_idx), None)
-                                if entry and entry.get("isRest"):
-                                    entry["method"] = 0
-                                    entry.pop("maxLikes", None)
-                                    entry.pop("maxComments", None)
-                                    entry.pop("warmupDuration", None)
-                    
-                    # Use the first account's schedule as the "generated" schedule for backward compatibility/visuals
-                    # But the real logic will use schedules_map
-                    generated = list(schedules_map.values())[0] if schedules_map else []
-                    
-                else:
-                    # Fallback to old logic if no accounts found (shouldn't happen normally)
-                    logger.warning("[WEEKLY] No accounts found for independent scheduling, falling back to single schedule")
-                    generated = generate_weekly_targets(
-                        local_dt,
-                        (int(follow_weekly_range[0]), int(follow_weekly_range[1])),
-                        (int(rest_days_range[0]), int(rest_days_range[1])),
-                        (int(no_two_high_rule[0]), int(no_two_high_rule[1])),
-                        method,
-                        rest_day_likes_range,
-                        rest_day_comments_range,
-                        rest_day_duration_range,
-                        (int(off_days_range[0]), int(off_days_range[1])),
-                        previous_active_days=None,
-                    )
-                    schedules_map = {} # Empty map means fallback behavior
+                    start_time_local = None
+                    end_time_local = None
 
+            if start_time_local and end_time_local:
+                # Add timestamps to the day entry as ISO strings (for JSON serialization)
+                d["start_local"] = start_time_local.isoformat()
+                d["end_local"] = end_time_local.isoformat()
+
+                # Restore warmup parameters after adding timestamps (in case they were lost)
+                if is_rest or day_method == 9:
+                    if preserved_max_likes is not None:
+                        d["maxLikes"] = preserved_max_likes
+                    if preserved_max_comments is not None:
+                        d["maxComments"] = preserved_max_comments
+                    if preserved_warmup_duration is not None:
+                        d["warmupDuration"] = preserved_warmup_duration
+                
+                # Ensure no warmups occur on days where any account is active
                 if schedules_map:
-                    def _coerce_datetime(value):
-                        if isinstance(value, datetime):
-                            return value
-                        if isinstance(value, str):
-                            try:
-                                return datetime.fromisoformat(value)
-                            except ValueError:
-                                return None
-                        return None
-
                     for day_idx in range(7):
-                        starts = []
-                        ends = []
+                        has_active = False
                         for sched in schedules_map.values():
-                            if not isinstance(sched, list):
-                                continue
-                            entry = next(
-                                (d for d in sched if d.get("dayIndex") == day_idx),
-                                None,
-                            )
-                            if not entry or entry.get("isOff"):
-                                continue
-                            start_dt = _coerce_datetime(entry.get("start_local"))
-                            if start_dt:
-                                starts.append(start_dt)
-                            end_dt = _coerce_datetime(entry.get("end_local"))
-                            if end_dt:
-                                ends.append(end_dt)
-                        if starts:
-                            day_windows[day_idx] = (min(starts), max(ends))
-
-                # Ensure newInputs enabled flags reflect which accounts actually have scheduled activity
-                if schedules_map:
-                    accounts_with_activity: Set[str] = set()
-                    for uname, sched in schedules_map.items():
-                        if not isinstance(uname, str) or not isinstance(sched, list):
+                            entry = next((d for d in sched if d.get("dayIndex") == day_idx), None)
+                            if entry and not entry.get("isRest") and not entry.get("isOff"):
+                                has_active = True
+                                break
+                        if not has_active:
                             continue
-                        has_activity = any(not entry.get("isOff", False) for entry in sched if isinstance(entry, dict))
-                        if has_activity:
-                            accounts_with_activity.add(uname)
-                    if accounts_with_activity:
+                        for sched in schedules_map.values():
+                            entry = next((d for d in sched if d.get("dayIndex") == day_idx), None)
+                            if entry and entry.get("isRest"):
+                                entry["method"] = 0
+                                entry.pop("maxLikes", None)
+                                entry.pop("maxComments", None)
+                                entry.pop("warmupDuration", None)
+                
+                # Use the first account's schedule as the "generated" schedule for backward compatibility/visuals
+                # But the real logic will use schedules_map
+                generated = list(schedules_map.values())[0] if schedules_map else []
+                
+            else:
+                # Fallback to old logic if no accounts found (shouldn't happen normally)
+                logger.warning("[WEEKLY] No accounts found for independent scheduling, falling back to single schedule")
+                generated = generate_weekly_targets(
+                    local_dt,
+                    (int(follow_weekly_range[0]), int(follow_weekly_range[1])),
+                    (int(rest_days_range[0]), int(rest_days_range[1])),
+                    (int(no_two_high_rule[0]), int(no_two_high_rule[1])),
+                    method,
+                    rest_day_likes_range,
+                    rest_day_comments_range,
+                    rest_day_duration_range,
+                    (int(off_days_range[0]), int(off_days_range[1])),
+                    previous_active_days=None,
+                )
+                schedules_map = {} # Empty map means fallback behavior
+
+            if schedules_map:
+                def _coerce_datetime(value):
+                    if isinstance(value, datetime):
+                        return value
+                    if isinstance(value, str):
                         try:
-                            new_inputs_obj_enabled = command.get("newInputs")
-                            if isinstance(new_inputs_obj_enabled, dict):
-                                wrapper_inputs_enabled = new_inputs_obj_enabled.get("inputs", [])
-                                for wrapper_entry_enabled in (wrapper_inputs_enabled or []):
-                                    inner_inputs_enabled = wrapper_entry_enabled.get("inputs", [])
-                                    for node_enabled in (inner_inputs_enabled or []):
-                                        if isinstance(node_enabled, dict) and node_enabled.get("type") == "instagrmFollowerBotAcountWise":
-                                            for acc_enabled in (node_enabled.get("Accounts") or []):
-                                                uname_enabled = acc_enabled.get("username")
-                                                if isinstance(uname_enabled, str):
-                                                    acc_enabled["enabled"] = uname_enabled in accounts_with_activity
-                        except Exception as enabled_err:
-                            logger.warning(f"[WEEKLY] Failed to update enabled flags from schedules: {enabled_err}")
+                            return datetime.fromisoformat(value)
+                        except ValueError:
+                            return None
+                    return None
+
+                for day_idx in range(7):
+                    starts = []
+                    ends = []
+                    for sched in schedules_map.values():
+                        if not isinstance(sched, list):
+                            continue
+                        entry = next(
+                            (d for d in sched if d.get("dayIndex") == day_idx),
+                            None,
+                        )
+                        if not entry or entry.get("isOff"):
+                            continue
+                        start_dt = _coerce_datetime(entry.get("start_local"))
+                        if start_dt:
+                            starts.append(start_dt)
+                        end_dt = _coerce_datetime(entry.get("end_local"))
+                        if end_dt:
+                            ends.append(end_dt)
+                    if starts:
+                        day_windows[day_idx] = (min(starts), max(ends))
+
+            # Ensure newInputs enabled flags reflect which accounts actually have scheduled activity
+            if schedules_map:
+                accounts_with_activity: Set[str] = set()
+                for uname, sched in schedules_map.items():
+                    if not isinstance(uname, str) or not isinstance(sched, list):
+                        continue
+                    has_activity = any(not entry.get("isOff", False) for entry in sched if isinstance(entry, dict))
+                    if has_activity:
+                        accounts_with_activity.add(uname)
+                if accounts_with_activity:
+                    try:
+                        new_inputs_obj_enabled = command.get("newInputs")
+                        if isinstance(new_inputs_obj_enabled, dict):
+                            wrapper_inputs_enabled = new_inputs_obj_enabled.get("inputs", [])
+                            for wrapper_entry_enabled in (wrapper_inputs_enabled or []):
+                                inner_inputs_enabled = wrapper_entry_enabled.get("inputs", [])
+                                for node_enabled in (inner_inputs_enabled or []):
+                                    if isinstance(node_enabled, dict) and node_enabled.get("type") == "instagrmFollowerBotAcountWise":
+                                        for acc_enabled in (node_enabled.get("Accounts") or []):
+                                            uname_enabled = acc_enabled.get("username")
+                                            if isinstance(uname_enabled, str):
+                                                acc_enabled["enabled"] = uname_enabled in accounts_with_activity
+                    except Exception as enabled_err:
+                        logger.warning(f"[WEEKLY] Failed to update enabled flags from schedules: {enabled_err}")
 
                 # Special mode: warmup-only weekly plan (4 warmup days, 3 off days)
                 is_warmup_only = warmup_only_flag
