@@ -42,9 +42,26 @@ async def handle_local_command(device_id, command, request_id=None, ack_timeout:
         return False
 
     # Generate ACK ID for tracking
-    ack_id = str(uuid.uuid4())
-    
-    # Add ack_id to command payload
+    # IMPORTANT:
+    # - If the command already includes an ack_id (e.g. from a previous attempt),
+    #   we must reuse it so that client-side deduplication (which keys on ack_id)
+    #   can correctly treat retries as the *same* logical command.
+    # - If the command has a stable task_id + job_id pair but no ack_id,
+    #   derive a deterministic ack_id from that pair so that reconnect/retry
+    #   flows keep the same identifier across sends.
+    # - Otherwise, fall back to a random UUID.
+    ack_id = command.get("ack_id")
+    if not ack_id:
+        task_id = command.get("task_id")
+        job_id = command.get("job_id")
+        if task_id and job_id:
+            # Stable, deterministic ACK for this logical job
+            ack_id = f"{task_id}:{job_id}"
+        else:
+            # No stable identifiers available – use a random UUID
+            ack_id = str(uuid.uuid4())
+
+    # Add (or preserve) ack_id on the command payload
     command_with_ack = {**command, "ack_id": ack_id}
     
     # Create event for ACK response
