@@ -81,6 +81,7 @@ import asyncio
 import os
 import json
 import time
+import random
 from connection_registry import WORKER_ID, cleanup_stale_workers
 from Bot.discord_bot import bot_instance
 from logger import logger
@@ -416,7 +417,6 @@ async def lifespan(app: FastAPI):
     
     # Add small random delay to prevent all workers from starting simultaneously
     # This helps avoid race conditions during leader election
-    import random
     startup_delay = random.uniform(0.1, 1.0)
     logger.info(f"[SCHEDULER] ⏱️ Worker {WORKER_ID} waiting {startup_delay:.2f}s before election (startup jitter)")
     await asyncio.sleep(startup_delay)
@@ -429,6 +429,7 @@ async def lifespan(app: FastAPI):
     
     is_leader = False
     max_election_retries = 3
+    base_delay = 1.0  # Base delay in seconds for exponential backoff
     
     for attempt in range(1, max_election_retries + 1):
         try:
@@ -445,8 +446,13 @@ async def lifespan(app: FastAPI):
             logger.error(f"[SCHEDULER] ❌ Leader election attempt {attempt}/{max_election_retries} failed for worker {WORKER_ID}: {election_err}", exc_info=True)
             
             if attempt < max_election_retries:
-                retry_delay = 2 * attempt  # Exponential backoff
-                logger.info(f"[SCHEDULER] 🔄 Retrying election in {retry_delay}s...")
+                # Exponential backoff: base_delay * (2 ^ (attempt - 1))
+                # Attempt 1: 1s, Attempt 2: 2s, Attempt 3: 4s, etc.
+                retry_delay = base_delay * (2 ** (attempt - 1))
+                # Add small random jitter to prevent thundering herd
+                jitter = random.uniform(0.1, 0.5)
+                retry_delay += jitter
+                logger.info(f"[SCHEDULER] 🔄 Retrying election in {retry_delay:.2f}s (exponential backoff with jitter)...")
                 await asyncio.sleep(retry_delay)
             else:
                 logger.error(f"[SCHEDULER] ❌ All election attempts failed for worker {WORKER_ID}. Will rely on follower promotion if needed.")

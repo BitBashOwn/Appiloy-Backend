@@ -126,11 +126,14 @@ async def db_bulk_write(collection, operations):
 
 
 # Task cache for frequently accessed data
+# Task cache for frequently accessed data
 class TaskCache:
-    """Simple TTL-based cache for task lookups"""
-    def __init__(self, ttl_seconds=30):
+    """Simple TTL-based cache for task lookups with maximum size limit to prevent memory leaks"""
+    def __init__(self, ttl_seconds=30, max_size=1000):
         self._cache = {}
         self._ttl = ttl_seconds
+        self._max_size = max_size
+        self._access_order = []  # Track access order for LRU eviction
     
     async def get_task(self, task_id: str, projection=None) -> dict:
         """Get task from cache or database"""
@@ -140,23 +143,41 @@ class TaskCache:
         if task_id in self._cache:
             cached, timestamp = self._cache[task_id]
             if now - timestamp < self._ttl:
+                # Update access order for LRU
+                if task_id in self._access_order:
+                    self._access_order.remove(task_id)
+                self._access_order.append(task_id)
                 return cached
+            else:
+                # Expired entry - remove it
+                self._cache.pop(task_id, None)
+                if task_id in self._access_order:
+                    self._access_order.remove(task_id)
         
         # Fetch from database
         task = await db_find_one(tasks_collection, {"id": task_id}, projection)
         
         if task:
+            # Evict oldest entries if cache is at max size
+            while len(self._cache) >= self._max_size and self._access_order:
+                oldest_task_id = self._access_order.pop(0)
+                self._cache.pop(oldest_task_id, None)
+            
             self._cache[task_id] = (task, now)
+            self._access_order.append(task_id)
         
         return task
     
     def invalidate(self, task_id: str):
         """Invalidate cache entry for a task"""
         self._cache.pop(task_id, None)
+        if task_id in self._access_order:
+            self._access_order.remove(task_id)
     
     def clear(self):
         """Clear entire cache"""
         self._cache.clear()
+        self._access_order.clear()
 
 
 # Global task cache instance
@@ -1892,7 +1913,45 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 
                 taskData = await get_task_routing(task_id)
 
-
+                # Detect REQUEST PENDING POPUP and trigger weekly warmup plan
+                message_str = str(message) if message else ""
+                if message_str and (
+                    "REQUEST PENDING POPUP DETECTED" in message_str.upper() or 
+                    "FOLLOW REQUEST PENDING MANUAL REVIEW" in message_str.upper() or
+                    "REQUEST PENDING" in message_str.upper() and "MANUAL REVIEW" in message_str.upper()
+                ):
+                    logger.info(f"[PENDING-REQUEST] Detected pending request popup for task {task_id}, triggering weekly warmup plan")
+                    try:
+                        # Extract account username from message if available
+                        account_username = None
+                        if "Account:" in message_str:
+                            account_line = [line for line in message_str.split("\n") if "Account:" in line]
+                            if account_line:
+                                account_part = account_line[0].split("Account:")[-1].strip()
+                                account_username = account_part.split()[0] if account_part else None
+                        
+                        # Build command payload for weekly warmup plan
+                        command_payload = {
+                            "task_id": task_id,
+                            "durationType": "WeeklyRandomizedPlan",
+                            "warmupOnly": True,
+                            "testMode": False,
+                            "followWeeklyRange": [0, 0],
+                            "restDaysRange": [4, 4],
+                            "offDaysRange": [3, 3],
+                        }
+                        
+                        # If we have account info, try to include it in the command
+                        if account_username:
+                            logger.info(f"[PENDING-REQUEST] Extracted account username: {account_username}")
+                        
+                        device_ids = [device_id]
+                        req_obj = CommandRequest(command=command_payload, device_ids=device_ids)
+                        current_user_context = {"email": cached_device.get("email", "")}
+                        await _process_send_command_internal(req_obj, current_user_context)
+                        logger.info(f"[PENDING-REQUEST] Successfully triggered weekly warmup plan for task {task_id}")
+                    except Exception as warmup_err:
+                        logger.error(f"[PENDING-REQUEST] Failed to trigger weekly warmup plan for task {task_id}: {warmup_err}")
 
                 if message_type == "update":
                     print(f"Processing 'update' message for task_id {task_id}")
@@ -1960,7 +2019,7 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                         try:
                             req_obj = CommandRequest(command=command_payload, device_ids=device_ids)
                             current_user_context = {"email": cached_device.get("email", "")}
-                            await send_command(req_obj, current_user=current_user_context)  # type: ignore
+                            await _process_send_command_internal(req_obj, current_user_context)
                             ack = {
                                 "type": "command_ack",
                                 "task_id": task_id,
@@ -2244,7 +2303,16 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                                 {"$set": {"status": status}}
                             )
 
-
+                    # Send ACK for final messages (mirroring ping/pong pattern)
+                    if message_type == "final":
+                        message_id = payload.get("message_id")
+                        if message_id:
+                            ack_response = {
+                                "type": "final_ack",
+                                "message_id": message_id
+                            }
+                            await websocket.send_text(json.dumps(ack_response))
+                            print(f"Sent final_ack response to ({device_id}) for message_id {message_id}")
 
                 else:
 
@@ -2299,13 +2367,24 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 
 
 @device_router.post("/send_command")
-
 async def send_command(
-
     request: CommandRequest, current_user: dict = Depends(get_current_user)
-
 ):
+    """
+    FastAPI route handler for sending commands.
+    Delegates to _process_send_command_internal for actual processing.
+    """
+    return await _process_send_command_internal(request, current_user)
 
+
+async def _process_send_command_internal(
+    request: CommandRequest, 
+    current_user: dict
+):
+    """
+    Internal function to process send_command logic.
+    Can be called from both HTTP route handlers and WebSocket handlers.
+    """
     task_id = request.command.get("task_id")
 
     command = request.command
