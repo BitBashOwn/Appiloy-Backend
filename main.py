@@ -343,16 +343,23 @@ async def lifespan(app: FastAPI):
                             continue
                         
                         # Parse trigger time
-                        from datetime import datetime
+                        from datetime import datetime, timedelta
                         import pytz
                         trigger_time = datetime.fromisoformat(job_request["trigger_time_utc"])
                         if trigger_time.tzinfo is None:
                             trigger_time = pytz.UTC.localize(trigger_time)
                         
-                        # Check if trigger time is in the past (with 5-minute grace period)
+                        # Check if trigger time is in the past
+                        # For weekly jobs with higher misfire_grace_time, use that as the grace period
+                        # For other jobs, use 5-minute grace period
                         now_utc = datetime.now(pytz.UTC)
-                        if trigger_time < now_utc - timedelta(minutes=5):
-                            logger.warning(f"[QUEUE] ⏰ Job {job_request['job_id']} trigger time is in the past ({trigger_time}), skipping")
+                        grace_period_minutes = 5  # Default grace period
+                        if "misfire_grace_time" in job_request and job_request["misfire_grace_time"] is not None:
+                            # Use the misfire_grace_time as grace period (convert seconds to minutes)
+                            grace_period_minutes = max(5, job_request["misfire_grace_time"] // 60)
+                        
+                        if trigger_time < now_utc - timedelta(minutes=grace_period_minutes):
+                            logger.warning(f"[QUEUE] ⏰ Job {job_request['job_id']} trigger time is in the past ({trigger_time}), skipping (grace period: {grace_period_minutes}min)")
                             failed_count += 1
                             continue
                         
@@ -387,13 +394,19 @@ async def lifespan(app: FastAPI):
                             # Standard command job - uses wrapper_for_send_command
                             from routes.deviceRegistration import wrapper_for_send_command
                             
-                            scheduler.add_job(
-                                wrapper_for_send_command,
-                                trigger=DateTrigger(run_date=trigger_time, timezone=pytz.UTC),
-                                args=[job_request["device_ids"], job_request["command"]],
-                                id=job_request["job_id"],
-                                name=job_request["job_name"],
-                            )
+                            job_kwargs = {
+                                "func": wrapper_for_send_command,
+                                "trigger": DateTrigger(run_date=trigger_time, timezone=pytz.UTC),
+                                "args": [job_request["device_ids"], job_request["command"]],
+                                "id": job_request["job_id"],
+                                "name": job_request["job_name"],
+                            }
+                            # Set per-job misfire_grace_time if provided in queue payload
+                            if "misfire_grace_time" in job_request and job_request["misfire_grace_time"] is not None:
+                                job_kwargs["misfire_grace_time"] = job_request["misfire_grace_time"]
+                                logger.info(f"[QUEUE] Using custom misfire_grace_time={job_request['misfire_grace_time']}s for job {job_request['job_id']}")
+                            
+                            scheduler.add_job(**job_kwargs)
                             logger.info(f"[QUEUE] ✅ Scheduled command job {job_request['job_id']} for {trigger_time}")
                         
                         processed_count += 1

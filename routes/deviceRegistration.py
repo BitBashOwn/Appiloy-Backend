@@ -299,6 +299,27 @@ async def remove_jobs_for_duration(task_id: str, duration_types: Set[str]) -> in
         except Exception:
             pass
     
+    # ✅ FIX: Clear Redis completion markers for removed jobs
+    # This prevents duplicate prevention from blocking rescheduled jobs
+    if job_ids_to_remove:
+        try:
+            from redis_client import get_redis_client
+            redis_client = get_redis_client()
+            cleared_markers = 0
+            for job_id in job_ids_to_remove:
+                completion_marker_key = f"job_completed:{job_id}"
+                try:
+                    deleted = await asyncio.to_thread(redis_client.delete, completion_marker_key)
+                    if deleted:
+                        cleared_markers += 1
+                except Exception as marker_err:
+                    logger.warning(f"[SCHEDULER] Failed to clear completion marker for {job_id}: {marker_err}")
+            
+            if cleared_markers > 0:
+                logger.info(f"[SCHEDULER] Cleared {cleared_markers} completion marker(s) for removed jobs")
+        except Exception as redis_err:
+            logger.warning(f"[SCHEDULER] Failed to clear completion markers: {redis_err}")
+    
     if job_ids_to_remove:
         await asyncio.to_thread(
             tasks_collection.update_one,
@@ -325,7 +346,7 @@ async def is_scheduler_leader():
         return False  # Assume follower if check fails
 
 
-async def schedule_or_queue_job(job_id, trigger_time_utc, device_ids, command, job_name, job_type="command"):
+async def schedule_or_queue_job(job_id, trigger_time_utc, device_ids, command, job_name, job_type="command", misfire_grace_time=None):
     """
     Schedule a job immediately if this worker is the leader, otherwise queue it for the leader to process.
     
@@ -336,6 +357,8 @@ async def schedule_or_queue_job(job_id, trigger_time_utc, device_ids, command, j
         command: Command dict or reminder parameters
         job_name: Human-readable job name
         job_type: "command" for device commands, "weekly_reminder" for Discord reminders
+        misfire_grace_time: Optional misfire grace time in seconds. If None, uses scheduler default (60s).
+                           For weekly jobs, recommend 3600 (1 hour) to allow recovery from longer outages.
     """
     try:
         if await is_scheduler_leader():
@@ -362,13 +385,19 @@ async def schedule_or_queue_job(job_id, trigger_time_utc, device_ids, command, j
                 )
             else:
                 # Standard command job
-                scheduler.add_job(
-                    wrapper_for_send_command,
-                    trigger=DateTrigger(run_date=trigger_time_utc, timezone=pytz.UTC),
-                    args=[device_ids, command],
-                    id=job_id,
-                    name=job_name,
-                )
+                job_kwargs = {
+                    "func": wrapper_for_send_command,
+                    "trigger": DateTrigger(run_date=trigger_time_utc, timezone=pytz.UTC),
+                    "args": [device_ids, command],
+                    "id": job_id,
+                    "name": job_name,
+                }
+                # Set per-job misfire_grace_time if provided (overrides global default)
+                if misfire_grace_time is not None:
+                    job_kwargs["misfire_grace_time"] = misfire_grace_time
+                    logger.info(f"[SCHEDULE] Using custom misfire_grace_time={misfire_grace_time}s for job {job_id}")
+                
+                scheduler.add_job(**job_kwargs)
             logger.info(f"[SCHEDULE] ✅ Leader scheduled job {job_id} for {trigger_time_utc}")
         else:
             # Follower worker: Queue for leader to process
@@ -396,6 +425,7 @@ async def schedule_or_queue_job(job_id, trigger_time_utc, device_ids, command, j
                 "command": command,
                 "job_name": job_name,
                 "job_type": job_type,
+                "misfire_grace_time": misfire_grace_time,  # Include in queue payload
                 "queued_at": datetime.now(pytz.UTC).isoformat(),
                 "queued_by_worker": str(WORKER_ID),
             }
@@ -2956,54 +2986,91 @@ async def _process_send_command_internal(
                     pass
             
             # Get previous history for each account if available
-            try:
-                sched_inputs_for_prev = None
-                if isinstance(schedules_payload, dict) and isinstance(schedules_payload.get("inputs"), list):
-                    sched_inputs_for_prev = schedules_payload.get("inputs")
-                elif isinstance(schedules_payload, list):
-                    sched_inputs_for_prev = schedules_payload
-                
-                if (
-                    sched_inputs_for_prev
+            # Skip previous history for warmup-only plans to avoid using active days from previous schedules
+            previous_active_days_map = None
+            if not warmup_only_flag:
+                try:
+                    sched_inputs_for_prev = None
+                    if isinstance(schedules_payload, dict) and isinstance(schedules_payload.get("inputs"), list):
+                        sched_inputs_for_prev = schedules_payload.get("inputs")
+                    elif isinstance(schedules_payload, list):
+                        sched_inputs_for_prev = schedules_payload
                     
-                    and len(sched_inputs_for_prev) >= 3
-                    and isinstance(sched_inputs_for_prev[2], dict)
-                ):
-                    prev_generated_map = sched_inputs_for_prev[2].get("generatedSchedulesMap")
-                    if prev_generated_map and isinstance(prev_generated_map, dict):
-                        previous_active_days_map = {}
-                        for uname, sched in prev_generated_map.items():
-                            if isinstance(sched, list):
-                                active_set = {
-                                    int(day.get("dayIndex"))
-                                    for day in sched
-                                    if isinstance(day, dict)
-                                    and not day.get("isRest")
-                                    and not day.get("isOff")
-                                    and day.get("dayIndex") is not None
-                                }
-                                if active_set:
-                                    previous_active_days_map[uname] = active_set
-            except Exception:
-                previous_active_days_map = None
+                    if (
+                        sched_inputs_for_prev
+                        
+                        and len(sched_inputs_for_prev) >= 3
+                        and isinstance(sched_inputs_for_prev[2], dict)
+                    ):
+                        prev_generated_map = sched_inputs_for_prev[2].get("generatedSchedulesMap")
+                        if prev_generated_map and isinstance(prev_generated_map, dict):
+                            previous_active_days_map = {}
+                            for uname, sched in prev_generated_map.items():
+                                if isinstance(sched, list):
+                                    active_set = {
+                                        int(day.get("dayIndex"))
+                                        for day in sched
+                                        if isinstance(day, dict)
+                                        and not day.get("isRest")
+                                        and not day.get("isOff")
+                                        and day.get("dayIndex") is not None
+                                    }
+                                    if active_set:
+                                        previous_active_days_map[uname] = active_set
+                except Exception:
+                    previous_active_days_map = None
 
             # Generate INDEPENDENT schedules for each account
             day_windows: Dict[int, Tuple[datetime, datetime]] = {}
 
             if account_usernames_for_caps:
-                schedules_map = generate_independent_schedules(
-                    accounts=account_usernames_for_caps,
-                    week_start_dt=local_dt,
-                    follow_weekly_range=(int(follow_weekly_range[0]), int(follow_weekly_range[1])),
-                    rest_days_range=(int(rest_days_range[0]), int(rest_days_range[1])),
-                    no_two_high_rule=(int(no_two_high_rule[0]), int(no_two_high_rule[1])),
-                    off_days_range=(int(off_days_range[0]), int(off_days_range[1])),
-                    previous_active_days_map=previous_active_days_map,
-                    rest_day_likes_range=rest_day_likes_range,
-                    rest_day_comments_range=rest_day_comments_range,
-                    rest_day_duration_range=rest_day_duration_range,
-                    active_method=method
-                )
+                # For warmup-only mode, skip generate_independent_schedules and create warmup-only schedules directly
+                # This avoids the issue where generate_weekly_targets always creates 4 active days
+                if warmup_only_flag:
+                    logger.info(f"[WEEKLY] Warmup-only mode: Creating warmup-only schedules for {len(account_usernames_for_caps)} accounts")
+                    warmup_indices = sorted(random.sample(range(7), 4))
+                    warmup_only_schedule = []
+                    for d in range(7):
+                        if d in warmup_indices:
+                            wl = random.randint(rest_day_likes_range[0], rest_day_likes_range[1])
+                            wc = random.randint(rest_day_comments_range[0], rest_day_comments_range[1])
+                            wd = random.randint(rest_day_duration_range[0], rest_day_duration_range[1])
+                            warmup_only_schedule.append({
+                                "dayIndex": d,
+                                "target": 0,
+                                "isRest": True,
+                                "isOff": False,
+                                "method": 9,
+                                "maxLikes": wl,
+                                "maxComments": wc,
+                                "warmupDuration": wd,
+                            })
+                        else:
+                            warmup_only_schedule.append({
+                                "dayIndex": d,
+                                "target": 0,
+                                "isRest": False,
+                                "isOff": True,
+                                "method": 0,
+                            })
+                    # Create schedules_map with warmup-only schedule for all accounts
+                    # Use deepcopy to ensure each account has independent dictionary objects
+                    # (shallow copy would share dictionary references, causing modifications to affect all accounts)
+                    schedules_map = {uname: copy.deepcopy(warmup_only_schedule) for uname in account_usernames_for_caps}
+                else:
+                    schedules_map = generate_independent_schedules(
+                        accounts=account_usernames_for_caps,
+                        week_start_dt=local_dt,
+                        follow_weekly_range=(int(follow_weekly_range[0]), int(follow_weekly_range[1])),
+                        rest_days_range=(int(rest_days_range[0]), int(rest_days_range[1])),
+                        no_two_high_rule=(int(no_two_high_rule[0]), int(no_two_high_rule[1])),
+                        off_days_range=(int(off_days_range[0]), int(off_days_range[1])),
+                        previous_active_days_map=previous_active_days_map,
+                        rest_day_likes_range=rest_day_likes_range,
+                        rest_day_comments_range=rest_day_comments_range,
+                        rest_day_duration_range=rest_day_duration_range,
+                        active_method=method
+                    )
                 
                 # Add start_local and end_local timestamps to each day entry in schedules_map
                 if schedules_map:
@@ -3209,6 +3276,9 @@ async def _process_send_command_internal(
                                 "method": 0,
                             })
                     generated = custom_generated
+                    
+                    # schedules_map is already set to warmup-only schedules above (when warmupOnly: true)
+                    # No need to override again here
                 else:
                     validate_weekly_plan(
                         generated,
@@ -3717,6 +3787,8 @@ async def _process_send_command_internal(
 
                 # Schedule 7 jobs with random local start time 11:00–22:00, end at 22:00
                 # Also schedule "1 hour before" reminder notifications
+                # Generate a unique schedule ID for this weekly plan (used in all job IDs to differentiate reschedules)
+                schedule_id = random.randint(10000, 99999)  # 5-digit random number for uniqueness
                 scheduled_job_ids = []
                 notify_daily = bool(command.get("notifyDaily", False))
                 total_target = 0
@@ -4074,8 +4146,9 @@ async def _process_send_command_internal(
                     start_time_utc = start_time_local.astimezone(pytz.UTC)
                     end_time_utc = end_time_local.astimezone(pytz.UTC)
 
-                    # Include day_index in job_id to ensure uniqueness across all 7 days
-                    job_id = f"weekly_{task_id}_day{day_index}_{start_time_local.strftime('%Y-%m-%d')}"
+                    # Include day_index and schedule ID in job_id to ensure uniqueness across schedules
+                    # Schedule ID differentiates between rescheduled weekly plans (prevents completion marker conflicts)
+                    job_id = f"weekly_{task_id}_day{day_index}_{start_time_local.strftime('%Y-%m-%d')}_{schedule_id}"
                     
                     # Deep copy command to prevent shared object references between jobs
                     job_command = copy.deepcopy(command)
@@ -4360,15 +4433,19 @@ async def _process_send_command_internal(
                     # Add job to scheduler
                     try:
                         # Use helper function to schedule or queue
+                        # ✅ FIX: Use higher misfire_grace_time (3600s = 1 hour) for weekly jobs
+                        # This allows recovery from longer outages (e.g., scheduler restart, leader failover)
+                        # while duplicate prevention (Redis lock + completion marker) prevents re-execution
                         await schedule_or_queue_job(
                             job_id=job_id,
                             trigger_time_utc=start_time_utc,
                             device_ids=device_ids,
                             command=job_command,
                             job_name=f"Weekly day {day_index} for devices {device_ids}",
-                            job_type="command"
+                            job_type="command",
+                            misfire_grace_time=3600  # 1 hour - allows recovery from outages up to 1 hour
                         )
-                        logger.info(f"[WEEKLY] 📌 Job {job_id} scheduled for {start_time_utc} (UTC) / {start_time_local.strftime('%Y-%m-%d %H:%M:%S')} ({time_zone})")
+                        logger.info(f"[WEEKLY] 📌 Job {job_id} scheduled for {start_time_utc} (UTC) / {start_time_local.strftime('%Y-%m-%d %H:%M:%S')} ({time_zone}) with misfire_grace_time=3600s")
                         
                         scheduled_job_ids.append(job_id)
                         # Update DB activeJobs immediately
@@ -4915,6 +4992,21 @@ def wrapper_for_send_command(device_ids, command):
     job_id = command.get("job_id", "unknown")
     task_id = command.get("task_id", "unknown")
     
+    # ✅ DUPLICATE PREVENTION: Check if this job already completed successfully
+    # This marker persists even after the execution lock expires, preventing re-execution
+    # from misfired jobs that were delayed by more than the lock timeout
+    completion_marker_key = f"job_completed:{job_id}"
+    completion_marker_ttl = 86400 * 7  # 7 days - long enough to prevent duplicates but not forever
+    
+    try:
+        already_completed = redis_client.get(completion_marker_key)
+        if already_completed:
+            logger.info(f"[SCHEDULER-JOB] ⏭️ Skipping job {job_id} - already completed (marker exists)")
+            return None
+    except Exception as marker_check_err:
+        # If Redis check fails, log but continue (better to risk duplicate than skip execution)
+        logger.warning(f"[SCHEDULER-JOB] ⚠️ Failed to check completion marker for {job_id}: {marker_check_err}")
+    
     # Redis lock key for this job execution
     lock_key = f"job_execution_lock:{job_id}"
     lock_timeout = 300  # 5 minutes - enough time for job execution
@@ -4957,13 +5049,21 @@ def wrapper_for_send_command(device_ids, command):
         # Timeout of 300 seconds (5 minutes) matches the lock timeout
         result = future.result(timeout=300)
         
-        logger.info(f"[SCHEDULER-JOB] ✅ Job {job_id} completed successfully")
+        # ✅ DUPLICATE PREVENTION: Mark job as completed in Redis
+        # This prevents re-execution even if the job misfires again later
+        try:
+            redis_client.set(completion_marker_key, str(WORKER_ID), ex=completion_marker_ttl)
+            logger.info(f"[SCHEDULER-JOB] ✅ Job {job_id} completed successfully and marked as completed")
+        except Exception as marker_err:
+            logger.warning(f"[SCHEDULER-JOB] ⚠️ Failed to set completion marker for {job_id}: {marker_err}")
+        
         return result
 
     except Exception as e:
         logger.error(f"[SCHEDULER-JOB] ❌ Job {job_id} failed with error: {e}", exc_info=True)
         import traceback
         traceback.print_exc()
+        # Don't set completion marker on error - allow retry
         raise  # Re-raise to let APScheduler handle it
     finally:
         # Always release the lock after execution (or on error)
