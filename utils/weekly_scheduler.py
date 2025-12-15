@@ -711,3 +711,130 @@ def generate_independent_schedules(
                     day_data.pop("warmupDuration", None)
 
     return all_schedules
+
+
+def apply_account_rotation_limit(
+    account_method_map_by_day: Dict[int, Dict[str, int]],
+    all_accounts: List[str],
+    max_accounts_per_day: int = 4,
+    min_account_threshold: int = 5
+) -> Dict[int, Dict[str, int]]:
+    """
+    Apply rotation limit to ensure maximum 4 active accounts per day when 5+ accounts exist.
+    
+    - Only applies when account count >= min_account_threshold
+    - Limits active accounts (methods 1, 4, 6) to max_accounts_per_day per day
+    - Warmup accounts (method 9) are preserved and don't count toward the limit
+    - Ensures all accounts appear at least once across the week
+    - Uses random selection while maintaining fairness
+    
+    Args:
+        account_method_map_by_day: Dict mapping day_index -> {username: method}
+        all_accounts: List of all account usernames
+        max_accounts_per_day: Maximum active accounts allowed per day (default 4)
+        min_account_threshold: Minimum account count to trigger rotation (default 5)
+    
+    Returns:
+        Modified account_method_map_by_day with rotation applied
+    """
+    # Only apply rotation if we have enough accounts
+    if len(all_accounts) < min_account_threshold:
+        return account_method_map_by_day
+    
+    # Create a copy to avoid modifying the original
+    rotated_map = {}
+    
+    # Track which accounts have been scheduled (active, not warmup)
+    scheduled_accounts = set()
+    
+    # First pass: Process each day and limit active accounts to max_accounts_per_day
+    for day_index in range(7):
+        day_map = account_method_map_by_day.get(day_index, {}).copy()
+        if not day_map:
+            rotated_map[day_index] = {}
+            continue
+        
+        # Separate active accounts (methods 1, 4, 6) from warmup accounts (method 9)
+        active_accounts = {}
+        warmup_accounts = {}
+        
+        for username, method in day_map.items():
+            if method == 9:
+                # Warmup accounts don't count toward limit, preserve them
+                warmup_accounts[username] = method
+            elif method in (1, 4, 6):
+                # Active accounts
+                active_accounts[username] = method
+        
+        # If we have more than max_accounts_per_day active accounts, need to rotate
+        if len(active_accounts) > max_accounts_per_day:
+            # Prioritize accounts that haven't been scheduled yet
+            unscheduled = {u: m for u, m in active_accounts.items() if u not in scheduled_accounts}
+            scheduled = {u: m for u, m in active_accounts.items() if u in scheduled_accounts}
+            
+            selected_accounts = {}
+            
+            # First, add unscheduled accounts (up to the limit)
+            if unscheduled:
+                num_to_select = min(max_accounts_per_day, len(unscheduled))
+                selected_unscheduled = random.sample(list(unscheduled.items()), num_to_select)
+                selected_accounts.update(dict(selected_unscheduled))
+                scheduled_accounts.update(selected_accounts.keys())
+            
+            # If we still have room, add from scheduled accounts
+            remaining_slots = max_accounts_per_day - len(selected_accounts)
+            if remaining_slots > 0 and scheduled:
+                num_to_select = min(remaining_slots, len(scheduled))
+                selected_scheduled = random.sample(list(scheduled.items()), num_to_select)
+                selected_accounts.update(dict(selected_scheduled))
+            
+            # Combine selected active accounts with warmup accounts
+            rotated_map[day_index] = {**selected_accounts, **warmup_accounts}
+        else:
+            # No rotation needed, keep all accounts
+            rotated_map[day_index] = day_map
+            # Track scheduled active accounts
+            scheduled_accounts.update(active_accounts.keys())
+    
+    # Second pass: Ensure all accounts appear at least once
+    # Find accounts that weren't scheduled in the first pass
+    all_scheduled = set()
+    for day_map in rotated_map.values():
+        for username, method in day_map.items():
+            if method in (1, 4, 6):  # Only count active accounts
+                all_scheduled.add(username)
+    
+    unscheduled_accounts = set(all_accounts) - all_scheduled
+    
+    # Redistribute unscheduled accounts to days with < max_accounts_per_day
+    if unscheduled_accounts:
+        # Shuffle for randomness
+        unscheduled_list = list(unscheduled_accounts)
+        random.shuffle(unscheduled_list)
+        
+        for username in unscheduled_list:
+            # Find a day with < max_accounts_per_day active accounts
+            # Try to use the account's original method if it was scheduled somewhere
+            original_method = None
+            for day_map in account_method_map_by_day.values():
+                if username in day_map:
+                    method = day_map.get(username)
+                    if method and method in (1, 4, 6):
+                        original_method = method
+                        break
+            
+            # Default to method 1 if not found
+            method_to_use = original_method if original_method in (1, 4, 6) else 1
+            
+            # Find a day with available slots
+            for day_index in range(7):
+                day_map = rotated_map.get(day_index, {})
+                active_count = sum(1 for m in day_map.values() if m in (1, 4, 6))
+                
+                if active_count < max_accounts_per_day:
+                    # Add this account to this day
+                    day_map[username] = method_to_use
+                    rotated_map[day_index] = day_map
+                    break
+    
+    return rotated_map

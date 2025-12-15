@@ -3983,6 +3983,33 @@ async def _process_send_command_internal(
 
                 # (Merged per-account method details into the main summary above; no separate method map message)
 
+                # Apply account rotation limit if 5+ accounts exist (max 4 active accounts per day)
+                if base_account_usernames and len(base_account_usernames) >= 5:
+                    try:
+                        from utils.weekly_scheduler import apply_account_rotation_limit
+                        account_method_map_by_day = apply_account_rotation_limit(
+                            account_method_map_by_day,
+                            base_account_usernames,
+                            max_accounts_per_day=4,
+                            min_account_threshold=5
+                        )
+                        logger.info(
+                            f"[ACCOUNT-ROTATION] Applied 4-account limit: {len(base_account_usernames)} total accounts. "
+                            f"Rotation ensures all accounts are scheduled across the week."
+                        )
+                        # Log per-day distribution after rotation
+                        for di in range(7):
+                            day_map = account_method_map_by_day.get(di, {})
+                            if day_map:
+                                active_count = sum(1 for m in day_map.values() if m in (1, 4, 6))
+                                warmup_count = sum(1 for m in day_map.values() if m == 9)
+                                logger.info(
+                                    f"[ACCOUNT-ROTATION] Day {di}: {active_count} active accounts, {warmup_count} warmup accounts, "
+                                    f"total accounts: {len(day_map)}"
+                                )
+                    except Exception as e:
+                        logger.warning(f"[ACCOUNT-ROTATION] Failed to apply rotation limit: {e}")
+
                 # Determine active days for device (Union of all accounts) based on the generated method map
                 device_active_days = sorted(account_method_map_by_day.keys())
                 last_scheduled_day_index = device_active_days[-1] if device_active_days else None
