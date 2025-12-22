@@ -2802,7 +2802,7 @@ async def _process_send_command_internal(
                 except Exception:
                     off_days_range = None
             no_two_high_rule_raw = command.get("noTwoHighRule")
-            test_mode = bool(command.get("testMode", False))  # Test mode: schedule with 2-min/5-min gaps
+            test_mode = bool(command.get("testMode", False))  # Test mode: schedule with 10-min gaps
             # Resolve method (prefer command-level, else schedules index 2, else default 1)
             resolved_method = command.get("method")
             try:
@@ -3105,8 +3105,8 @@ async def _process_send_command_internal(
                             
                             # Generate timestamps for this day entry
                             if test_mode:
-                                # In test mode, use 2-minute gaps between scheduled days
-                                gap_minutes = 2
+                                # In test mode, use 10-minute gaps between scheduled days
+                                gap_minutes = 10
                                 start_time_local = local_dt + timedelta(minutes=idx * gap_minutes)
                                 # For warmup-only, keep session short placeholder end; device manages day plan
                                 end_time_local = start_time_local + (timedelta(minutes=1) if warmup_only_flag else timedelta(hours=11))
@@ -3302,8 +3302,8 @@ async def _process_send_command_internal(
                     day_method = int(d.get("method", 0 if is_off else (9 if is_rest else 1)))
                     
                     if test_mode:
-                        # In test mode, use 2-minute gaps between scheduled days
-                        gap_minutes = 2
+                        # In test mode, use 10-minute gaps between scheduled days
+                        gap_minutes = 10
                         start_time_local = local_dt + timedelta(minutes=idx * gap_minutes)
                         # For warmup-only, keep session short placeholder end; device manages day plan
                         end_time_local = start_time_local + (timedelta(minutes=1) if is_warmup_only else timedelta(hours=11))
@@ -3681,7 +3681,7 @@ async def _process_send_command_internal(
                                     label = f"{heading}\n{p['methodLabel']}"
                             lines.append(label)
                         
-                        test_mode_indicator = "TEST MODE (2-min gaps)\n" if test_mode else ""
+                        test_mode_indicator = "TEST MODE (10-min gaps)\n" if test_mode else ""
                         summary = (
                             f"Weekly plan scheduled: {task_meta.get('taskName', 'Unknown Task')}\n"
                             f"{test_mode_indicator}\n" + "\n".join(lines)
@@ -5079,9 +5079,22 @@ def wrapper_for_send_command(device_ids, command):
         
         # ✅ DUPLICATE PREVENTION: Mark job as completed in Redis
         # This prevents re-execution even if the job misfires again later
+        # ✅ FIX: Only set marker if job was actually delivered (check database status)
         try:
-            redis_client.set(completion_marker_key, str(WORKER_ID), ex=completion_marker_ttl)
-            logger.info(f"[SCHEDULER-JOB] ✅ Job {job_id} completed successfully and marked as completed")
+            # Verify job was delivered by checking database status
+            # This prevents setting marker if database update failed
+            from models.tasks import tasks_collection
+            task = tasks_collection.find_one({"id": task_id})
+            if task:
+                active_jobs = task.get("activeJobs", [])
+                job_status = next((j for j in active_jobs if j.get("job_id") == job_id), None)
+                if job_status and job_status.get("deliveryStatus") == "delivered":
+                    redis_client.set(completion_marker_key, str(WORKER_ID), ex=completion_marker_ttl)
+                    logger.info(f"[SCHEDULER-JOB] ✅ Job {job_id} completed successfully and marked as completed")
+                else:
+                    logger.warning(f"[SCHEDULER-JOB] ⚠️ Job {job_id} execution returned but database status is '{job_status.get('deliveryStatus') if job_status else 'not found'}', not setting completion marker")
+            else:
+                logger.warning(f"[SCHEDULER-JOB] ⚠️ Task {task_id} not found, not setting completion marker for job {job_id}")
         except Exception as marker_err:
             logger.warning(f"[SCHEDULER-JOB] ⚠️ Failed to set completion marker for {job_id}: {marker_err}")
         
