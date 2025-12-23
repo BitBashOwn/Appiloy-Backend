@@ -135,6 +135,9 @@ def generate_weekly_targets(
     except (TypeError, ValueError):
         selected_method = 1
 
+    # Method 1 follow workflow; keep it inside a safe 40-80 window
+    if selected_method == 1:
+        min_week, max_week = 40, 80
     # Method 6 is another follow-heavy workflow; keep it inside a safe 70-140 window
     if selected_method == 6:
         min_week, max_week = 70, 140

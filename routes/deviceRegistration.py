@@ -2829,6 +2829,10 @@ async def _process_send_command_internal(
                 method = 1
             logger.info(f"[WEEKLY] Using method: {method}")
 
+            if method == 1:
+                follow_weekly_range = (40, 80)
+                command["followWeeklyRange"] = list(follow_weekly_range)
+                logger.info("[WEEKLY] Method 1 selected; clamping weekly follows to 40-80")
             if method == 6:
                 follow_weekly_range = (70, 140)
                 command["followWeeklyRange"] = list(follow_weekly_range)
