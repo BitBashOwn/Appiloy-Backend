@@ -2830,9 +2830,9 @@ async def _process_send_command_internal(
             logger.info(f"[WEEKLY] Using method: {method}")
 
             if method == 6:
-                follow_weekly_range = (40, 80)
+                follow_weekly_range = (70, 140)
                 command["followWeeklyRange"] = list(follow_weekly_range)
-                logger.info("[WEEKLY] Method 6 selected; clamping weekly follows to 40-80")
+                logger.info("[WEEKLY] Method 6 selected; clamping weekly follows to 70-140")
             if test_mode:
                 logger.warning(f"[WEEKLY] ⚠️ TEST MODE ENABLED - Scheduling with 5-minute gaps starting NOW")
 
