@@ -908,9 +908,9 @@ async def log_requests(request: Request, call_next):
 
 allowed_origins = [
     "http://localhost:5173",
-    "https://appilot-console.vercel.app/",
-    "https://appilot-console-4v67eq436-abdullahnoor-codes-projects.vercel.app/",
-    "https://appilot-console-git-main-abdullahnoor-codes-projects.vercel.app/",
+    # "https://appilot-console.vercel.app/",
+    # "https://appilot-console-4v67eq436-abdullahnoor-codes-projects.vercel.app/",
+    # "https://appilot-console-git-main-abdullahnoor-codes-projects.vercel.app/",
 ]
 
 app.add_middleware(

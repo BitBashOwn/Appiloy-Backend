@@ -135,13 +135,8 @@ def generate_weekly_targets(
     except (TypeError, ValueError):
         selected_method = 1
 
-    # Method 1 follow workflow; keep it inside a safe 40-80 window
-    if selected_method == 1:
-        min_week, max_week = 40, 80
-    # Method 6 is another follow-heavy workflow; keep it inside a safe 70-140 window
-    if selected_method == 6:
-        min_week, max_week = 70, 140
-
+    # Use the provided follow_weekly_range from frontend
+    # Only validate and swap if needed, but don't override with method-based defaults
     if min_week > max_week:
         min_week, max_week = max_week, min_week
     follow_weekly_range = (min_week, max_week)
@@ -558,6 +553,10 @@ def generate_per_account_plans(
             target_week_total = random.randint(effective_min_total, effective_max_total)
         else:
             target_week_total = sum(daily_targets)
+        
+        # Ensure target is at least the minimum required
+        if target_week_total < min_week:
+            target_week_total = min_week
 
         difference = target_week_total - sum(daily_targets)
         adjustment_safety = 0
@@ -566,6 +565,18 @@ def generate_per_account_plans(
             if difference > 0:
                 grow_candidates = [i for i in active_indices if daily_targets[i] < per_day_max_bounds.get(i, 0)]
                 if not grow_candidates:
+                    # If we can't grow but still need to reach minimum, try harder
+                    if sum(daily_targets) < min_week:
+                        # Find any day that can be increased, even if at current max
+                        grow_candidates = [i for i in active_indices if daily_targets[i] < MAX_FOLLOWS_PER_DAY_PER_ACCOUNT]
+                        if grow_candidates:
+                            idx = random.choice(grow_candidates)
+                            max_increase = MAX_FOLLOWS_PER_DAY_PER_ACCOUNT - daily_targets[idx]
+                            if max_increase > 0:
+                                step = min(difference, max_increase)
+                                daily_targets[idx] += step
+                                difference -= step
+                                continue
                     break
                 idx = random.choice(grow_candidates)
                 max_increase = per_day_max_bounds[idx] - daily_targets[idx]
@@ -597,6 +608,28 @@ def generate_per_account_plans(
                 adjusted[i] = max(floor_val, min(ceiling_val, adjusted[i]))
             if adjusted[i] > MAX_FOLLOWS_PER_DAY_PER_ACCOUNT:
                 adjusted[i] = MAX_FOLLOWS_PER_DAY_PER_ACCOUNT
+
+        # Ensure weekly minimum is met (after no-two-high rule may have reduced values)
+        current_total = sum(adjusted)
+        if current_total < min_week:
+            shortfall = min_week - current_total
+            # Try to distribute the shortfall across active days without exceeding per-day max bounds
+            adjustment_attempts = 0
+            while shortfall > 0 and adjustment_attempts < 1000:
+                adjustment_attempts += 1
+                # Find days that can be increased
+                increase_candidates = [
+                    i for i in active_indices 
+                    if adjusted[i] < per_day_max_bounds.get(i, MAX_FOLLOWS_PER_DAY_PER_ACCOUNT)
+                ]
+                if not increase_candidates:
+                    break
+                idx = random.choice(increase_candidates)
+                max_increase = per_day_max_bounds.get(idx, MAX_FOLLOWS_PER_DAY_PER_ACCOUNT) - adjusted[idx]
+                if max_increase > 0:
+                    increase_amount = min(shortfall, max_increase)
+                    adjusted[idx] += increase_amount
+                    shortfall -= increase_amount
 
         per_account[username] = adjusted
 

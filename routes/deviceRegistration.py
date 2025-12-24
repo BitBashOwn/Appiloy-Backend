@@ -2792,8 +2792,80 @@ async def _process_send_command_internal(
 
             # Parse weekly-specific fields from command-level
             week_start_raw = command.get("week_start")
+            
+            # Always try to extract from schedules payload first (followMin/followMax) as it contains user's actual input
+            # The command might have default values, but schedules has the real user values
             follow_weekly_range = tuple(command.get("followWeeklyRange", []))
+            extracted_from_schedules = False
+            
+            try:
+                sched_inputs = None
+                if isinstance(schedules_payload, dict) and isinstance(schedules_payload.get("inputs"), list):
+                    sched_inputs = schedules_payload.get("inputs")
+                elif isinstance(schedules_payload, list):
+                    sched_inputs = schedules_payload
+                
+                # Look for Weekly randomized entry in schedules
+                if sched_inputs:
+                    for entry in sched_inputs:
+                        if isinstance(entry, dict):
+                            # Check if this is the Weekly randomized entry (case-insensitive)
+                            heading = entry.get("Heading", "").lower() if entry.get("Heading") else ""
+                            entry_type = entry.get("type", "")
+                            if "weekly" in heading or entry_type == "WeeklyRandomizedPlan":
+                                follow_min = entry.get("followMin")
+                                follow_max = entry.get("followMax")
+                                if follow_min is not None and follow_max is not None:
+                                    try:
+                                        follow_weekly_range = (int(follow_min), int(follow_max))
+                                        extracted_from_schedules = True
+                                        logger.info(f"[WEEKLY] Extracted followWeeklyRange from schedules payload: {follow_weekly_range}")
+                                        break
+                                    except (ValueError, TypeError):
+                                        pass
+            except Exception as e:
+                logger.debug(f"[WEEKLY] Failed to extract followWeeklyRange from schedules: {e}")
+            
+            # Fallback to command value if not found in schedules
+            if not extracted_from_schedules and len(follow_weekly_range) != 2:
+                follow_weekly_range = tuple(command.get("followWeeklyRange", []))
+            
+            # Always try to extract from schedules payload first (restMin/restMax) as it contains user's actual input
             rest_days_range = tuple(command.get("restDaysRange", []))
+            rest_extracted_from_schedules = False
+            
+            try:
+                sched_inputs = None
+                if isinstance(schedules_payload, dict) and isinstance(schedules_payload.get("inputs"), list):
+                    sched_inputs = schedules_payload.get("inputs")
+                elif isinstance(schedules_payload, list):
+                    sched_inputs = schedules_payload
+                
+                # Look for Weekly randomized entry in schedules
+                if sched_inputs:
+                    for entry in sched_inputs:
+                        if isinstance(entry, dict):
+                            # Check if this is the Weekly randomized entry (case-insensitive)
+                            heading = entry.get("Heading", "").lower() if entry.get("Heading") else ""
+                            entry_type = entry.get("type", "")
+                            if "weekly" in heading or entry_type == "WeeklyRandomizedPlan":
+                                rest_min = entry.get("restMin")
+                                rest_max = entry.get("restMax")
+                                if rest_min is not None and rest_max is not None:
+                                    try:
+                                        rest_days_range = (int(rest_min), int(rest_max))
+                                        rest_extracted_from_schedules = True
+                                        logger.info(f"[WEEKLY] Extracted restDaysRange from schedules payload: {rest_days_range}")
+                                        break
+                                    except (ValueError, TypeError):
+                                        pass
+            except Exception as e:
+                logger.debug(f"[WEEKLY] Failed to extract restDaysRange from schedules: {e}")
+            
+            # Fallback to command value if not found in schedules
+            if not rest_extracted_from_schedules and len(rest_days_range) != 2:
+                rest_days_range = tuple(command.get("restDaysRange", []))
+            
             off_days_range_raw = command.get("offDaysRange")
             off_days_range = None
             if isinstance(off_days_range_raw, (list, tuple)) and len(off_days_range_raw) == 2:
@@ -2829,14 +2901,37 @@ async def _process_send_command_internal(
                 method = 1
             logger.info(f"[WEEKLY] Using method: {method}")
 
-            if method == 1:
-                follow_weekly_range = (40, 80)
-                command["followWeeklyRange"] = list(follow_weekly_range)
-                logger.info("[WEEKLY] Method 1 selected; clamping weekly follows to 40-80")
-            if method == 6:
-                follow_weekly_range = (70, 140)
-                command["followWeeklyRange"] = list(follow_weekly_range)
-                logger.info("[WEEKLY] Method 6 selected; clamping weekly follows to 70-140")
+            # Use the followWeeklyRange from frontend if provided, otherwise apply method-based defaults
+            if len(follow_weekly_range) != 2:
+                # Only apply method-based defaults if frontend didn't provide a range
+                if method == 1:
+                    follow_weekly_range = (40, 80)
+                    command["followWeeklyRange"] = list(follow_weekly_range)
+                    logger.info("[WEEKLY] Method 1 selected; using default weekly follows range 40-80 (no range provided)")
+                elif method == 6:
+                    follow_weekly_range = (70, 140)
+                    command["followWeeklyRange"] = list(follow_weekly_range)
+                    logger.info("[WEEKLY] Method 6 selected; using default weekly follows range 70-140 (no range provided)")
+                else:
+                    # Default fallback for other methods
+                    follow_weekly_range = (40, 80)
+                    command["followWeeklyRange"] = list(follow_weekly_range)
+                    logger.info(f"[WEEKLY] Using default weekly follows range 40-80 (no range provided, method={method})")
+            else:
+                # Frontend provided a range, use it (convert to integers)
+                try:
+                    follow_weekly_range = (int(follow_weekly_range[0]), int(follow_weekly_range[1]))
+                    command["followWeeklyRange"] = list(follow_weekly_range)
+                    logger.info(f"[WEEKLY] Using frontend-provided weekly follows range: {follow_weekly_range}")
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"[WEEKLY] Failed to convert followWeeklyRange to integers: {e}, using method-based default")
+                    if method == 1:
+                        follow_weekly_range = (40, 80)
+                    elif method == 6:
+                        follow_weekly_range = (70, 140)
+                    else:
+                        follow_weekly_range = (40, 80)
+                    command["followWeeklyRange"] = list(follow_weekly_range)
             if test_mode:
                 logger.warning(f"[WEEKLY] ⚠️ TEST MODE ENABLED - Scheduling with 5-minute gaps starting NOW")
 

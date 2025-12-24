@@ -852,37 +852,68 @@ async def unschedule_jobs(tasks: deleteRequest, current_user: dict = Depends(get
         try:
             all_scheduler_jobs = scheduler.get_jobs()
             fallback_removed_count = 0
+            fallback_reminder_count = 0
+            
             for job in all_scheduler_jobs:
                 try:
-                    # Extract task_id from job's command arguments
-                    job_args = list(job.args or [])
-                    if not job_args:
-                        continue
-                    # Command is typically the last argument
-                    cmd = job_args[-1] if len(job_args) > 0 else None
-                    if not isinstance(cmd, dict):
-                        continue
-                    job_task_id = cmd.get("task_id")
+                    job_task_id = None
+                    is_reminder_job = False
+                    
+                    # Method 1: Check job ID pattern for weekly jobs (main and reminder)
+                    # Main job pattern: weekly_{task_id}_day{N}_{date}_{schedule_id}
+                    # Reminder pattern: reminder_weekly_{task_id}_day{N}_{date}_{schedule_id}
+                    for tid in task_ids_set:
+                        if job.id.startswith(f"weekly_{tid}_"):
+                            job_task_id = tid
+                            break
+                        elif job.id.startswith(f"reminder_weekly_{tid}_"):
+                            job_task_id = tid
+                            is_reminder_job = True
+                            break
+                    
+                    # Method 2: Extract task_id from job args (backwards compatible)
+                    if not job_task_id:
+                        job_args = list(job.args or [])
+                        if job_args:
+                            # For command jobs: args = [device_ids, command_dict]
+                            # command_dict is typically the last argument
+                            cmd = job_args[-1] if len(job_args) > 0 else None
+                            if isinstance(cmd, dict):
+                                job_task_id = cmd.get("task_id")
+                            # For reminder jobs: args = [task_id, day_name, start_time, ...]
+                            # task_id is the first argument (string)
+                            elif isinstance(job_args[0], str) and job_args[0] in task_ids_set:
+                                job_task_id = job_args[0]
+                                is_reminder_job = True
+                    
                     if job_task_id and job_task_id in task_ids_set:
                         try:
                             scheduler.remove_job(job.id)
-                            fallback_removed_count += 1
-                            print(f"[LOG] ✓ Fallback removed job {job.id} (task {job_task_id}) from scheduler")
+                            if is_reminder_job:
+                                fallback_reminder_count += 1
+                                print(f"[LOG] ✓ Fallback removed orphaned reminder job {job.id} (task {job_task_id})")
+                            else:
+                                fallback_removed_count += 1
+                                print(f"[LOG] ✓ Fallback removed job {job.id} (task {job_task_id}) from scheduler")
                         except Exception as e:
                             print(f"[LOG] Fallback could not remove job {job.id}: {str(e)}")
-                        # Also try to remove reminder job
-                        try:
-                            reminder_id = f"reminder_{job.id}"
-                            scheduler.remove_job(reminder_id)
-                            print(f"[LOG] ✓ Fallback removed reminder job {reminder_id}")
-                        except Exception as e:
-                            # Reminder might not exist, which is fine
-                            pass
+                        
+                        # For main jobs, also try to remove associated reminder job
+                        if not is_reminder_job:
+                            try:
+                                reminder_id = f"reminder_{job.id}"
+                                scheduler.remove_job(reminder_id)
+                                fallback_reminder_count += 1
+                                print(f"[LOG] ✓ Fallback removed reminder job {reminder_id}")
+                            except Exception as e:
+                                # Reminder might not exist, which is fine
+                                pass
                 except Exception as e:
                     # Skip jobs that can't be inspected (e.g., wrong arg structure)
                     continue
-            if fallback_removed_count > 0:
-                print(f"[LOG] Fallback removal: removed {fallback_removed_count} jobs that weren't in activeJobs")
+            
+            if fallback_removed_count > 0 or fallback_reminder_count > 0:
+                print(f"[LOG] Fallback removal: removed {fallback_removed_count} main jobs and {fallback_reminder_count} reminder jobs that weren't in activeJobs")
         except Exception as e:
             print(f"[LOG] Failed to enumerate scheduler jobs during fallback unschedule: {str(e)}")
         

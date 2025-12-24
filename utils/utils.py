@@ -165,7 +165,7 @@ def send_confirmation_email(to_email: str, token: str):
         </p>
         <p>Click the button below to verify your email:</p>
         <a
-          href="https://console.appilot.app/verify-email/{token}"
+          href="http://localhost:5173/verify-email/{token}"
           class="cta-button"
           >Activate Account</a
         >
