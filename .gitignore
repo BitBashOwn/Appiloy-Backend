@@ -3,3 +3,4 @@ venv/
 __pycache__/
 scheduler_jobs.db
 scheduler_jobs_backup*.db
+.env

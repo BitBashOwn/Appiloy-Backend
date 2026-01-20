@@ -2905,18 +2905,18 @@ async def _process_send_command_internal(
             if len(follow_weekly_range) != 2:
                 # Only apply method-based defaults if frontend didn't provide a range
                 if method == 1:
-                    follow_weekly_range = (40, 80)
+                    follow_weekly_range = (50, 90)
                     command["followWeeklyRange"] = list(follow_weekly_range)
-                    logger.info("[WEEKLY] Method 1 selected; using default weekly follows range 40-80 (no range provided)")
+                    logger.info("[WEEKLY] Method 1 selected; using default weekly follows range 50-90 (no range provided)")
                 elif method == 6:
                     follow_weekly_range = (70, 140)
                     command["followWeeklyRange"] = list(follow_weekly_range)
                     logger.info("[WEEKLY] Method 6 selected; using default weekly follows range 70-140 (no range provided)")
                 else:
                     # Default fallback for other methods
-                    follow_weekly_range = (40, 80)
+                    follow_weekly_range = (50, 90)
                     command["followWeeklyRange"] = list(follow_weekly_range)
-                    logger.info(f"[WEEKLY] Using default weekly follows range 40-80 (no range provided, method={method})")
+                    logger.info(f"[WEEKLY] Using default weekly follows range 50-90 (no range provided, method={method})")
             else:
                 # Frontend provided a range, use it (convert to integers)
                 try:
@@ -2926,11 +2926,11 @@ async def _process_send_command_internal(
                 except (ValueError, TypeError) as e:
                     logger.warning(f"[WEEKLY] Failed to convert followWeeklyRange to integers: {e}, using method-based default")
                     if method == 1:
-                        follow_weekly_range = (40, 80)
+                        follow_weekly_range = (50, 90)
                     elif method == 6:
                         follow_weekly_range = (70, 140)
                     else:
-                        follow_weekly_range = (40, 80)
+                        follow_weekly_range = (50, 90)
                     command["followWeeklyRange"] = list(follow_weekly_range)
             if test_mode:
                 logger.warning(f"[WEEKLY] ⚠️ TEST MODE ENABLED - Scheduling with 5-minute gaps starting NOW")
