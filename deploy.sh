@@ -8,6 +8,7 @@
 # sudo systemctl restart fastapi.service
 # sudo systemctl reload nginx
 
+#cat /var/www/Appilot/.env
 
 
 cd /var/www/Appilot

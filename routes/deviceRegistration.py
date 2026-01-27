@@ -299,6 +299,87 @@ async def remove_jobs_for_duration(task_id: str, duration_types: Set[str]) -> in
         except Exception:
             pass
     
+    # ✅ CRITICAL FIX: Remove orphaned reminder jobs that aren't tracked in activeJobs
+    # Weekly reminders follow pattern: reminder_weekly_{task_id}_day{N}_{date}_{schedule_id}
+    # These are created when scheduling weekly plans but NOT stored in activeJobs
+    # Uses same two-tier approach as unschedule_jobs for robustness
+    if "WeeklyRandomizedPlan" in duration_types:
+        try:
+            all_jobs = await asyncio.to_thread(scheduler.get_jobs)
+            orphaned_reminders_removed = 0
+            orphaned_main_jobs_removed = 0
+            
+            for job in all_jobs:
+                try:
+                    job_task_id = None
+                    is_reminder_job = False
+                    
+                    # Method 1: Check job ID pattern for weekly jobs (main and reminder)
+                    # Main job pattern: weekly_{task_id}_day{N}_{date}_{schedule_id}
+                    # Reminder pattern: reminder_weekly_{task_id}_day{N}_{date}_{schedule_id}
+                    if job.id.startswith(f"weekly_{task_id}_"):
+                        job_task_id = task_id
+                    elif job.id.startswith(f"reminder_weekly_{task_id}_"):
+                        job_task_id = task_id
+                        is_reminder_job = True
+                    elif job.id.startswith(f"reminder_{task_id}"):
+                        job_task_id = task_id
+                        is_reminder_job = True
+                    
+                    # Method 2: Extract task_id from job args (backwards compatible)
+                    if not job_task_id and job.args:
+                        job_args = list(job.args or [])
+                        if job_args:
+                            # For command jobs: args = [device_ids, command_dict]
+                            # command_dict is typically the last argument
+                            cmd = job_args[-1] if len(job_args) > 0 else None
+                            if isinstance(cmd, dict):
+                                job_task_id = cmd.get("task_id")
+                            # For reminder jobs: args = [task_id, day_name, start_time, ...]
+                            # task_id is the first argument (string)
+                            elif isinstance(job_args[0], str) and job_args[0] == task_id:
+                                job_task_id = task_id
+                                is_reminder_job = True
+                    
+                    # ✅ SAFETY GUARD: Only remove weekly jobs, not other job types
+                    # This prevents accidentally deleting daily/fixed-time jobs or in-flight executions
+                    if job_task_id and job_task_id == task_id:
+                        is_weekly_job = (
+                            job.id.startswith(f"weekly_{task_id}_") or
+                            job.id.startswith(f"reminder_weekly_{task_id}_") or
+                            job.id.startswith(f"reminder_{task_id}")
+                        )
+                        if not is_weekly_job:
+                            # Skip non-weekly jobs even if task_id matches (e.g., daily automation jobs)
+                            continue
+                        
+                        try:
+                            await asyncio.to_thread(scheduler.remove_job, job.id)
+                            
+                            # ✅ CRITICAL: Clear Redis completion marker to prevent ghost reminders
+                            # If reminder ran once, marker prevents re-creation with same ID
+                            try:
+                                completion_marker_key = f"job_completed:{job.id}"
+                                await asyncio.to_thread(redis_client.delete, completion_marker_key)
+                            except Exception:
+                                pass
+                            
+                            if is_reminder_job:
+                                orphaned_reminders_removed += 1
+                            else:
+                                orphaned_main_jobs_removed += 1
+                            logger.info(f"[CLEANUP] Removed orphaned {'reminder' if is_reminder_job else 'main'} job: {job.id}")
+                        except Exception:
+                            pass
+                except Exception:
+                    continue
+            
+            total_removed = orphaned_reminders_removed + orphaned_main_jobs_removed
+            if total_removed > 0:
+                logger.info(f"[CLEANUP] ✅ Removed {orphaned_main_jobs_removed} orphaned main job(s) and {orphaned_reminders_removed} orphaned reminder(s)")
+        except Exception as orphan_err:
+            logger.warning(f"[CLEANUP] Failed to scan for orphaned jobs: {orphan_err}")
+    
     # ✅ FIX: Clear Redis completion markers for removed jobs
     # This prevents duplicate prevention from blocking rescheduled jobs
     if job_ids_to_remove:
