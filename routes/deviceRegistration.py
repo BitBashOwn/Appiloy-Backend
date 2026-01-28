@@ -2955,7 +2955,7 @@ async def _process_send_command_internal(
                 except Exception:
                     off_days_range = None
             no_two_high_rule_raw = command.get("noTwoHighRule")
-            test_mode = bool(command.get("testMode", True))  # Test mode: schedule with 10-min gaps
+            test_mode = bool(command.get("testMode", False))  # Production mode by default
             # Resolve method (prefer command-level, else schedules index 2, else default 1)
             resolved_method = command.get("method")
             try:
