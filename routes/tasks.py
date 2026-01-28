@@ -822,6 +822,49 @@ async def unschedule_jobs(tasks: deleteRequest, current_user: dict = Depends(get
         # For weekly tasks, this removes all 7 scheduled jobs from the scheduler
         from scheduler import scheduler
         
+        # ✅ DIAGNOSTIC: Log all jobs in APScheduler BEFORE deletion
+        task_ids_set = set(tasks.tasks)
+        all_jobs_before = await asyncio.to_thread(scheduler.get_jobs)
+        
+        jobs_found_for_tasks = []
+        reminders_found_for_tasks = []
+        
+        for job in all_jobs_before:
+            for tid in task_ids_set:
+                if job.id.startswith(f"weekly_{tid}_"):
+                    jobs_found_for_tasks.append(job.id)
+                    break
+                elif job.id.startswith(f"reminder_weekly_{tid}_"):
+                    reminders_found_for_tasks.append(job.id)
+                    break
+                elif job.id.startswith(f"reminder_") and tid in job.id:
+                    reminders_found_for_tasks.append(job.id)
+                    break
+            # Also check args
+            if hasattr(job, 'args') and job.args:
+                job_args = list(job.args or [])
+                if job_args:
+                    cmd = job_args[-1] if len(job_args) > 0 else None
+                    if isinstance(cmd, dict) and cmd.get("task_id") in task_ids_set:
+                        if job.id not in jobs_found_for_tasks:
+                            jobs_found_for_tasks.append(job.id)
+                    elif isinstance(job_args[0], str) and job_args[0] in task_ids_set:
+                        if job.id not in reminders_found_for_tasks:
+                            reminders_found_for_tasks.append(job.id)
+        
+        print(f"[REDIS-DIAG] ═══════════════════════════════════════════════════════════")
+        print(f"[REDIS-DIAG] BEFORE DELETION - Jobs found for tasks {list(task_ids_set)}:")
+        print(f"[REDIS-DIAG] Main jobs ({len(jobs_found_for_tasks)}): {jobs_found_for_tasks}")
+        print(f"[REDIS-DIAG] Reminder jobs ({len(reminders_found_for_tasks)}): {reminders_found_for_tasks}")
+        print(f"[REDIS-DIAG] Total APScheduler jobs: {len(all_jobs_before)}")
+        print(f"[REDIS-DIAG] ═══════════════════════════════════════════════════════════")
+        
+        # Track deletion results
+        successfully_deleted_jobs = []
+        failed_to_delete_jobs = []
+        successfully_deleted_reminders = []
+        failed_to_delete_reminders = []
+        
         for task_id in tasks.tasks:
             task = await asyncio.to_thread(
                 tasks_collection.find_one,
@@ -834,23 +877,25 @@ async def unschedule_jobs(tasks: deleteRequest, current_user: dict = Depends(get
                     job_id = job.get("job_id")
                     if job_id:
                         try:
-                            scheduler.remove_job(job_id)
+                            await asyncio.to_thread(scheduler.remove_job, job_id)
+                            successfully_deleted_jobs.append(job_id)
                             print(f"[LOG] ✓ Removed job {job_id} from scheduler")
                         except Exception as e:
-                            print(f"[LOG] Could not remove job {job_id} from scheduler (may have already completed): {str(e)}")
+                            failed_to_delete_jobs.append({"job_id": job_id, "error": str(e)})
+                            print(f"[LOG] Could not remove job {job_id} from scheduler: {str(e)}")
                         # Also try to remove any reminder job tied to this job_id
                         try:
                             reminder_id = f"reminder_{job_id}"
-                            scheduler.remove_job(reminder_id)
+                            await asyncio.to_thread(scheduler.remove_job, reminder_id)
+                            successfully_deleted_reminders.append(reminder_id)
                             print(f"[LOG] ✓ Removed reminder job {reminder_id} from scheduler")
                         except Exception as e:
+                            failed_to_delete_reminders.append({"job_id": reminder_id, "error": str(e)})
                             print(f"[LOG] Could not remove reminder job {reminder_id}: {str(e)}")
         
         # Fallback: Remove any APScheduler jobs that reference these task IDs, even if not in activeJobs
-        # This handles cases where activeJobs is empty/stale but scheduler still has jobs registered
-        task_ids_set = set(tasks.tasks)
         try:
-            all_scheduler_jobs = scheduler.get_jobs()
+            all_scheduler_jobs = await asyncio.to_thread(scheduler.get_jobs)
             fallback_removed_count = 0
             fallback_reminder_count = 0
             
@@ -859,9 +904,6 @@ async def unschedule_jobs(tasks: deleteRequest, current_user: dict = Depends(get
                     job_task_id = None
                     is_reminder_job = False
                     
-                    # Method 1: Check job ID pattern for weekly jobs (main and reminder)
-                    # Main job pattern: weekly_{task_id}_day{N}_{date}_{schedule_id}
-                    # Reminder pattern: reminder_weekly_{task_id}_day{N}_{date}_{schedule_id}
                     for tid in task_ids_set:
                         if job.id.startswith(f"weekly_{tid}_"):
                             job_task_id = tid
@@ -871,51 +913,97 @@ async def unschedule_jobs(tasks: deleteRequest, current_user: dict = Depends(get
                             is_reminder_job = True
                             break
                     
-                    # Method 2: Extract task_id from job args (backwards compatible)
                     if not job_task_id:
                         job_args = list(job.args or [])
                         if job_args:
-                            # For command jobs: args = [device_ids, command_dict]
-                            # command_dict is typically the last argument
                             cmd = job_args[-1] if len(job_args) > 0 else None
                             if isinstance(cmd, dict):
                                 job_task_id = cmd.get("task_id")
-                            # For reminder jobs: args = [task_id, day_name, start_time, ...]
-                            # task_id is the first argument (string)
                             elif isinstance(job_args[0], str) and job_args[0] in task_ids_set:
                                 job_task_id = job_args[0]
                                 is_reminder_job = True
                     
                     if job_task_id and job_task_id in task_ids_set:
                         try:
-                            scheduler.remove_job(job.id)
+                            await asyncio.to_thread(scheduler.remove_job, job.id)
                             if is_reminder_job:
                                 fallback_reminder_count += 1
+                                successfully_deleted_reminders.append(job.id)
                                 print(f"[LOG] ✓ Fallback removed orphaned reminder job {job.id} (task {job_task_id})")
                             else:
                                 fallback_removed_count += 1
+                                successfully_deleted_jobs.append(job.id)
                                 print(f"[LOG] ✓ Fallback removed job {job.id} (task {job_task_id}) from scheduler")
                         except Exception as e:
+                            if is_reminder_job:
+                                failed_to_delete_reminders.append({"job_id": job.id, "error": str(e)})
+                            else:
+                                failed_to_delete_jobs.append({"job_id": job.id, "error": str(e)})
                             print(f"[LOG] Fallback could not remove job {job.id}: {str(e)}")
                         
-                        # For main jobs, also try to remove associated reminder job
                         if not is_reminder_job:
                             try:
                                 reminder_id = f"reminder_{job.id}"
-                                scheduler.remove_job(reminder_id)
+                                await asyncio.to_thread(scheduler.remove_job, reminder_id)
                                 fallback_reminder_count += 1
+                                successfully_deleted_reminders.append(reminder_id)
                                 print(f"[LOG] ✓ Fallback removed reminder job {reminder_id}")
                             except Exception as e:
-                                # Reminder might not exist, which is fine
                                 pass
                 except Exception as e:
-                    # Skip jobs that can't be inspected (e.g., wrong arg structure)
                     continue
             
             if fallback_removed_count > 0 or fallback_reminder_count > 0:
-                print(f"[LOG] Fallback removal: removed {fallback_removed_count} main jobs and {fallback_reminder_count} reminder jobs that weren't in activeJobs")
+                print(f"[LOG] Fallback removal: removed {fallback_removed_count} main jobs and {fallback_reminder_count} reminder jobs")
         except Exception as e:
             print(f"[LOG] Failed to enumerate scheduler jobs during fallback unschedule: {str(e)}")
+        
+        # ✅ DIAGNOSTIC: Log all jobs in APScheduler AFTER deletion to confirm
+        all_jobs_after = await asyncio.to_thread(scheduler.get_jobs)
+        
+        jobs_remaining_for_tasks = []
+        reminders_remaining_for_tasks = []
+        
+        for job in all_jobs_after:
+            for tid in task_ids_set:
+                if job.id.startswith(f"weekly_{tid}_"):
+                    jobs_remaining_for_tasks.append(job.id)
+                    break
+                elif job.id.startswith(f"reminder_weekly_{tid}_"):
+                    reminders_remaining_for_tasks.append(job.id)
+                    break
+                elif job.id.startswith(f"reminder_") and tid in job.id:
+                    reminders_remaining_for_tasks.append(job.id)
+                    break
+            if hasattr(job, 'args') and job.args:
+                job_args = list(job.args or [])
+                if job_args:
+                    cmd = job_args[-1] if len(job_args) > 0 else None
+                    if isinstance(cmd, dict) and cmd.get("task_id") in task_ids_set:
+                        if job.id not in jobs_remaining_for_tasks:
+                            jobs_remaining_for_tasks.append(job.id)
+                    elif isinstance(job_args[0], str) and job_args[0] in task_ids_set:
+                        if job.id not in reminders_remaining_for_tasks:
+                            reminders_remaining_for_tasks.append(job.id)
+        
+        print(f"[REDIS-DIAG] ═══════════════════════════════════════════════════════════")
+        print(f"[REDIS-DIAG] AFTER DELETION - Verification for tasks {list(task_ids_set)}:")
+        print(f"[REDIS-DIAG] Main jobs remaining ({len(jobs_remaining_for_tasks)}): {jobs_remaining_for_tasks}")
+        print(f"[REDIS-DIAG] Reminder jobs remaining ({len(reminders_remaining_for_tasks)}): {reminders_remaining_for_tasks}")
+        print(f"[REDIS-DIAG] Total APScheduler jobs: {len(all_jobs_after)}")
+        print(f"[REDIS-DIAG] ───────────────────────────────────────────────────────────")
+        print(f"[REDIS-DIAG] DELETION SUMMARY:")
+        print(f"[REDIS-DIAG] ✅ Successfully deleted main jobs ({len(successfully_deleted_jobs)}): {successfully_deleted_jobs}")
+        print(f"[REDIS-DIAG] ✅ Successfully deleted reminders ({len(successfully_deleted_reminders)}): {successfully_deleted_reminders}")
+        print(f"[REDIS-DIAG] ❌ Failed to delete jobs ({len(failed_to_delete_jobs)}): {failed_to_delete_jobs}")
+        print(f"[REDIS-DIAG] ❌ Failed to delete reminders ({len(failed_to_delete_reminders)}): {failed_to_delete_reminders}")
+        
+        # ✅ CRITICAL CHECK: Are there still reminders remaining?
+        if reminders_remaining_for_tasks:
+            print(f"[REDIS-DIAG] ⚠️ WARNING: {len(reminders_remaining_for_tasks)} REMINDER(S) STILL IN REDIS! Unschedule FAILED to remove them!")
+        else:
+            print(f"[REDIS-DIAG] ✅ SUCCESS: All reminders for these tasks have been removed from Redis!")
+        print(f"[REDIS-DIAG] ═══════════════════════════════════════════════════════════")
         
         # Now update database to clear activeJobs and reset status
         result = await asyncio.to_thread(

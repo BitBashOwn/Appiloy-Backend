@@ -2955,7 +2955,7 @@ async def _process_send_command_internal(
                 except Exception:
                     off_days_range = None
             no_two_high_rule_raw = command.get("noTwoHighRule")
-            test_mode = bool(command.get("testMode", False))  # Test mode: schedule with 10-min gaps
+            test_mode = bool(command.get("testMode", True))  # Test mode: schedule with 10-min gaps
             # Resolve method (prefer command-level, else schedules index 2, else default 1)
             resolved_method = command.get("method")
             try:
@@ -4730,33 +4730,37 @@ async def _process_send_command_internal(
                         reminder_job_id = f"reminder_{job_id}"
                         schedule_lines_payload = daily_schedule_lines or [f"Device target: {target_count} {get_method_unit(day_method)}"]
                         
-                        # Send first day reminder immediately when weekly plan is created (async to avoid blocking)
-                        if not first_job_scheduled:
+                        # TEST MODE: Schedule reminders with 30-second delays (0s, 30s, 60s, 90s, etc.)
+                        if test_mode:
                             try:
-                                # Call async version directly since we're in an async context
-                                asyncio.create_task(
-                                    _send_weekly_reminder_async(
-                                        task_id,
-                                        actual_day_name,
-                                        start_time_local.strftime('%Y-%m-%d %H:%M'),
-                                        schedule_lines_payload,
-                                        time_zone,
-                                        False,
-                                        "Immediate (First Day Schedule)",
-                                    )
+                                # Calculate delay: day_index * 30 seconds
+                                reminder_delay_seconds = day_index * 30
+                                reminder_time_utc = datetime.now(pytz.UTC) + timedelta(seconds=reminder_delay_seconds)
+                                
+                                # Schedule reminder with calculated delay
+                                reminder_command = {
+                                    "reminder_type": "weekly_schedule",
+                                    "task_id": task_id,
+                                    "day_name": actual_day_name,
+                                    "start_time": start_time_local.strftime('%Y-%m-%d %H:%M'),
+                                    "schedule_lines": schedule_lines_payload,
+                                    "time_zone": time_zone,
+                                }
+                                await schedule_or_queue_job(
+                                    job_id=reminder_job_id,
+                                    trigger_time_utc=reminder_time_utc,
+                                    device_ids=[],
+                                    command=reminder_command,
+                                    job_name=f"Reminder for day {day_index} of task {task_id}",
+                                    job_type="weekly_reminder"
                                 )
-                                logger.info(f"[WEEKLY] ⏰ Queued immediate daily schedule reminder for first day (Day {day_index})")
+                                logger.info(f"[WEEKLY] ⏰ TEST MODE: Scheduled daily schedule reminder for Day {day_index}: +{reminder_delay_seconds}s from now")
                             except Exception as reminder_err:
-                                logger.warning(f"[WEEKLY] Could not queue immediate first day reminder: {reminder_err}")
-                            # Set flag immediately since reminder is queued (not waiting for completion)
-                            first_job_scheduled = True
+                                logger.warning(f"[WEEKLY] Could not schedule test mode reminder: {reminder_err}")
+                        # PRODUCTION MODE: Normal reminder logic (immediate for first day, 5h before for others)
                         else:
-                            # For other days, send reminder 5 hours before start, or immediately if less than 5 hours away
-                            reminder_time_utc = start_time_utc - timedelta(hours=5)
-                            now_utc = datetime.now(pytz.UTC)
-                            
-                            # If 5 hours before is in the past (less than 5 hours away), send immediately (async to avoid blocking)
-                            if reminder_time_utc <= now_utc:
+                            # Send first day reminder immediately when weekly plan is created (async to avoid blocking)
+                            if not first_job_scheduled:
                                 try:
                                     # Call async version directly since we're in an async context
                                     asyncio.create_task(
@@ -4767,35 +4771,60 @@ async def _process_send_command_internal(
                                             schedule_lines_payload,
                                             time_zone,
                                             False,
-                                            "Immediate (Less than 5 hours away)",
+                                            "Immediate (First Day Schedule)",
                                         )
                                     )
-                                    logger.info(f"[WEEKLY] ⏰ Queued immediate daily schedule reminder for Day {day_index} (less than 5 hours away)")
+                                    logger.info(f"[WEEKLY] ⏰ Queued immediate daily schedule reminder for first day (Day {day_index})")
                                 except Exception as reminder_err:
-                                    logger.warning(f"[WEEKLY] Could not queue immediate reminder: {reminder_err}")
+                                    logger.warning(f"[WEEKLY] Could not queue immediate first day reminder: {reminder_err}")
+                                # Set flag immediately since reminder is queued (not waiting for completion)
+                                first_job_scheduled = True
                             else:
-                                # Schedule for 5 hours before start
-                                try:
-                                    # Use helper function to schedule or queue reminder
-                                    reminder_command = {
-                                        "reminder_type": "weekly_schedule",
-                                        "task_id": task_id,
-                                        "day_name": actual_day_name,
-                                        "start_time": start_time_local.strftime('%Y-%m-%d %H:%M'),
-                                        "schedule_lines": schedule_lines_payload,
-                                        "time_zone": time_zone,
-                                    }
-                                    await schedule_or_queue_job(
-                                        job_id=reminder_job_id,
-                                        trigger_time_utc=reminder_time_utc,
-                                        device_ids=[],
-                                        command=reminder_command,
-                                        job_name=f"Reminder for day {day_index} of task {task_id}",
-                                        job_type="weekly_reminder"
-                                    )
-                                    logger.info(f"[WEEKLY] ⏰ Scheduled daily schedule reminder for Day {day_index}: 5 hours before start")
-                                except Exception as reminder_err:
-                                    logger.warning(f"[WEEKLY] Could not schedule reminder: {reminder_err}")
+                                # For other days, send reminder 5 hours before start, or immediately if less than 5 hours away
+                                reminder_time_utc = start_time_utc - timedelta(hours=5)
+                                now_utc = datetime.now(pytz.UTC)
+                                
+                                # If 5 hours before is in the past (less than 5 hours away), send immediately (async to avoid blocking)
+                                if reminder_time_utc <= now_utc:
+                                    try:
+                                        # Call async version directly since we're in an async context
+                                        asyncio.create_task(
+                                            _send_weekly_reminder_async(
+                                                task_id,
+                                                actual_day_name,
+                                                start_time_local.strftime('%Y-%m-%d %H:%M'),
+                                                schedule_lines_payload,
+                                                time_zone,
+                                                False,
+                                                "Immediate (Less than 5 hours away)",
+                                            )
+                                        )
+                                        logger.info(f"[WEEKLY] ⏰ Queued immediate daily schedule reminder for Day {day_index} (less than 5 hours away)")
+                                    except Exception as reminder_err:
+                                        logger.warning(f"[WEEKLY] Could not queue immediate reminder: {reminder_err}")
+                                else:
+                                    # Schedule for 5 hours before start
+                                    try:
+                                        # Use helper function to schedule or queue reminder
+                                        reminder_command = {
+                                            "reminder_type": "weekly_schedule",
+                                            "task_id": task_id,
+                                            "day_name": actual_day_name,
+                                            "start_time": start_time_local.strftime('%Y-%m-%d %H:%M'),
+                                            "schedule_lines": schedule_lines_payload,
+                                            "time_zone": time_zone,
+                                        }
+                                        await schedule_or_queue_job(
+                                            job_id=reminder_job_id,
+                                            trigger_time_utc=reminder_time_utc,
+                                            device_ids=[],
+                                            command=reminder_command,
+                                            job_name=f"Reminder for day {day_index} of task {task_id}",
+                                            job_type="weekly_reminder"
+                                        )
+                                        logger.info(f"[WEEKLY] ⏰ Scheduled daily schedule reminder for Day {day_index}: 5 hours before start")
+                                    except Exception as reminder_err:
+                                        logger.warning(f"[WEEKLY] Could not schedule reminder: {reminder_err}")
                     except Exception as e:
                         # Cleanup previously scheduled jobs if failure
                         for jid in scheduled_job_ids:
